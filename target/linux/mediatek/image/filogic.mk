@@ -722,6 +722,55 @@ define Device/bananapi_bpi-r4-poe
 endef
 TARGET_DEVICES += bananapi_bpi-r4-poe
 
+define Device/bananapi_bpi-r4-pro-common
+  DEVICE_VENDOR := Bananapi
+  DEVICE_DTS_DIR := $(DTS_DIR)/
+  DEVICE_DTS_LOADADDR := 0x45f00000
+  DEVICE_DTC_FLAGS := --pad 4096
+  KERNEL_LOADADDR := 0x46000000
+  KERNEL := kernel-bin | gzip
+  KERNEL_INITRAMFS := kernel-bin | lzma | \
+	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k
+  KERNEL_INITRAMFS_SUFFIX := -recovery.itb
+endef
+
+define Device/bananapi_bpi-r4-pro-8x
+  DEVICE_MODEL := BPi-R4 Pro 8X
+  DEVICE_DTS := mt7988a-bananapi-bpi-r4-pro-8x
+  DEVICE_DTS_CONFIG := config-mt7988a-bananapi-bpi-r4-pro-8x
+  DEVICE_DTS_OVERLAY := mt7988a-bananapi-bpi-r4-pro-emmc mt7988a-bananapi-bpi-r4-pro-sd
+  $(call Device/bananapi_bpi-r4-pro-common)
+  DEVICE_PACKAGES :=
+  IMAGES := sysupgrade.itb
+  ARTIFACTS := \
+	       emmc-gpt.bin emmc-preloader.bin emmc-bl31-uboot.fip \
+	       sdcard.img.gz \
+	       snand-preloader.bin snand-bl31-uboot.fip
+  ARTIFACT/emmc-gpt.bin := mt798x-gpt emmc
+  ARTIFACT/emmc-preloader.bin := mt7988-bl2 emmc-comb-4bg
+  ARTIFACT/emmc-bl31-uboot.fip := mt7988-bl31-uboot $$(DEVICE_NAME)-emmc
+  ARTIFACT/snand-preloader.bin := mt7988-bl2 spim-nand-ubi-comb-4bg
+  ARTIFACT/snand-bl31-uboot.fip := mt7988-bl31-uboot $$(DEVICE_NAME)-snand
+  ARTIFACT/sdcard.img.gz := mt798x-gpt sdmmc |\
+				   pad-to 17k | mt7988-bl2 sdmmc-comb-4bg |\
+				   pad-to 6656k | mt7988-bl31-uboot $$(DEVICE_NAME)-sdmmc |\
+				$(if $(CONFIG_TARGET_ROOTFS_INITRAMFS),\
+				   pad-to 12M | append-image-stage initramfs-recovery.itb | check-size 44m |\
+				) \
+				   pad-to 44M | mt7988-bl2 spim-nand-ubi-comb-4bg |\
+				   pad-to 45M | mt7988-bl31-uboot $$(DEVICE_NAME)-snand |\
+				   pad-to 51M | mt7988-bl2 emmc-comb-4bg |\
+				   pad-to 52M | mt7988-bl31-uboot $$(DEVICE_NAME)-emmc |\
+				   pad-to 56M | mt798x-gpt emmc |\
+				$(if $(CONFIG_TARGET_ROOTFS_SQUASHFS),\
+				   pad-to 64M | append-image squashfs-sysupgrade.itb | check-size |\
+				) \
+				  gzip
+  IMAGE_SIZE := $$(shell expr 64 + $$(CONFIG_TARGET_ROOTFS_PARTSIZE))m
+  IMAGE/sysupgrade.itb := append-kernel | fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-with-rootfs | pad-rootfs | append-metadata
+endef
+TARGET_DEVICES += bananapi_bpi-r4-pro-8x
+
 define Device/bananapi_bpi-r4-lite
   DEVICE_VENDOR := Bananapi
   DEVICE_MODEL := BPi-R4 Lite
