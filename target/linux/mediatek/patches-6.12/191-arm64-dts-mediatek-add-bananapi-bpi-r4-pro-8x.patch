@@ -13,9 +13,9 @@ later migration steps.
  arch/arm64/boot/dts/mediatek/Makefile         |   4 +
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-8x.dts  |  16 +
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-emmc.dtso |  33 +
- .../mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso |  31 +
+ .../mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso |  55 ++
  .../mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi | 534 ++++++++++++++++++
- 5 files changed, 618 insertions(+)
+ 5 files changed, 642 insertions(+)
 
 --- a/arch/arm64/boot/dts/mediatek/Makefile
 +++ b/arch/arm64/boot/dts/mediatek/Makefile
@@ -630,7 +630,7 @@ later migration steps.
 +
 --- /dev/null
 +++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,55 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR MIT)
 +/*
 + * Copyright (C) 2023 MediaTek Inc.
@@ -660,5 +660,29 @@ later migration steps.
 +	#address-cells = <1>;
 +	#size-cells = <0>;
 +	status = "okay";
++
++	card@0 {
++		compatible = "mmc-card";
++		reg = <0>;
++
++		partitions {
++			compatible = "gpt-partitions";
++
++			block-partition-env {
++				partname = "ubootenv";
++				nvmem-layout {
++					compatible = "u-boot,env-layout";
++				};
++			};
++
++			sd_rootfs: block-partition-production {
++				partname = "production";
++			};
++		};
++	};
++};
++
++&{/chosen} {
++	rootdisk-sd = <&sd_rootfs>;
 +};
 +

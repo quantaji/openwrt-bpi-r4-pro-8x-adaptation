@@ -685,9 +685,31 @@
 +bootcmd=echo M01 compile skeleton only: boot validation deferred
 --- /dev/null
 +++ b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,24 @@
 +bootdelay=3
-+bootcmd=echo M01 compile skeleton only: boot validation deferred
++bootmenu_default=0
++bootmenu_delay=3
++bootmenu_title=      OpenWrt [SD card]
++bootmenu_0=Run default boot command.=run bootcmd
++bootmenu_1=Boot production system from SD card.=run boot_production
++bootmenu_2=Boot recovery system from SD card.=run boot_recovery
++loadaddr=0x50000000
++bootargs=console=ttyS0,115200n1 pci=pcie_bus_perf root=/dev/fit0 rootwait
++bootcmd=if pstore check ; then run boot_recovery ; else run boot_sdmmc ; fi
++bootconf=config-mt7988a-bananapi-bpi-r4-pro-8x
++bootconf_emmc=mt7988a-bananapi-bpi-r4-pro-emmc
++bootconf_sd=mt7988a-bananapi-bpi-r4-pro-sd
++bootconf_extra=
++bootled_pwr=green:status
++bootled_rec=blue:status
++boot_production=led $bootled_pwr on ; run sdmmc_read_production && bootm $loadaddr#$bootconf#$bootconf_sd#$bootconf_extra ; led $bootled_pwr off
++boot_recovery=led $bootled_rec on ; run sdmmc_read_recovery && bootm $loadaddr#$bootconf#$bootconf_emmc#$bootconf_extra ; led $bootled_rec off
++boot_sdmmc=run boot_production ; run boot_recovery
++mmc_read_vol=mmc read $loadaddr $part_addr 0x100 && imszb $loadaddr image_size && test 0x$image_size -le 0x$part_size && mmc read $loadaddr 0x$part_addr 0x$image_size && setexpr filesize $image_size * 0x200
++part_default=production
++part_recovery=recovery
++sdmmc_read_production=part start mmc 0 $part_default part_addr && part size mmc 0 $part_default part_size && run mmc_read_vol
++sdmmc_read_recovery=part start mmc 0 $part_recovery part_addr && part size mmc 0 $part_recovery part_size && run mmc_read_vol
 --- /dev/null
 +++ b/defenvs/bananapi_bpi-r4-pro-8x_snand_env
 @@ -0,0 +1,2 @@
