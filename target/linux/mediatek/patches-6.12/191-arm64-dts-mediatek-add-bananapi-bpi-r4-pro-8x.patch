@@ -14,8 +14,8 @@ later migration steps.
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-8x.dts  |  16 +
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-emmc.dtso |  33 +
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso |  55 ++
- .../mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi | 534 ++++++++++++++++++
- 5 files changed, 642 insertions(+)
+ .../mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi | 557 ++++++++++++++++++
+ 5 files changed, 665 insertions(+)
 
 --- a/arch/arm64/boot/dts/mediatek/Makefile
 +++ b/arch/arm64/boot/dts/mediatek/Makefile
@@ -38,7 +38,7 @@ later migration steps.
  DTC_FLAGS_mt8395-radxa-nio-12l := -@
 --- /dev/null
 +++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,557 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR MIT)
 +/*
 + * Copyright (C) 2025 MediaTek Inc.
@@ -365,7 +365,7 @@ later migration steps.
 +				#gpio-cells = <2>;
 +			};
 +
-+			rtc@51 {
++			pcf8563: rtc@51 {
 +				compatible = "nxp,pcf8563";
 +				reg = <0x51>;
 +			};
@@ -536,9 +536,32 @@ later migration steps.
 +			label = "bl2";
 +		};
 +
-+		partition@200000 {
++		factory: partition@200000 {
++			reg = <0x200000 0x400000>;
++			label = "Factory";
++
++			nvmem-layout {
++				compatible = "fixed-layout";
++				#address-cells = <1>;
++				#size-cells = <1>;
++
++				gmac2_mac: eeprom@fffee {
++					reg = <0xfffee 0x6>;
++				};
++
++				gmac1_mac: eeprom@ffffa {
++					reg = <0xffffa 0x6>;
++				};
++
++				gmac0_mac: eeprom@ffff4 {
++					reg = <0xffff4 0x6>;
++				};
++			};
++		};
++
++		partition@600000 {
 +			compatible = "linux,ubi";
-+			reg = <0x200000 0xfe00000>;
++			reg = <0x600000 0xfa00000>;
 +			label = "ubi";
 +		};
 +	};

@@ -762,7 +762,9 @@ define Device/bananapi_bpi-r4-pro-8x
   DEVICE_DTS_CONFIG := config-mt7988a-bananapi-bpi-r4-pro-8x
   DEVICE_DTS_OVERLAY := mt7988a-bananapi-bpi-r4-pro-emmc mt7988a-bananapi-bpi-r4-pro-sd
   $(call Device/bananapi_bpi-r4-pro-common)
-  DEVICE_PACKAGES := e2fsprogs f2fsck mkf2fs
+  DEVICE_PACKAGES := kmod-i2c-mux-pca954x kmod-gpio-pca953x \
+		     kmod-eeprom-at24 kmod-rtc-pcf8563 \
+		     e2fsprogs f2fsck mkf2fs
   IMAGES := sysupgrade.itb
   ARTIFACTS := \
 	       emmc-gpt.bin emmc-preloader.bin emmc-bl31-uboot.fip \
