@@ -93,6 +93,9 @@ mediatek_setup_interfaces()
 	bananapi,bpi-r3)
 		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4 sfp2" "sfp1 wan"
 		;;
+	bananapi,bpi-r4-pro-8x)
+		ucidef_set_interface_lan "lan5 fpc"
+		;;
 	bananapi,bpi-r4)
 		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 sfp-lan" "wan sfp-wan"
 		;;
@@ -244,6 +247,58 @@ mediatek_fwenv_get_mac()
 	mediatek_macaddr_valid_unicast "$mac"
 }
 
+mediatek_fwenv_get_value()
+{
+	fw_printenv -n "$1" 2>/dev/null
+}
+
+mediatek_bpi_r4_pro_8x_fwenv_value_contains()
+{
+	local name="$1"
+	local needle="$2"
+	local value
+
+	value=$(mediatek_fwenv_get_value "$name") || return 1
+	case "$value" in
+	*"$needle"*) return 0 ;;
+	esac
+
+	return 1
+}
+
+mediatek_bpi_r4_pro_8x_fwenv_usable()
+{
+	local bootcmd
+
+	[ -s /etc/fw_env.config ] || return 1
+	command -v fw_printenv >/dev/null 2>&1 || return 1
+	fw_printenv >/dev/null 2>&1 || return 1
+
+	bootcmd=$(mediatek_fwenv_get_value bootcmd) || return 1
+	case "$bootcmd" in
+	*boot_recovery*boot_sdmmc*|*boot_sdmmc*boot_recovery*) ;;
+	*) return 1 ;;
+	esac
+
+	[ "$(mediatek_fwenv_get_value bootconf)" = "config-mt7988a-bananapi-bpi-r4-pro-8x" ] || return 1
+	[ "$(mediatek_fwenv_get_value bootconf_sd)" = "mt7988a-bananapi-bpi-r4-pro-sd" ] || return 1
+	[ "$(mediatek_fwenv_get_value bootconf_emmc)" = "mt7988a-bananapi-bpi-r4-pro-emmc" ] || return 1
+	[ "$(mediatek_fwenv_get_value part_default)" = "production" ] || return 1
+	[ "$(mediatek_fwenv_get_value part_recovery)" = "recovery" ] || return 1
+
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains bootmenu_0 "run boot_default" || return 1
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains boot_default "run bootcmd" || return 1
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains boot_default "run boot_recovery" || return 1
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains bootmenu_1 "run boot_production" || return 1
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains bootmenu_2 "run boot_recovery" || return 1
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains boot_production "sdmmc_read_production" || return 1
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains boot_production "bootconf_sd" || return 1
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains boot_recovery "sdmmc_read_recovery" || return 1
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains boot_recovery "bootconf_emmc" || return 1
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains boot_sdmmc "boot_production" || return 1
+	mediatek_bpi_r4_pro_8x_fwenv_value_contains boot_sdmmc "boot_recovery" || return 1
+}
+
 mediatek_bpi_r4_pro_8x_triplet_valid()
 {
 	local gmac0 gmac1 gmac2
@@ -272,6 +327,7 @@ mediatek_bpi_r4_pro_8x_env_macs()
 {
 	local gmac0 gmac1 gmac2
 
+	mediatek_bpi_r4_pro_8x_fwenv_usable || return 1
 	gmac0=$(mediatek_fwenv_get_mac ethaddr) || return 1
 	gmac1=$(mediatek_fwenv_get_mac eth1addr)
 	gmac2=$(mediatek_fwenv_get_mac eth2addr)
@@ -358,7 +414,10 @@ mediatek_setup_macs()
 			fi
 		fi
 
-		# M04.01 only records board identity; M05 owns LAN/WAN port policy.
+		lan_mac=$label_mac
+
+		# M04 only configures the built-in 1G LAN ports. M05 owns
+		# MxL switch ports, SFP/RJ45 combo ports, and WAN policy.
 		;;
 	h3c,magic-nx30-pro)
 		wan_mac=$(mtd_get_mac_ascii pdt_data_1 ethaddr)

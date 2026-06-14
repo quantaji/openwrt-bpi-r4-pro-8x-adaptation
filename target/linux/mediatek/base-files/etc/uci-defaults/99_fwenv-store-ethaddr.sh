@@ -61,7 +61,9 @@ fwenv_bpi8x_boot_env_complete()
 	[ "$(fwenv_get_env part_default)" = "production" ] || return 1
 	[ "$(fwenv_get_env part_recovery)" = "recovery" ] || return 1
 
-	fwenv_env_contains bootmenu_0 "run bootcmd" || return 1
+	fwenv_env_contains bootmenu_0 "run boot_default" || return 1
+	fwenv_env_contains boot_default "run bootcmd" || return 1
+	fwenv_env_contains boot_default "run boot_recovery" || return 1
 	fwenv_env_contains bootmenu_1 "run boot_production" || return 1
 	fwenv_env_contains bootmenu_2 "run boot_recovery" || return 1
 	fwenv_env_contains boot_production "sdmmc_read_production" || return 1

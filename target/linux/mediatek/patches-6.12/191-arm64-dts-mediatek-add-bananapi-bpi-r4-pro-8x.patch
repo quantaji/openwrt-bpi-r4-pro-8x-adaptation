@@ -248,10 +248,14 @@ later migration steps.
 +};
 +
 +&gsw_port0 {
-+	label = "mgmt";
++	label = "lan5";
 +};
 +
-+/* R4Pro has only port 0 connected, so disable the others */
++/*
++ * 8X uses MT7988 GSW port 0 as ETH5 1G RJ45 LAN and
++ * GSW port 3 as ETH8 1G FPC LAN. Ports 1 and 2 are not
++ * connected as 8X LAN ports.
++ */
 +&gsw_phy1 {
 +	status = "disabled";
 +};
@@ -268,12 +272,8 @@ later migration steps.
 +	status = "disabled";
 +};
 +
-+&gsw_phy3 {
-+	status = "disabled";
-+};
-+
 +&gsw_port3 {
-+	status = "disabled";
++	label = "fpc";
 +};
 +
 +&i2c0 {

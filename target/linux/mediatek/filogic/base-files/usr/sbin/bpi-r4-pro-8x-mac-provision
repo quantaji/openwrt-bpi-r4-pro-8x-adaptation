@@ -255,6 +255,7 @@ bpi8x_fwenv_is_readable()
 	[ -s /etc/fw_env.config ] || return 1
 	command -v fw_printenv >/dev/null 2>&1 || return 1
 	fw_printenv >/dev/null 2>&1
+	[ $? -eq 0 ] || return 1
 }
 
 bpi8x_fwenv_get()
@@ -292,7 +293,9 @@ bpi8x_boot_env_is_complete()
 	[ "$(bpi8x_fwenv_get part_default)" = "production" ] || return 1
 	[ "$(bpi8x_fwenv_get part_recovery)" = "recovery" ] || return 1
 
-	bpi8x_fwenv_value_contains bootmenu_0 "run bootcmd" || return 1
+	bpi8x_fwenv_value_contains bootmenu_0 "run boot_default" || return 1
+	bpi8x_fwenv_value_contains boot_default "run bootcmd" || return 1
+	bpi8x_fwenv_value_contains boot_default "run boot_recovery" || return 1
 	bpi8x_fwenv_value_contains bootmenu_1 "run boot_production" || return 1
 	bpi8x_fwenv_value_contains bootmenu_2 "run boot_recovery" || return 1
 	bpi8x_fwenv_value_contains boot_production "sdmmc_read_production" || return 1

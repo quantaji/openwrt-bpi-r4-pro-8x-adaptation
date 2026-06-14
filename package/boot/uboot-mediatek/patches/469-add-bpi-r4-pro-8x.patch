@@ -680,19 +680,51 @@
 +CONFIG_HEXDUMP=y
 --- /dev/null
 +++ b/defenvs/bananapi_bpi-r4-pro-8x_emmc_env
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,39 @@
++ipaddr=192.168.1.1
++serverip=192.168.1.2
++loadaddr=0x50000000
++bootargs=console=ttyS0,115200n1 pci=pcie_bus_perf root=/dev/fit0 rootwait
++bootcmd=if pstore check ; then run boot_recovery ; else run boot_emmc ; fi
++bootconf=config-mt7988a-bananapi-bpi-r4-pro-8x
++bootconf_emmc=mt7988a-bananapi-bpi-r4-pro-emmc
++bootconf_sd=mt7988a-bananapi-bpi-r4-pro-sd
++bootconf_extra=
 +bootdelay=3
-+bootcmd=echo M01 compile skeleton only: boot validation deferred
---- /dev/null
-+++ b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
-@@ -0,0 +1,24 @@
-+bootdelay=3
++bootfile=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-initramfs-recovery.itb
++bootfile_upg=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-squashfs-sysupgrade.itb
++bootled_pwr=green:status
++bootled_rec=blue:status
++bootmenu_confirm_return=askenv - Press ENTER to return to menu ; bootmenu 60
 +bootmenu_default=0
 +bootmenu_delay=3
-+bootmenu_title=      OpenWrt [SD card]
-+bootmenu_0=Run default boot command.=run bootcmd
-+bootmenu_1=Boot production system from SD card.=run boot_production
-+bootmenu_2=Boot recovery system from SD card.=run boot_recovery
++bootmenu_title=      OpenWrt [eMMC]
++bootmenu_0=Initialize environment.=run _firstboot
++bootmenu_0d=Run default boot command.=run boot_default
++bootmenu_1=Boot production system from eMMC.=run boot_production ; run bootmenu_confirm_return
++bootmenu_2=Boot recovery system from eMMC.=run boot_recovery ; run bootmenu_confirm_return
++bootmenu_3=Reboot.=reset
++bootmenu_4=Reset all settings to factory defaults.=run reset_factory ; reset
++boot_first=if button reset ; then led $bootled_rec on ; run boot_recovery ; setenv flag_recover 1 ; run boot_default ; fi ; bootmenu
++boot_default=if env exists flag_recover ; then run boot_recovery ; else run bootcmd ; fi
++boot_production=led $bootled_pwr on ; run emmc_read_production && bootm $loadaddr#$bootconf#$bootconf_emmc#$bootconf_extra ; led $bootled_pwr off
++boot_recovery=led $bootled_rec on ; run emmc_read_recovery && bootm $loadaddr#$bootconf#$bootconf_emmc#$bootconf_extra ; led $bootled_rec off
++boot_emmc=run boot_production ; run boot_recovery
++mmc_read_vol=mmc read $loadaddr $part_addr 0x100 && imszb $loadaddr image_size && test 0x$image_size -le 0x$part_size && mmc read $loadaddr 0x$part_addr 0x$image_size && setexpr filesize $image_size * 0x200
++part_default=production
++part_recovery=recovery
++reset_factory=eraseenv && reset
++emmc_read_production=part start mmc 0 $part_default part_addr && part size mmc 0 $part_default part_size && run mmc_read_vol
++emmc_read_recovery=part start mmc 0 $part_recovery part_addr && part size mmc 0 $part_recovery part_size && run mmc_read_vol
++_init_env=setenv _init_env ; setenv _create_env ; saveenv ; saveenv
++_firstboot=setenv _firstboot ; run _switch_to_menu ; run _init_env ; run boot_first
++_switch_to_menu=setenv _switch_to_menu ; setenv bootdelay 3 ; setenv bootmenu_delay 3 ; setenv bootmenu_0 $bootmenu_0d ; setenv bootmenu_0d ; run _bootmenu_update_title
++_bootmenu_update_title=setenv _bootmenu_update_title ; setenv bootmenu_title "$bootmenu_title       $ver"
+--- /dev/null
++++ b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
+@@ -0,0 +1,39 @@
++ipaddr=192.168.1.1
++serverip=192.168.1.2
 +loadaddr=0x50000000
 +bootargs=console=ttyS0,115200n1 pci=pcie_bus_perf root=/dev/fit0 rootwait
 +bootcmd=if pstore check ; then run boot_recovery ; else run boot_sdmmc ; fi
@@ -700,18 +732,76 @@
 +bootconf_emmc=mt7988a-bananapi-bpi-r4-pro-emmc
 +bootconf_sd=mt7988a-bananapi-bpi-r4-pro-sd
 +bootconf_extra=
++bootdelay=3
++bootfile=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-initramfs-recovery.itb
++bootfile_upg=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-squashfs-sysupgrade.itb
 +bootled_pwr=green:status
 +bootled_rec=blue:status
++bootmenu_confirm_return=askenv - Press ENTER to return to menu ; bootmenu 60
++bootmenu_default=0
++bootmenu_delay=3
++bootmenu_title=      OpenWrt [SD card]
++bootmenu_0=Initialize environment.=run _firstboot
++bootmenu_0d=Run default boot command.=run boot_default
++bootmenu_1=Boot production system from SD card.=run boot_production ; run bootmenu_confirm_return
++bootmenu_2=Boot recovery system from SD card.=run boot_recovery ; run bootmenu_confirm_return
++bootmenu_3=Reboot.=reset
++bootmenu_4=Reset all settings to factory defaults.=run reset_factory ; reset
++boot_first=if button reset ; then led $bootled_rec on ; run boot_recovery ; setenv flag_recover 1 ; run boot_default ; fi ; bootmenu
++boot_default=if env exists flag_recover ; then run boot_recovery ; else run bootcmd ; fi
 +boot_production=led $bootled_pwr on ; run sdmmc_read_production && bootm $loadaddr#$bootconf#$bootconf_sd#$bootconf_extra ; led $bootled_pwr off
 +boot_recovery=led $bootled_rec on ; run sdmmc_read_recovery && bootm $loadaddr#$bootconf#$bootconf_emmc#$bootconf_extra ; led $bootled_rec off
 +boot_sdmmc=run boot_production ; run boot_recovery
 +mmc_read_vol=mmc read $loadaddr $part_addr 0x100 && imszb $loadaddr image_size && test 0x$image_size -le 0x$part_size && mmc read $loadaddr 0x$part_addr 0x$image_size && setexpr filesize $image_size * 0x200
 +part_default=production
 +part_recovery=recovery
++reset_factory=eraseenv && reset
 +sdmmc_read_production=part start mmc 0 $part_default part_addr && part size mmc 0 $part_default part_size && run mmc_read_vol
 +sdmmc_read_recovery=part start mmc 0 $part_recovery part_addr && part size mmc 0 $part_recovery part_size && run mmc_read_vol
++_init_env=setenv _init_env ; setenv _create_env ; saveenv ; saveenv
++_firstboot=setenv _firstboot ; run _switch_to_menu ; run _init_env ; run boot_first
++_switch_to_menu=setenv _switch_to_menu ; setenv bootdelay 3 ; setenv bootmenu_delay 3 ; setenv bootmenu_0 $bootmenu_0d ; setenv bootmenu_0d ; run _bootmenu_update_title
++_bootmenu_update_title=setenv _bootmenu_update_title ; setenv bootmenu_title "$bootmenu_title       $ver"
 --- /dev/null
 +++ b/defenvs/bananapi_bpi-r4-pro-8x_snand_env
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,40 @@
++ipaddr=192.168.1.1
++serverip=192.168.1.2
++loadaddr=0x50000000
++bootargs=console=ttyS0,115200n1 pci=pcie_bus_perf root=/dev/fit0 rootwait ubi.block=0,fit
++bootcmd=if pstore check ; then run boot_recovery ; else run boot_ubi ; fi
++bootconf=config-mt7988a-bananapi-bpi-r4-pro-8x
++bootconf_emmc=mt7988a-bananapi-bpi-r4-pro-emmc
++bootconf_sd=mt7988a-bananapi-bpi-r4-pro-sd
++bootconf_extra=
 +bootdelay=3
-+bootcmd=echo M01 compile skeleton only: boot validation deferred
++bootfile=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-initramfs-recovery.itb
++bootfile_upg=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-squashfs-sysupgrade.itb
++bootled_pwr=green:status
++bootled_rec=blue:status
++bootmenu_confirm_return=askenv - Press ENTER to return to menu ; bootmenu 60
++bootmenu_default=0
++bootmenu_delay=3
++bootmenu_title=      OpenWrt [SPI-NAND]
++bootmenu_0=Initialize environment.=run _firstboot
++bootmenu_0d=Run default boot command.=run boot_default
++bootmenu_1=Boot production system from NAND.=run boot_production ; run bootmenu_confirm_return
++bootmenu_2=Boot recovery system from NAND.=run boot_recovery ; run bootmenu_confirm_return
++bootmenu_3=Reboot.=reset
++bootmenu_4=Reset all settings to factory defaults.=run reset_factory ; reset
++boot_first=if button reset ; then led $bootled_rec on ; run boot_recovery ; setenv flag_recover 1 ; run boot_default ; fi ; bootmenu
++boot_default=if env exists flag_recover ; then run boot_recovery ; else run bootcmd ; fi
++boot_production=led $bootled_pwr on ; run ubi_read_production && bootm $loadaddr#$bootconf#$bootconf_emmc#$bootconf_extra ; led $bootled_pwr off
++boot_recovery=led $bootled_rec on ; run ubi_read_recovery && bootm $loadaddr#$bootconf#$bootconf_emmc#$bootconf_extra ; led $bootled_rec off
++boot_ubi=run boot_production ; run boot_recovery
++part_default=fit
++part_recovery=recovery
++reset_factory=ubi part ubi ; mw $loadaddr 0x0 0x800 ; ubi write $loadaddr ubootenv 0x800 ; ubi write $loadaddr ubootenv2 0x800
++ubi_create_env=ubi check ubootenv || ubi create ubootenv 0x100000 dynamic ; ubi check ubootenv2 || ubi create ubootenv2 0x100000 dynamic
++ubi_prepare_rootfs=if ubi check rootfs_data ; then else if env exists rootfs_data_max ; then ubi create rootfs_data $rootfs_data_max dynamic || ubi create rootfs_data - dynamic ; else ubi create rootfs_data - dynamic ; fi ; fi
++ubi_read_production=ubi read $loadaddr $part_default && iminfo $loadaddr && run ubi_prepare_rootfs
++ubi_read_recovery=ubi check $part_recovery && ubi read $loadaddr $part_recovery
++_init_env=setenv _init_env ; run ubi_create_env ; saveenv ; saveenv
++_firstboot=setenv _firstboot ; run _switch_to_menu ; run _init_env ; run boot_first
++_switch_to_menu=setenv _switch_to_menu ; setenv bootdelay 3 ; setenv bootmenu_delay 3 ; setenv bootmenu_0 $bootmenu_0d ; setenv bootmenu_0d ; run _bootmenu_update_title
++_bootmenu_update_title=setenv _bootmenu_update_title ; setenv bootmenu_title "$bootmenu_title       $ver"
