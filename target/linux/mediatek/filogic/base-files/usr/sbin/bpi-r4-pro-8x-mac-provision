@@ -1,0 +1,703 @@
+#!/bin/sh
+
+PROG="${0##*/}"
+
+bpi8x_usage()
+{
+	cat <<EOF
+Usage:
+  $PROG --help
+  $PROG help
+  $PROG status
+
+  $PROG write-env --source current [--yes]
+  $PROG write-env --source random-base [--yes]
+  $PROG write-env --source random-triplet [--yes]
+  $PROG write-env --source manual --ethaddr XX:XX:XX:XX:XX:XX [--eth1addr ... --eth2addr ...] [--yes]
+  $PROG write-env --source env-active [--yes]
+  $PROG write-env --source env-nand
+  $PROG write-env --source env-emmc
+  $PROG write-env --source env-sd
+
+  $PROG write-env --target env-nand --source current
+  $PROG write-env --target env-emmc --source current
+  $PROG write-env --target env-sd --source current
+
+  $PROG write-factory --source current --force-factory
+
+Purpose:
+  Provision persistent MAC identity for Bananapi BPi-R4 Pro 8X boards.
+  Current 8X V1.0 evidence shows the Factory MAC cells may be blank, while
+  Linux can reliably see U-Boot ethaddr values passed by firmware. Therefore
+  the safe default persistence target is the active U-Boot environment.
+
+Safety model:
+  This script never runs automatically. It only writes when a write command is
+  explicitly invoked.
+  write-env writes only active U-Boot env variables through fw_setenv:
+    ethaddr, eth1addr, eth2addr
+  Before writing, write-env verifies that the active U-Boot env already
+  contains the complete BPI-R4 Pro 8X SD boot variables. If it is incomplete,
+  initialize it from U-Boot first with:
+    env default -a
+    saveenv
+  write-env requires confirmation. Pass --yes to skip the interactive prompt.
+  Inactive NAND/eMMC/SD U-Boot env locations are not guessed.
+
+Why Factory is dangerous:
+  Factory is raw NAND board identity/calibration storage. A wrong write can
+  erase or corrupt calibration data or board identity. The Factory write path
+  is present only as an M09 design stub and is not validated.
+  write-factory requires --force-factory and still fails closed with:
+    TODO(M09): raw Factory NAND write path is not validated; do not use before M09 storage/recovery validation.
+
+Sources:
+  current
+      Read /sys/class/net/eth0/address as base, then derive +1 and +2.
+  random-base
+      Generate one random local unicast base with macaddr_random, then derive
+      +1 and +2.
+  random-triplet
+      Generate three independent random local unicast MAC addresses.
+  manual
+      Use --ethaddr. If --eth1addr/--eth2addr are omitted, derive +1/+2.
+      All supplied or derived MACs must be valid unicast, non-zero, non-FF,
+      and unique.
+  env-active
+      Read ethaddr/eth1addr/eth2addr from the current active U-Boot env.
+      All three must exist and be valid.
+  env-nand, env-emmc, env-sd
+      Reserved for copying from inactive media. They fail closed until M09
+      validates exact storage layout and env offsets.
+
+Targets:
+  active U-Boot env
+      Default target for write-env.
+  env-nand, env-emmc, env-sd
+      Reserved inactive targets. They fail closed with an M09 TODO.
+  Factory
+      Reserved raw NAND target for M09. Do not use before storage/recovery
+      validation.
+
+Examples:
+  $PROG status
+  $PROG write-env --source current
+  $PROG write-env --source random-base --yes
+  $PROG write-env --source manual --ethaddr 02:11:22:33:44:50 --yes
+  $PROG write-env --source env-nand
+  $PROG write-factory --source current --force-factory
+EOF
+}
+
+case "$1" in
+--help|-h|help)
+	bpi8x_usage
+	exit 0
+	;;
+esac
+
+bpi8x_die()
+{
+	echo "$PROG: $*" >&2
+	exit 1
+}
+
+bpi8x_log()
+{
+	logger -t bpi-r4-pro-8x-mac "$*"
+}
+
+[ -r /lib/functions.sh ] || bpi8x_die "/lib/functions.sh is unavailable"
+[ -r /lib/functions/system.sh ] || bpi8x_die "/lib/functions/system.sh is unavailable"
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+
+bpi8x_board_name()
+{
+	board_name 2>/dev/null || cat /tmp/sysinfo/board_name 2>/dev/null || echo "unknown"
+}
+
+bpi8x_require_board()
+{
+	[ "$(bpi8x_board_name)" = "bananapi,bpi-r4-pro-8x" ] ||
+		bpi8x_die "this tool is only for bananapi,bpi-r4-pro-8x"
+}
+
+bpi8x_valid_unicast_mac()
+{
+	local mac
+
+	mac=$(macaddr_canonicalize "$1")
+	[ -n "$mac" ] || return 1
+	[ "$mac" != "00:00:00:00:00:00" ] || return 1
+	[ "$mac" != "ff:ff:ff:ff:ff:ff" ] || return 1
+	[ $((0x${mac%%:*} & 1)) -eq 0 ] || return 1
+
+	echo "$mac"
+}
+
+bpi8x_set_triplet()
+{
+	local ethaddr eth1addr eth2addr
+
+	ethaddr=$(bpi8x_valid_unicast_mac "$1") ||
+		bpi8x_die "invalid ethaddr: $1"
+	eth1addr=$(bpi8x_valid_unicast_mac "$2") ||
+		bpi8x_die "invalid eth1addr: $2"
+	eth2addr=$(bpi8x_valid_unicast_mac "$3") ||
+		bpi8x_die "invalid eth2addr: $3"
+
+	[ "$ethaddr" != "$eth1addr" ] ||
+		bpi8x_die "ethaddr and eth1addr must not match"
+	[ "$ethaddr" != "$eth2addr" ] ||
+		bpi8x_die "ethaddr and eth2addr must not match"
+	[ "$eth1addr" != "$eth2addr" ] ||
+		bpi8x_die "eth1addr and eth2addr must not match"
+
+	BPI8X_ETHADDR="$ethaddr"
+	BPI8X_ETH1ADDR="$eth1addr"
+	BPI8X_ETH2ADDR="$eth2addr"
+}
+
+bpi8x_triplet_is_valid()
+{
+	local ethaddr eth1addr eth2addr
+
+	ethaddr=$(bpi8x_valid_unicast_mac "$1") || return 1
+	eth1addr=$(bpi8x_valid_unicast_mac "$2") || return 1
+	eth2addr=$(bpi8x_valid_unicast_mac "$3") || return 1
+
+	[ "$ethaddr" != "$eth1addr" ] || return 1
+	[ "$ethaddr" != "$eth2addr" ] || return 1
+	[ "$eth1addr" != "$eth2addr" ] || return 1
+}
+
+bpi8x_current_triplet()
+{
+	local base
+
+	[ -r /sys/class/net/eth0/address ] ||
+		bpi8x_die "/sys/class/net/eth0/address is unavailable"
+	base=$(bpi8x_valid_unicast_mac "$(cat /sys/class/net/eth0/address)") ||
+		bpi8x_die "runtime eth0 MAC is not a valid unicast address"
+
+	bpi8x_set_triplet "$base" "$(macaddr_add "$base" 1)" "$(macaddr_add "$base" 2)"
+}
+
+bpi8x_current_triplet_is_valid()
+{
+	local base
+
+	[ -r /sys/class/net/eth0/address ] || return 1
+	base=$(bpi8x_valid_unicast_mac "$(cat /sys/class/net/eth0/address)") || return 1
+	bpi8x_triplet_is_valid "$base" "$(macaddr_add "$base" 1)" "$(macaddr_add "$base" 2)"
+}
+
+bpi8x_random_base_triplet()
+{
+	local base
+
+	base=$(bpi8x_valid_unicast_mac "$(macaddr_random)") ||
+		bpi8x_die "failed to generate random base MAC"
+	bpi8x_set_triplet "$base" "$(macaddr_add "$base" 1)" "$(macaddr_add "$base" 2)"
+}
+
+bpi8x_random_triplet()
+{
+	local ethaddr eth1addr eth2addr attempts
+
+	attempts=0
+	while [ "$attempts" -lt 20 ]; do
+		attempts=$((attempts + 1))
+		ethaddr=$(bpi8x_valid_unicast_mac "$(macaddr_random)") || continue
+		eth1addr=$(bpi8x_valid_unicast_mac "$(macaddr_random)") || continue
+		eth2addr=$(bpi8x_valid_unicast_mac "$(macaddr_random)") || continue
+
+		[ "$ethaddr" = "$eth1addr" ] && continue
+		[ "$ethaddr" = "$eth2addr" ] && continue
+		[ "$eth1addr" = "$eth2addr" ] && continue
+
+		bpi8x_set_triplet "$ethaddr" "$eth1addr" "$eth2addr"
+		return 0
+	done
+
+	bpi8x_die "failed to generate unique random MAC triplet"
+}
+
+bpi8x_manual_triplet()
+{
+	[ -n "$BPI8X_OPT_ETHADDR" ] ||
+		bpi8x_die "--source manual requires --ethaddr"
+
+	BPI8X_OPT_ETHADDR=$(bpi8x_valid_unicast_mac "$BPI8X_OPT_ETHADDR") ||
+		bpi8x_die "invalid --ethaddr"
+	[ -n "$BPI8X_OPT_ETH1ADDR" ] ||
+		BPI8X_OPT_ETH1ADDR=$(macaddr_add "$BPI8X_OPT_ETHADDR" 1)
+	[ -n "$BPI8X_OPT_ETH2ADDR" ] ||
+		BPI8X_OPT_ETH2ADDR=$(macaddr_add "$BPI8X_OPT_ETHADDR" 2)
+
+	bpi8x_set_triplet "$BPI8X_OPT_ETHADDR" "$BPI8X_OPT_ETH1ADDR" "$BPI8X_OPT_ETH2ADDR"
+}
+
+bpi8x_fwenv_read_ready()
+{
+	[ -s /etc/fw_env.config ] ||
+		bpi8x_die "/etc/fw_env.config is missing or empty"
+	command -v fw_printenv >/dev/null 2>&1 ||
+		bpi8x_die "fw_printenv is unavailable"
+	fw_printenv >/dev/null 2>&1 ||
+		bpi8x_die "active U-Boot env is not readable"
+}
+
+bpi8x_fwenv_is_readable()
+{
+	[ -s /etc/fw_env.config ] || return 1
+	command -v fw_printenv >/dev/null 2>&1 || return 1
+	fw_printenv >/dev/null 2>&1
+}
+
+bpi8x_fwenv_get()
+{
+	fw_printenv -n "$1" 2>/dev/null
+}
+
+bpi8x_fwenv_value_contains()
+{
+	local name="$1"
+	local needle="$2"
+	local value
+
+	value=$(bpi8x_fwenv_get "$name") || return 1
+	case "$value" in
+	*"$needle"*) return 0 ;;
+	esac
+
+	return 1
+}
+
+bpi8x_boot_env_is_complete()
+{
+	local bootcmd
+
+	bootcmd=$(bpi8x_fwenv_get bootcmd) || return 1
+	case "$bootcmd" in
+	*boot_recovery*boot_sdmmc*|*boot_sdmmc*boot_recovery*) ;;
+	*) return 1 ;;
+	esac
+
+	[ "$(bpi8x_fwenv_get bootconf)" = "config-mt7988a-bananapi-bpi-r4-pro-8x" ] || return 1
+	[ "$(bpi8x_fwenv_get bootconf_sd)" = "mt7988a-bananapi-bpi-r4-pro-sd" ] || return 1
+	[ "$(bpi8x_fwenv_get bootconf_emmc)" = "mt7988a-bananapi-bpi-r4-pro-emmc" ] || return 1
+	[ "$(bpi8x_fwenv_get part_default)" = "production" ] || return 1
+	[ "$(bpi8x_fwenv_get part_recovery)" = "recovery" ] || return 1
+
+	bpi8x_fwenv_value_contains bootmenu_0 "run bootcmd" || return 1
+	bpi8x_fwenv_value_contains bootmenu_1 "run boot_production" || return 1
+	bpi8x_fwenv_value_contains bootmenu_2 "run boot_recovery" || return 1
+	bpi8x_fwenv_value_contains boot_production "sdmmc_read_production" || return 1
+	bpi8x_fwenv_value_contains boot_production "bootconf_sd" || return 1
+	bpi8x_fwenv_value_contains boot_recovery "sdmmc_read_recovery" || return 1
+	bpi8x_fwenv_value_contains boot_recovery "bootconf_emmc" || return 1
+	bpi8x_fwenv_value_contains boot_sdmmc "boot_production" || return 1
+	bpi8x_fwenv_value_contains boot_sdmmc "boot_recovery" || return 1
+	bpi8x_fwenv_value_contains mmc_read_vol "mmc read" || return 1
+	bpi8x_fwenv_value_contains sdmmc_read_production "part start mmc 0" || return 1
+	bpi8x_fwenv_value_contains sdmmc_read_production "part_default" || return 1
+	bpi8x_fwenv_value_contains sdmmc_read_recovery "part start mmc 0" || return 1
+	bpi8x_fwenv_value_contains sdmmc_read_recovery "part_recovery" || return 1
+}
+
+bpi8x_fwenv_write_ready()
+{
+	bpi8x_fwenv_read_ready
+	if ! bpi8x_boot_env_is_complete; then
+		bpi8x_log "active U-Boot env lacks complete 8X SD boot variables; refusing MAC write"
+		bpi8x_die "active U-Boot env is incomplete; initialize it from U-Boot defaults first (env default -a; saveenv), then retry"
+	fi
+	command -v fw_setenv >/dev/null 2>&1 ||
+		bpi8x_die "fw_setenv is unavailable"
+}
+
+bpi8x_active_env_triplet()
+{
+	local ethaddr eth1addr eth2addr
+
+	bpi8x_fwenv_read_ready
+	ethaddr=$(fw_printenv -n ethaddr 2>/dev/null) ||
+		bpi8x_die "ethaddr is missing from active U-Boot env"
+	eth1addr=$(fw_printenv -n eth1addr 2>/dev/null) ||
+		bpi8x_die "eth1addr is missing from active U-Boot env"
+	eth2addr=$(fw_printenv -n eth2addr 2>/dev/null) ||
+		bpi8x_die "eth2addr is missing from active U-Boot env"
+
+	bpi8x_set_triplet "$ethaddr" "$eth1addr" "$eth2addr"
+}
+
+bpi8x_inactive_env_source()
+{
+	bpi8x_log "inactive U-Boot env source blocked: TODO(M09) storage layout validation required"
+	bpi8x_die "inactive medium env location is not reliably known yet; TODO(M09)"
+}
+
+bpi8x_resolve_source()
+{
+	case "$BPI8X_SOURCE" in
+	current)
+		bpi8x_current_triplet
+		;;
+	random-base)
+		bpi8x_random_base_triplet
+		;;
+	random-triplet)
+		bpi8x_random_triplet
+		;;
+	manual)
+		bpi8x_manual_triplet
+		;;
+	env-active)
+		bpi8x_active_env_triplet
+		;;
+	env-nand|env-emmc|env-sd)
+		bpi8x_inactive_env_source
+		;;
+	"")
+		bpi8x_die "--source is required"
+		;;
+	*)
+		bpi8x_die "unsupported source: $BPI8X_SOURCE"
+		;;
+	esac
+}
+
+bpi8x_print_triplet()
+{
+	echo "  ethaddr=$BPI8X_ETHADDR"
+	echo "  eth1addr=$BPI8X_ETH1ADDR"
+	echo "  eth2addr=$BPI8X_ETH2ADDR"
+}
+
+bpi8x_confirm()
+{
+	local answer
+
+	[ "$BPI8X_YES" = "1" ] && return 0
+
+	printf "Type YES to continue: "
+	read answer
+	[ "$answer" = "YES" ] || bpi8x_die "aborted"
+}
+
+bpi8x_fail_inactive_env_target()
+{
+	bpi8x_log "inactive U-Boot env target blocked: TODO(M09) storage layout validation required"
+	bpi8x_die "TODO(M09): inactive U-Boot env target selection requires storage layout validation."
+}
+
+bpi8x_write_env()
+{
+	case "$BPI8X_TARGET" in
+	active|"")
+		;;
+	env-nand|env-emmc|env-sd|nand|emmc|sd)
+		bpi8x_fail_inactive_env_target
+		;;
+	*)
+		bpi8x_die "unsupported write-env target: $BPI8X_TARGET"
+		;;
+	esac
+
+	bpi8x_require_board
+	bpi8x_resolve_source
+	bpi8x_fwenv_write_ready
+
+	echo "About to write active U-Boot env:"
+	bpi8x_print_triplet
+	bpi8x_confirm
+
+	if fw_setenv ethaddr "$BPI8X_ETHADDR"; then
+		bpi8x_log "stored ethaddr=$BPI8X_ETHADDR in active U-Boot env"
+	else
+		bpi8x_log "failed to store ethaddr in active U-Boot env"
+		bpi8x_die "failed to write ethaddr"
+	fi
+
+	if fw_setenv eth1addr "$BPI8X_ETH1ADDR"; then
+		bpi8x_log "stored eth1addr=$BPI8X_ETH1ADDR in active U-Boot env"
+	else
+		bpi8x_log "failed to store eth1addr in active U-Boot env"
+		bpi8x_die "failed to write eth1addr"
+	fi
+
+	if fw_setenv eth2addr "$BPI8X_ETH2ADDR"; then
+		bpi8x_log "stored eth2addr=$BPI8X_ETH2ADDR in active U-Boot env"
+	else
+		bpi8x_log "failed to store eth2addr in active U-Boot env"
+		bpi8x_die "failed to write eth2addr"
+	fi
+
+	echo "Active U-Boot env MAC triplet written."
+	bpi8x_log "active U-Boot env MAC triplet written"
+}
+
+bpi8x_factory_warning()
+{
+	cat <<EOF
+WARNING: Factory raw NAND write is unvalidated.
+WARNING: This must not be used before M09 storage/recovery validation.
+WARNING: It may erase or corrupt board identity/calibration data.
+TODO(M09): raw Factory NAND write path is not validated; do not use before M09 storage/recovery validation.
+EOF
+}
+
+bpi8x_write_factory_unvalidated()
+{
+	# TODO(M09): Future raw Factory repair must:
+	# 1. Locate the Factory MTD partition and eraseblock geometry with mtdinfo.
+	# 2. nanddump the full affected eraseblock(s) to a backup file.
+	# 3. Patch only the 6-byte gmac0/gmac1/gmac2 offsets in the backup image.
+	# 4. flash_erase the affected eraseblock(s).
+	# 5. nandwrite the patched eraseblock image.
+	# 6. nanddump again and verify the three 6-byte cells match exactly.
+	# Direct dd-style writes to raw NAND are forbidden.
+	cat <<EOF
+Factory write was not performed.
+Required M09 flow before enabling this path:
+  1. Locate Factory MTD and eraseblock geometry with mtdinfo.
+  2. Dump the full affected eraseblock with nanddump.
+  3. Patch gmac0 @ 0xffff4, gmac1 @ 0xffffa, gmac2 @ 0xfffee in the dump.
+  4. Erase affected eraseblock(s) with flash_erase.
+  5. Rewrite with nandwrite.
+  6. Read back and verify all three 6-byte cells.
+EOF
+	bpi8x_log "Factory raw write blocked: TODO(M09) storage/recovery validation required"
+	return 1
+}
+
+bpi8x_write_factory()
+{
+	if [ "$BPI8X_FORCE_FACTORY" != "1" ]; then
+		bpi8x_factory_warning >&2
+		bpi8x_log "Factory raw write refused: --force-factory not supplied"
+		bpi8x_die "refusing Factory write without --force-factory"
+	fi
+
+	bpi8x_require_board
+	bpi8x_resolve_source
+
+	bpi8x_factory_warning >&2
+	echo "Requested Factory MAC triplet:"
+	bpi8x_print_triplet
+	bpi8x_write_factory_unvalidated
+}
+
+bpi8x_print_fwenv_config()
+{
+	if [ ! -e /etc/fw_env.config ]; then
+		echo "fw_env.config: missing"
+	elif [ ! -s /etc/fw_env.config ]; then
+		echo "fw_env.config: empty"
+	else
+		echo "fw_env.config:"
+		sed 's/^/  /' /etc/fw_env.config
+	fi
+}
+
+bpi8x_status_env_value()
+{
+	local name="$1"
+	local value
+
+	if ! bpi8x_fwenv_is_readable; then
+		echo "  $name: unavailable"
+		return
+	fi
+
+	value=$(fw_printenv -n "$name" 2>/dev/null) || value="missing"
+	echo "  $name: $value"
+}
+
+bpi8x_status_factory_value()
+{
+	local name="$1"
+	local offset="$2"
+	local value
+
+	value=$(mtd_get_mac_binary "Factory" "$offset" 2>/dev/null)
+	[ -n "$value" ] || value="unavailable"
+	echo "  $name @ $offset: $value"
+}
+
+bpi8x_status()
+{
+	local board eth0 assign ethaddr eth1addr eth2addr
+	local eth0_valid gmac0 gmac1 gmac2 recommendation bootenv_ok
+
+	board=$(bpi8x_board_name)
+	echo "Board: $board"
+	bootenv_ok=0
+
+	eth0=$(cat /sys/class/net/eth0/address 2>/dev/null || echo "unavailable")
+	assign=$(cat /sys/class/net/eth0/addr_assign_type 2>/dev/null || echo "unavailable")
+	eth0_valid=$(bpi8x_valid_unicast_mac "$eth0")
+	echo "Runtime eth0 MAC: $eth0"
+	if [ -n "$eth0_valid" ]; then
+		echo "Runtime eth0 valid: yes"
+	else
+		echo "Runtime eth0 valid: no"
+	fi
+	if bpi8x_current_triplet_is_valid; then
+		echo "Runtime eth0 derived triplet valid: yes"
+	else
+		echo "Runtime eth0 derived triplet valid: no"
+	fi
+	echo "Runtime eth0 addr_assign_type: $assign"
+
+	bpi8x_print_fwenv_config
+	if bpi8x_fwenv_is_readable; then
+		echo "fw_printenv readable: yes"
+		if bpi8x_boot_env_is_complete; then
+			echo "Active U-Boot boot env complete: yes"
+			bootenv_ok=1
+		else
+			echo "Active U-Boot boot env complete: no"
+		fi
+	else
+		echo "fw_printenv readable: no"
+		echo "Active U-Boot boot env complete: no"
+	fi
+
+	echo "Active U-Boot env:"
+	bpi8x_status_env_value ethaddr
+	bpi8x_status_env_value eth1addr
+	bpi8x_status_env_value eth2addr
+
+	echo "Factory offsets:"
+	bpi8x_status_factory_value "gmac0" "0xffff4"
+	bpi8x_status_factory_value "gmac1" "0xffffa"
+	bpi8x_status_factory_value "gmac2" "0xfffee"
+
+	gmac0=$(mtd_get_mac_binary "Factory" 0xffff4 2>/dev/null)
+	gmac1=$(mtd_get_mac_binary "Factory" 0xffffa 2>/dev/null)
+	gmac2=$(mtd_get_mac_binary "Factory" 0xfffee 2>/dev/null)
+	if bpi8x_triplet_is_valid "$gmac0" "$gmac1" "$gmac2"; then
+		echo "Factory triplet valid: yes"
+		recommendation="factory"
+	else
+		echo "Factory triplet valid: no"
+	fi
+
+	if bpi8x_fwenv_is_readable; then
+		ethaddr=$(fw_printenv -n ethaddr 2>/dev/null)
+		eth1addr=$(fw_printenv -n eth1addr 2>/dev/null)
+		eth2addr=$(fw_printenv -n eth2addr 2>/dev/null)
+	fi
+
+	if bpi8x_triplet_is_valid "$ethaddr" "$eth1addr" "$eth2addr"; then
+		echo "Env triplet valid: yes"
+		if [ -z "$recommendation" ] && [ "$bootenv_ok" = "1" ]; then
+			recommendation="env-active"
+		fi
+	else
+		echo "Env triplet valid: no"
+	fi
+
+	if [ "$bootenv_ok" != "1" ]; then
+		echo "Recommended source: none"
+		echo "Recommended target: none"
+		echo "Recommended action: initialize active U-Boot env from U-Boot defaults before MAC provisioning."
+		echo "Factory write is prepared for future M09 validation only."
+		echo "Do not use Factory repair path before M09."
+		return
+	fi
+
+	if [ -z "$recommendation" ]; then
+		if bpi8x_current_triplet_is_valid; then
+			recommendation="current"
+		else
+			recommendation="none"
+		fi
+	fi
+	echo "Recommended source: $recommendation"
+	echo "Recommended target: active U-Boot env"
+	echo "Factory write is prepared for future M09 validation only."
+	echo "Do not use Factory repair path before M09."
+}
+
+BPI8X_SOURCE=""
+BPI8X_TARGET="active"
+BPI8X_YES="0"
+BPI8X_FORCE_FACTORY="0"
+BPI8X_OPT_ETHADDR=""
+BPI8X_OPT_ETH1ADDR=""
+BPI8X_OPT_ETH2ADDR=""
+
+bpi8x_parse_options()
+{
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--source)
+			[ -n "$2" ] || bpi8x_die "--source requires an argument"
+			BPI8X_SOURCE="$2"
+			shift 2
+			;;
+		--target)
+			[ -n "$2" ] || bpi8x_die "--target requires an argument"
+			BPI8X_TARGET="$2"
+			shift 2
+			;;
+		--ethaddr)
+			[ -n "$2" ] || bpi8x_die "--ethaddr requires an argument"
+			BPI8X_OPT_ETHADDR="$2"
+			shift 2
+			;;
+		--eth1addr)
+			[ -n "$2" ] || bpi8x_die "--eth1addr requires an argument"
+			BPI8X_OPT_ETH1ADDR="$2"
+			shift 2
+			;;
+		--eth2addr)
+			[ -n "$2" ] || bpi8x_die "--eth2addr requires an argument"
+			BPI8X_OPT_ETH2ADDR="$2"
+			shift 2
+			;;
+		--yes)
+			BPI8X_YES="1"
+			shift
+			;;
+		--force-factory)
+			BPI8X_FORCE_FACTORY="1"
+			shift
+			;;
+		*)
+			bpi8x_die "unknown option: $1"
+			;;
+		esac
+	done
+}
+
+cmd="$1"
+[ -n "$cmd" ] || {
+	bpi8x_usage
+	exit 1
+}
+shift
+
+case "$cmd" in
+status)
+	[ "$#" -eq 0 ] || bpi8x_die "status does not accept options"
+	bpi8x_status
+	;;
+write-env)
+	bpi8x_parse_options "$@"
+	bpi8x_write_env
+	;;
+write-factory)
+	bpi8x_parse_options "$@"
+	bpi8x_write_factory
+	;;
+*)
+	bpi8x_usage
+	exit 1
+	;;
+esac

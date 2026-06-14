@@ -220,12 +220,93 @@ mediatek_setup_interfaces()
 	esac
 }
 
+mediatek_macaddr_valid_unicast()
+{
+	local mac
+
+	mac=$(macaddr_canonicalize "$1")
+	[ -n "$mac" ] || return 1
+	[ "$mac" != "00:00:00:00:00:00" ] || return 1
+	[ "$mac" != "ff:ff:ff:ff:ff:ff" ] || return 1
+	[ $((0x${mac%%:*} & 1)) -eq 0 ] || return 1
+
+	echo "$mac"
+}
+
+mediatek_fwenv_get_mac()
+{
+	local mac
+
+	[ -s /etc/fw_env.config ] || return 1
+	command -v fw_printenv >/dev/null 2>&1 || return 1
+
+	mac=$(fw_printenv -n "$1" 2>/dev/null) || return 1
+	mediatek_macaddr_valid_unicast "$mac"
+}
+
+mediatek_bpi_r4_pro_8x_triplet_valid()
+{
+	local gmac0 gmac1 gmac2
+
+	gmac0=$(mediatek_macaddr_valid_unicast "$1") || return 1
+	gmac1=$(mediatek_macaddr_valid_unicast "$2") || return 1
+	gmac2=$(mediatek_macaddr_valid_unicast "$3") || return 1
+	[ "$gmac0" != "$gmac1" ] || return 1
+	[ "$gmac0" != "$gmac2" ] || return 1
+	[ "$gmac1" != "$gmac2" ] || return 1
+}
+
+mediatek_bpi_r4_pro_8x_factory_macs()
+{
+	local gmac0 gmac1 gmac2
+
+	gmac0=$(mediatek_macaddr_valid_unicast "$(mtd_get_mac_binary "Factory" 0xffff4 2>/dev/null)")
+	gmac1=$(mediatek_macaddr_valid_unicast "$(mtd_get_mac_binary "Factory" 0xffffa 2>/dev/null)")
+	gmac2=$(mediatek_macaddr_valid_unicast "$(mtd_get_mac_binary "Factory" 0xfffee 2>/dev/null)")
+
+	mediatek_bpi_r4_pro_8x_triplet_valid "$gmac0" "$gmac1" "$gmac2" || return 1
+	echo "$gmac0 $gmac1 $gmac2"
+}
+
+mediatek_bpi_r4_pro_8x_env_macs()
+{
+	local gmac0 gmac1 gmac2
+
+	gmac0=$(mediatek_fwenv_get_mac ethaddr) || return 1
+	gmac1=$(mediatek_fwenv_get_mac eth1addr)
+	gmac2=$(mediatek_fwenv_get_mac eth2addr)
+	if ! mediatek_bpi_r4_pro_8x_triplet_valid "$gmac0" "$gmac1" "$gmac2"; then
+		gmac1=$(macaddr_add "$gmac0" 1)
+		gmac2=$(macaddr_add "$gmac0" 2)
+		mediatek_bpi_r4_pro_8x_triplet_valid "$gmac0" "$gmac1" "$gmac2" || return 1
+	fi
+
+	echo "$gmac0 $gmac1 $gmac2"
+}
+
+mediatek_bpi_r4_pro_8x_runtime_macs()
+{
+	local gmac0
+
+	[ -r /sys/class/net/eth0/address ] || return 1
+	gmac0=$(mediatek_macaddr_valid_unicast "$(cat /sys/class/net/eth0/address)") || return 1
+	mediatek_bpi_r4_pro_8x_triplet_valid "$gmac0" "$(macaddr_add "$gmac0" 1)" "$(macaddr_add "$gmac0" 2)" || return 1
+
+	echo "$gmac0 $(macaddr_add "$gmac0" 1) $(macaddr_add "$gmac0" 2)"
+}
+
+mediatek_bpi_r4_pro_8x_log()
+{
+	logger -t bpi-r4-pro-8x-mac "$*"
+}
+
 mediatek_setup_macs()
 {
 	local board="$1"
 	local lan_mac=""
 	local wan_mac=""
 	local label_mac=""
+	local macs=""
 
 	case $board in
 	airpi,ap3000m)
@@ -250,6 +331,34 @@ mediatek_setup_macs()
 	bananapi,bpi-r4|\
 	bananapi,bpi-r4-lite)
 		wan_mac=$(macaddr_add $(cat /sys/class/net/eth0/address) 1)
+		;;
+	bananapi,bpi-r4-pro-8x)
+		macs=$(mediatek_bpi_r4_pro_8x_factory_macs)
+		if [ -n "$macs" ]; then
+			set -- $macs
+			label_mac="$1"
+			mediatek_bpi_r4_pro_8x_log "source=factory label_mac=$label_mac"
+		else
+			mediatek_bpi_r4_pro_8x_log "factory triplet invalid, checking active U-Boot env"
+			macs=$(mediatek_bpi_r4_pro_8x_env_macs)
+			if [ -n "$macs" ]; then
+				set -- $macs
+				label_mac="$1"
+				mediatek_bpi_r4_pro_8x_log "source=uboot-env label_mac=$label_mac"
+			else
+				mediatek_bpi_r4_pro_8x_log "active U-Boot env MAC unavailable, falling back to runtime eth0"
+				macs=$(mediatek_bpi_r4_pro_8x_runtime_macs)
+				if [ -n "$macs" ]; then
+					set -- $macs
+					label_mac="$1"
+					mediatek_bpi_r4_pro_8x_log "source=runtime label_mac=$label_mac"
+				else
+					mediatek_bpi_r4_pro_8x_log "no valid MAC source found"
+				fi
+			fi
+		fi
+
+		# M04.01 only records board identity; M05 owns LAN/WAN port policy.
 		;;
 	h3c,magic-nx30-pro)
 		wan_mac=$(mtd_get_mac_ascii pdt_data_1 ethaddr)

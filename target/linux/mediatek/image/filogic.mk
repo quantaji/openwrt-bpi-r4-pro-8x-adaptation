@@ -764,7 +764,7 @@ define Device/bananapi_bpi-r4-pro-8x
   $(call Device/bananapi_bpi-r4-pro-common)
   DEVICE_PACKAGES := kmod-i2c-mux-pca954x kmod-gpio-pca953x \
 		     kmod-eeprom-at24 kmod-rtc-pcf8563 \
-		     e2fsprogs f2fsck mkf2fs
+		     nand-utils e2fsprogs f2fsck mkf2fs
   IMAGES := sysupgrade.itb
   ARTIFACTS := \
 	       emmc-gpt.bin emmc-preloader.bin emmc-bl31-uboot.fip \
