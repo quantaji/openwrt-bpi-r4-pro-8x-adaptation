@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 14 Jun 2026 19:30:00 -0700
+Subject: [PATCH] DO NOT SUBMIT: net: dsa: mxl862xx: expose legacy PCS caps
+
+The legacy SYS_MISC_SFP_SET-based PCS fallback is selected for firmware
+versions older than 1.0.84, but phylink_get_caps() still returned an
+empty supported_interfaces bitmap for SerDes ports on those firmware
+versions.
+
+That makes phylink reject the CPU port before the legacy PCS fallback can
+be used. Expose the interface modes handled by mxl862xx_legacy_pcs_config()
+for the slot-0 SerDes ports used by the legacy API.
+
+This commit is for downstream use only and must not be submitted upstream.
+Future upstream work should replace this with the mainline-supported old
+firmware compatibility model, if one lands.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/net/dsa/mxl862xx/mxl862xx-phylink.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
+@@ -22,8 +22,15 @@ void mxl862xx_phylink_get_caps(struct ds
+ 		break;
+ 	case 9:
+ 	case 13:
+-		if (!MXL862XX_FW_VER_MIN(priv, 1, 0, 84))
++		if (!MXL862XX_FW_VER_MIN(priv, 1, 0, 84)) {
++			__set_bit(PHY_INTERFACE_MODE_SGMII, config->supported_interfaces);
++			__set_bit(PHY_INTERFACE_MODE_1000BASEX, config->supported_interfaces);
++			__set_bit(PHY_INTERFACE_MODE_2500BASEX, config->supported_interfaces);
++			__set_bit(PHY_INTERFACE_MODE_10GBASER, config->supported_interfaces);
++			__set_bit(PHY_INTERFACE_MODE_USXGMII, config->supported_interfaces);
+ 			break;
++		}
++
+ 		__set_bit(PHY_INTERFACE_MODE_SGMII, config->supported_interfaces);
+ 		__set_bit(PHY_INTERFACE_MODE_1000BASEX, config->supported_interfaces);
+ 		__set_bit(PHY_INTERFACE_MODE_2500BASEX, config->supported_interfaces);

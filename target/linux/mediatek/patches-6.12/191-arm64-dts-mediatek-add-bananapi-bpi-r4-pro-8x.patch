@@ -14,8 +14,8 @@ later migration steps.
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-8x.dts  |  16 +
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-emmc.dtso |  33 +
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso |  55 ++
- .../mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi | 557 ++++++++++++++++++
- 5 files changed, 665 insertions(+)
+ .../mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi | 673 ++++++++++++++++++
+ 5 files changed, 781 insertions(+)
 
 --- a/arch/arm64/boot/dts/mediatek/Makefile
 +++ b/arch/arm64/boot/dts/mediatek/Makefile
@@ -38,7 +38,7 @@ later migration steps.
  DTC_FLAGS_mt8395-radxa-nio-12l := -@
 --- /dev/null
 +++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
-@@ -0,0 +1,557 @@
+@@ -0,0 +1,673 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR MIT)
 +/*
 + * Copyright (C) 2025 MediaTek Inc.
@@ -237,6 +237,20 @@ later migration steps.
 +	status = "okay";
 +};
 +
++&gmac2 {
++	phy-mode = "10gbase-r";
++	phy-connection-type = "10gbase-r";
++	nvmem-cell-names = "mac-address";
++	nvmem-cells = <&gmac2_mac>;
++	status = "okay";
++
++	fixed-link {
++		speed = <10000>;
++		full-duplex;
++		pause;
++	};
++};
++
 +&gsw_phy0 {
 +	pinctrl-0 = <&gbe0_led0_pins>;
 +	pinctrl-names = "gbe-led";
@@ -274,6 +288,10 @@ later migration steps.
 +
 +&gsw_port3 {
 +	label = "fpc";
++};
++
++&int_2p5g_phy {
++	status = "disabled";
 +};
 +
 +&i2c0 {
@@ -395,6 +413,104 @@ later migration steps.
 +			reg = <3>;
 +			#address-cells = <1>;
 +			#size-cells = <0>;
++		};
++	};
++};
++
++&mdio_bus {
++	switch16: switch@16 {
++		compatible = "maxlinear,mxl86252";
++		reg = <16>;
++		dsa,member = <0 0>;
++		status = "okay";
++
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			/*
++			 * The vendor DTS uses MxL port indices 0..3 and CPU port
++			 * 8.  The OpenWrt main MxL862xx DSA driver uses direct
++			 * firmware-facing DSA indices, so expose those paths as
++			 * ports 1..4 and CPU port 9.
++			 */
++			port@1 {
++				reg = <1>;
++				label = "lan1";
++				phy-handle = <&switchphy0>;
++				phy-mode = "internal";
++				status = "okay";
++			};
++
++			port@2 {
++				reg = <2>;
++				label = "lan2";
++				phy-handle = <&switchphy1>;
++				phy-mode = "internal";
++				status = "okay";
++			};
++
++			port@3 {
++				reg = <3>;
++				label = "lan3";
++				phy-handle = <&switchphy2>;
++				phy-mode = "internal";
++				status = "okay";
++			};
++
++			port@4 {
++				reg = <4>;
++				label = "lan4";
++				phy-handle = <&switchphy3>;
++				phy-mode = "internal";
++				status = "okay";
++			};
++
++			port@5 {
++				reg = <5>;
++				label = "mxl-reserved";
++				phy-handle = <&switchphy4>;
++				phy-mode = "internal";
++				status = "disabled";
++			};
++
++			port@9 {
++				reg = <9>;
++				label = "cpu";
++				phy-mode = "10gbase-r";
++				ethernet = <&gmac2>;
++				dsa-tag-protocol = "mxl862xx-8021q";
++
++				fixed-link {
++					speed = <10000>;
++					full-duplex;
++				};
++			};
++		};
++
++		mdio {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			switchphy0: switchphy@0 {
++				reg = <0>;
++			};
++
++			switchphy1: switchphy@1 {
++				reg = <1>;
++			};
++
++			switchphy2: switchphy@2 {
++				reg = <2>;
++			};
++
++			switchphy3: switchphy@3 {
++				reg = <3>;
++			};
++
++			switchphy4: switchphy@4 {
++				reg = <4>;
++			};
 +		};
 +	};
 +};
