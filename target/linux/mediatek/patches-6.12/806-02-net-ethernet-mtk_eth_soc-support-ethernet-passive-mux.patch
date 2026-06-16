@@ -30,9 +30,9 @@ Adaptation notes:
 Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
 Signed-off-by: Codex <codex@openai.com>
 ---
- drivers/net/ethernet/mediatek/mtk_eth_soc.c | 262 +++++++++++++++++++-
- drivers/net/ethernet/mediatek/mtk_eth_soc.h |  23 ++
- 2 files changed, 284 insertions(+), 1 deletion(-)
+ drivers/net/ethernet/mediatek/mtk_eth_soc.c | 487 +++++++++++++++++++-
+ drivers/net/ethernet/mediatek/mtk_eth_soc.h |  29 ++
+ 2 files changed, 515 insertions(+), 1 deletion(-)
 
 --- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
 +++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
@@ -44,22 +44,101 @@ Signed-off-by: Codex <codex@openai.com>
  #include <linux/jhash.h>
  #include <linux/bitfield.h>
  #include <net/dsa.h>
-@@ -5114,6 +5115,267 @@ static const struct net_device_ops mtk_n
+@@ -5114,6 +5115,469 @@ static const struct net_device_ops mtk_n
  	.ndo_select_queue	= mtk_select_queue,
  };
  
-+static int mtk_mux_create_phylink(struct mtk_mux *mux, unsigned int channel)
++static void mtk_mux_put_channels(struct mtk_mux *mux)
++{
++	int i;
++
++	for (i = 0; i < MTK_MUX_CHANNELS_MAX; i++) {
++		of_node_put(mux->channels[i].of_node);
++		mux->channels[i].of_node = NULL;
++	}
++}
++
++static int mtk_mux_read_sfp_present(struct mtk_mux *mux, bool *present)
++{
++	int val;
++
++	val = gpiod_get_value_cansleep(mux->mod_def0_gpio);
++	if (val < 0)
++		return val;
++
++	*present = !!val;
++	return 0;
++}
++
++static unsigned int mtk_mux_choose_channel(struct mtk_mux *mux,
++					  bool sfp_present)
++{
++	return sfp_present ? mux->sfp_channel : mux->rj45_channel;
++}
++
++static bool mtk_mux_is_running(struct mtk_mux *mux)
++{
++	struct mtk_mac *mac = mux->mac;
++	struct net_device *dev = mac->hw->netdev[mac->id];
++
++	return netif_running(dev);
++}
++
++static int mtk_mux_stop(struct mtk_mux *mux)
++{
++	struct mtk_mac *mac = mux->mac;
++	struct net_device *dev = mac->hw->netdev[mac->id];
++	int err;
++
++	if (!mac->phylink)
++		return 0;
++
++	rtnl_lock();
++	err = mtk_stop(dev);
++	rtnl_unlock();
++
++	return err;
++}
++
++static void mtk_mux_disconnect(struct mtk_mux *mux)
++{
++	struct mtk_mac *mac = mux->mac;
++
++	if (mac->phylink) {
++		phylink_destroy(mac->phylink);
++		mac->phylink = NULL;
++	}
++}
++
++static int mtk_mux_select_channel(struct mtk_mux *mux, unsigned int channel)
 +{
 +	struct mtk_mac *mac = mux->mac;
 +	struct mtk_eth *eth = mac->hw;
-+	struct mtk_mux_channel *chan = &mux->channels[channel];
-+	struct phylink *pl;
++	struct mtk_mux_channel *chan;
 +
++	if (channel >= MTK_MUX_CHANNELS_MAX)
++		return -EINVAL;
++
++	chan = &mux->channels[channel];
 +	if (!chan->of_node) {
 +		dev_err(eth->dev, "Ethernet mux: channel %u has no DT node\n",
 +			channel);
 +		return -EINVAL;
 +	}
++
++	gpiod_set_value_cansleep(mux->chan_sel_gpio, channel);
++	mac->of_node = chan->of_node;
++	mux->selected_channel = channel;
++
++	return 0;
++}
++
++static int mtk_mux_connect(struct mtk_mux *mux, unsigned int channel)
++{
++	struct mtk_mac *mac = mux->mac;
++	struct mtk_eth *eth = mac->hw;
++	struct mtk_mux_channel *chan = &mux->channels[channel];
++	struct phylink *pl;
 +
 +	pl = phylink_create(&mac->phylink_config,
 +			    of_fwnode_handle(chan->of_node),
@@ -72,72 +151,150 @@ Signed-off-by: Codex <codex@openai.com>
 +	}
 +
 +	mac->phylink = pl;
-+	mac->of_node = chan->of_node;
-+	dev_info(eth->dev, "Ethernet mux: created phylink for channel %u\n",
-+		 channel);
-+
 +	return 0;
 +}
 +
-+static void mtk_mux_destroy_phylink(struct mtk_mac *mac)
-+{
-+	if (mac->phylink) {
-+		phylink_destroy(mac->phylink);
-+		mac->phylink = NULL;
-+	}
-+}
-+
-+static void mtk_mux_switch_channel(struct mtk_mux *mux,
-+				   unsigned int new_channel)
++static int mtk_mux_start(struct mtk_mux *mux)
 +{
 +	struct mtk_mac *mac = mux->mac;
-+	struct mtk_eth *eth = mac->hw;
-+	struct net_device *dev = eth->netdev[mac->id];
++	struct net_device *dev = mac->hw->netdev[mac->id];
 +	int err;
 +
++	if (!mac->phylink)
++		return -ENODEV;
++
 +	rtnl_lock();
-+	mtk_stop(dev);
++	err = mtk_open(dev);
 +	rtnl_unlock();
++
++	return err;
++}
++
++static int mtk_mux_apply_channel(struct mtk_mux *mux, unsigned int channel)
++{
++	int err;
++
++	mtk_mux_disconnect(mux);
++
++	err = mtk_mux_select_channel(mux, channel);
++	if (err)
++		return err;
++
++	return mtk_mux_connect(mux, channel);
++}
++
++static int mtk_mux_rollback_channel(struct mtk_mux *mux,
++				    unsigned int old_channel,
++				    bool restart)
++{
++	struct mtk_eth *eth = mux->mac->hw;
++	int err;
 +
 +	while (test_and_set_bit_lock(MTK_RESETTING, &eth->state))
 +		cpu_relax();
 +
-+	mtk_mux_destroy_phylink(mac);
-+
-+	err = mtk_mux_create_phylink(mux, new_channel);
-+	if (err) {
-+		clear_bit_unlock(MTK_RESETTING, &eth->state);
-+		return;
-+	}
-+
++	err = mtk_mux_apply_channel(mux, old_channel);
 +	clear_bit_unlock(MTK_RESETTING, &eth->state);
++	if (err)
++		return err;
 +
-+	gpiod_set_value_cansleep(mux->chan_sel_gpio, new_channel);
-+	mux->active_channel = new_channel;
++	if (restart)
++		err = mtk_mux_start(mux);
 +
-+	dev_info(eth->dev, "Ethernet mux: switched to channel %u\n",
-+		 new_channel);
-+
-+	rtnl_lock();
-+	mtk_open(dev);
-+	rtnl_unlock();
++	return err;
 +}
 +
-+static void mux_poll(struct work_struct *work)
++static int mtk_mux_switch_channel(struct mtk_mux *mux,
++				  unsigned int new_channel)
++{
++	struct mtk_eth *eth = mux->mac->hw;
++	unsigned int old_channel = mux->active_channel;
++	bool restart = mtk_mux_is_running(mux);
++	int err, rollback_err;
++
++	if (new_channel == old_channel)
++		return 0;
++
++	mux->switching = true;
++
++	if (restart) {
++		err = mtk_mux_stop(mux);
++		if (err)
++			goto out_fail;
++	}
++
++	while (test_and_set_bit_lock(MTK_RESETTING, &eth->state))
++		cpu_relax();
++
++	err = mtk_mux_apply_channel(mux, new_channel);
++	clear_bit_unlock(MTK_RESETTING, &eth->state);
++	if (err)
++		goto rollback;
++
++	if (restart) {
++		err = mtk_mux_start(mux);
++		if (err)
++			goto rollback;
++	}
++
++	mux->active_channel = new_channel;
++	mux->last_error = 0;
++	mux->switch_count++;
++	mux->switching = false;
++
++	dev_info(eth->dev, "Ethernet mux: switched channel %u -> %u\n",
++		 old_channel, new_channel);
++
++	return 0;
++
++rollback:
++	rollback_err = mtk_mux_rollback_channel(mux, old_channel, restart);
++	if (rollback_err)
++		dev_err(eth->dev,
++			"Ethernet mux: rollback to channel %u failed: %d\n",
++			old_channel, rollback_err);
++
++out_fail:
++	mux->last_error = err;
++	mux->switching = false;
++	dev_warn_ratelimited(eth->dev,
++			     "Ethernet mux: switch channel %u -> %u failed: %d\n",
++			     old_channel, new_channel, err);
++
++	return err;
++}
++
++static void mtk_mux_poll(struct work_struct *work)
 +{
 +	struct mtk_mux *mux = container_of(work, struct mtk_mux, poll.work);
-+	struct net_device *dev = mux->mac->hw->netdev[mux->mac->id];
++	struct mtk_eth *eth = mux->mac->hw;
 +	unsigned int new_channel;
-+	int sfp_present;
++	bool sfp_present;
++	int err;
 +
-+	if (IS_ERR(mux->mod_def0_gpio) || IS_ERR(mux->chan_sel_gpio))
++	err = mtk_mux_read_sfp_present(mux, &sfp_present);
++	if (err) {
++		mux->last_error = err;
++		dev_warn_ratelimited(eth->dev,
++				     "Ethernet mux: failed to read MOD_DEF0: %d\n",
++				     err);
 +		goto reschedule;
++	}
 +
-+	sfp_present = gpiod_get_value_cansleep(mux->mod_def0_gpio);
-+	new_channel = sfp_present ? mux->sfp_present_channel :
-+				    !mux->sfp_present_channel;
++	new_channel = mtk_mux_choose_channel(mux, sfp_present);
++	if (!mux->sfp_present_valid ||
++	    mux->last_sfp_present != sfp_present) {
++		dev_info(eth->dev,
++			 "Ethernet mux: MOD_DEF0 SFP present=%u, desired channel %u\n",
++			 sfp_present, new_channel);
++		mux->sfp_present_valid = true;
++	}
 +
-+	if (mux->active_channel == new_channel || !netif_running(dev))
++	mux->last_sfp_present = sfp_present;
++	mux->desired_channel = new_channel;
++
++	if (mux->switching || mux->active_channel == new_channel ||
++	    !mtk_mux_is_running(mux))
 +		goto reschedule;
 +
 +	mtk_mux_switch_channel(mux, new_channel);
@@ -146,7 +303,7 @@ Signed-off-by: Codex <codex@openai.com>
 +	mod_delayed_work(system_wq, &mux->poll, msecs_to_jiffies(100));
 +}
 +
-+static int mtk_add_mux_channel(struct mtk_mux *mux, struct device_node *np)
++static int mtk_mux_parse_channel(struct mtk_mux *mux, struct device_node *np)
 +{
 +	const __be32 *_id = of_get_property(np, "reg", NULL);
 +	struct mtk_eth *eth = mux->mac->hw;
@@ -172,8 +329,57 @@ Signed-off-by: Codex <codex@openai.com>
 +		return -EINVAL;
 +	}
 +
-+	mux->channels[id].of_node = np;
++	of_node_put(mux->channels[id].of_node);
++	mux->channels[id].of_node = of_node_get(np);
 +	mux->channels[id].phy_mode = phy_mode;
++
++	return 0;
++}
++
++static int mtk_mux_validate_channels(struct mtk_mux *mux)
++{
++	struct mtk_eth *eth = mux->mac->hw;
++
++	if (mux->sfp_channel >= MTK_MUX_CHANNELS_MAX) {
++		dev_err(eth->dev, "Ethernet mux: invalid SFP channel %u\n",
++			mux->sfp_channel);
++		return -EINVAL;
++	}
++
++	if (mux->rj45_channel >= MTK_MUX_CHANNELS_MAX) {
++		dev_err(eth->dev, "Ethernet mux: invalid RJ45 channel %u\n",
++			mux->rj45_channel);
++		return -EINVAL;
++	}
++
++	if (mux->sfp_channel == mux->rj45_channel) {
++		dev_err(eth->dev,
++			"Ethernet mux: SFP and RJ45 cannot use channel %u\n",
++			mux->sfp_channel);
++		return -EINVAL;
++	}
++
++	if (!mux->channels[mux->rj45_channel].of_node ||
++	    !mux->channels[mux->sfp_channel].of_node) {
++		dev_err(eth->dev, "Ethernet mux: missing mux channel node\n");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int mtk_mux_init_default(struct mtk_mux *mux)
++{
++	int err;
++
++	mux->active_channel = mux->rj45_channel;
++	mux->desired_channel = mux->rj45_channel;
++
++	err = mtk_mux_apply_channel(mux, mux->rj45_channel);
++	if (err) {
++		mux->last_error = err;
++		return err;
++	}
 +
 +	return 0;
 +}
@@ -190,6 +396,7 @@ Signed-off-by: Codex <codex@openai.com>
 +		return;
 +
 +	cancel_delayed_work_sync(&mux->poll);
++	mtk_mux_put_channels(mux);
 +
 +	if (!IS_ERR_OR_NULL(mux->mod_def0_gpio))
 +		gpiod_put(mux->mod_def0_gpio);
@@ -261,45 +468,40 @@ Signed-off-by: Codex <codex@openai.com>
 +	}
 +
 +	if (of_property_read_u32(np, "sfp-present-channel",
-+				 &mux->sfp_present_channel) &&
++				 &mux->sfp_channel) &&
 +	    of_property_read_u32(np, "sfp-connected-channel",
-+				 &mux->sfp_present_channel))
-+		mux->sfp_present_channel = 1;
-+
-+	if (mux->sfp_present_channel >= MTK_MUX_CHANNELS_MAX) {
-+		dev_err(eth->dev,
-+			"Ethernet mux: invalid SFP-present channel %u\n",
-+			mux->sfp_present_channel);
-+		err = -EINVAL;
-+		goto err_put_chan_sel;
-+	}
-+
-+	/* Default to the non-SFP channel; mux_poll() gives SFP priority. */
-+	mux->active_channel = !mux->sfp_present_channel;
-+	gpiod_set_value_cansleep(mux->chan_sel_gpio, mux->active_channel);
++				 &mux->sfp_channel))
++		mux->sfp_channel = 1;
++	mux->rj45_channel = !mux->sfp_channel;
 +
 +	for_each_child_of_node(np, child) {
-+		err = mtk_add_mux_channel(mux, child);
++		err = mtk_mux_parse_channel(mux, child);
 +		if (err) {
 +			dev_err(eth->dev, "Ethernet mux: failed to add mux channel\n");
 +			of_node_put(child);
-+			goto err_put_chan_sel;
++			goto err_put_channels;
 +		}
 +	}
 +
-+	if (!mux->channels[mux->active_channel].of_node ||
-+	    !mux->channels[mux->sfp_present_channel].of_node) {
-+		dev_err(eth->dev, "Ethernet mux: missing mux channel node\n");
-+		err = -EINVAL;
-+		goto err_put_chan_sel;
-+	}
++	err = mtk_mux_validate_channels(mux);
++	if (err)
++		goto err_put_channels;
 +
-+	INIT_DELAYED_WORK(&mux->poll, mux_poll);
-+	mod_delayed_work(system_wq, &mux->poll, msecs_to_jiffies(3000));
++	err = mtk_mux_init_default(mux);
++	if (err)
++		goto err_put_channels;
++
++	INIT_DELAYED_WORK(&mux->poll, mtk_mux_poll);
++	mod_delayed_work(system_wq, &mux->poll, msecs_to_jiffies(100));
++
++	dev_info(eth->dev,
++		 "Ethernet mux: RJ45 channel %u, SFP channel %u, MOD_DEF0 poll 100 ms\n",
++		 mux->rj45_channel, mux->sfp_channel);
 +
 +	return 0;
 +
-+err_put_chan_sel:
++err_put_channels:
++	mtk_mux_put_channels(mux);
 +	gpiod_put(mux->chan_sel_gpio);
 +err_put_mod_def0:
 +	gpiod_put(mux->mod_def0_gpio);
@@ -381,7 +583,7 @@ Signed-off-by: Codex <codex@openai.com>
  	int				irq[3];
  	u32				msg_enable;
  	unsigned long			sysclk;
-@@ -1494,6 +1496,25 @@ struct mtk_mac {
+@@ -1494,6 +1496,33 @@ struct mtk_mac {
  	struct notifier_block		device_notifier;
  };
  
@@ -400,8 +602,16 @@ Signed-off-by: Codex <codex@openai.com>
 +	struct gpio_desc		*chan_sel_gpio;
 +	struct mtk_mux_channel		channels[MTK_MUX_CHANNELS_MAX];
 +	struct mtk_mac			*mac;
++	unsigned int			desired_channel;
++	unsigned int			selected_channel;
 +	unsigned int			active_channel;
-+	unsigned int			sfp_present_channel;
++	unsigned int			sfp_channel;
++	unsigned int			rj45_channel;
++	bool				last_sfp_present;
++	bool				sfp_present_valid;
++	bool				switching;
++	int				last_error;
++	unsigned int			switch_count;
 +};
 +
  /* the struct describing the SoC. these are declared in the soc_xyz.c files */

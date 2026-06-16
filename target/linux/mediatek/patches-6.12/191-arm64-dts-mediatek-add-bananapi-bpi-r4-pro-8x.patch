@@ -14,8 +14,8 @@ later migration steps.
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-8x.dts  |  16 +
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-emmc.dtso |  33 +
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso |  55 ++
- .../mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi | 673 ++++++++++++++++++
- 5 files changed, 781 insertions(+)
+ .../mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi | 769 ++++++++++++++++++
+ 5 files changed, 877 insertions(+)
 
 --- a/arch/arm64/boot/dts/mediatek/Makefile
 +++ b/arch/arm64/boot/dts/mediatek/Makefile
@@ -38,7 +38,7 @@ later migration steps.
  DTC_FLAGS_mt8395-radxa-nio-12l := -@
 --- /dev/null
 +++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
-@@ -0,0 +1,779 @@
+@@ -0,0 +1,769 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR MIT)
 +/*
 + * Copyright (C) 2025 MediaTek Inc.
@@ -237,7 +237,6 @@ later migration steps.
 +			chan-sel-gpios = <&pio 3 GPIO_ACTIVE_HIGH>;
 +			mod-def0-gpios = <&pio 1 GPIO_ACTIVE_LOW>;
 +			sfp-present-channel = <1>;
-+			status = "disabled";
 +
 +			channel_10: channel@0 {
 +				reg = <0>;
@@ -270,10 +269,9 @@ later migration steps.
 +};
 +
 +&gmac1 {
-+	phy-mode = "10gbase-r";
-+	phy-connection-type = "10gbase-r";
-+	managed = "in-band-status";
-+	sfp = <&sfp2>;
++	phy-mode = "usxgmii";
++	phy-connection-type = "usxgmii";
++	phy-handle = <&phy28>;
 +	nvmem-cell-names = "mac-address";
 +	nvmem-cells = <&gmac1_mac>;
 +	status = "okay";
@@ -700,14 +698,6 @@ later migration steps.
 +		gpio-hog;
 +		gpios = <63 GPIO_ACTIVE_HIGH>;
 +		output-high;
-+	};
-+
-+	/* M05.03a static WAN SFP2 test: force combo mux to SFP side. */
-+	sfp2-mux-select-hog {
-+		gpio-hog;
-+		gpios = <3 GPIO_ACTIVE_HIGH>;
-+		output-high;
-+		line-name = "wan-sfp2-mux-select";
 +	};
 +
 +	pwm0_pins: pwm0-pins {
