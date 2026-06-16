@@ -38,15 +38,13 @@ later migration steps.
  DTC_FLAGS_mt8395-radxa-nio-12l := -@
 --- /dev/null
 +++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
-@@ -0,0 +1,673 @@
+@@ -0,0 +1,769 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR MIT)
 +/*
 + * Copyright (C) 2025 MediaTek Inc.
 + * Author: Sam.Shih <sam.shih@mediatek.com>
 + * Author: Frank Wunderlich <frank-w@public-files.de>
 + */
-+
-+/dts-v1/;
 +
 +#include "mt7988a.dtsi"
 +#include <dt-bindings/gpio/gpio.h>
@@ -57,6 +55,7 @@ later migration steps.
 +/ {
 +	aliases {
 +		ethernet0 = &gmac0;
++		ethernet1 = &gmac1;
 +		i2c0 = &i2c0;
 +		i2c1 = &i2c1;
 +		i2c2 = &i2c2;
@@ -224,6 +223,38 @@ later migration steps.
 +	pinctrl-0 = <&mdio0_pins>;
 +	pinctrl-names = "default";
 +	status = "okay";
++
++	mux: mux-bus {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		mux1: ethernet-mux@1 {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			compatible = "mediatek,eth-mux";
++			reg = <1>;
++			chan-sel-gpios = <&pio 3 GPIO_ACTIVE_HIGH>;
++			mod-def0-gpios = <&pio 1 GPIO_ACTIVE_LOW>;
++			sfp-present-channel = <1>;
++
++			channel_10: channel@0 {
++				reg = <0>;
++				phy-mode = "usxgmii";
++				phy-connection-type = "usxgmii";
++				phy-handle = <&phy28>;
++			};
++
++			channel_11: channel@1 {
++				reg = <1>;
++				phy-mode = "10gbase-r";
++				phy-connection-type = "10gbase-r";
++				managed = "in-band-status";
++				sfp = <&sfp2>;
++			};
++		};
++
++	};
 +};
 +
 +&fan {
@@ -234,6 +265,15 @@ later migration steps.
 +};
 +
 +&gmac0 {
++	status = "okay";
++};
++
++&gmac1 {
++	phy-mode = "usxgmii";
++	phy-connection-type = "usxgmii";
++	phy-handle = <&phy28>;
++	nvmem-cell-names = "mac-address";
++	nvmem-cells = <&gmac1_mac>;
 +	status = "okay";
 +};
 +
@@ -418,6 +458,62 @@ later migration steps.
 +};
 +
 +&mdio_bus {
++	phy24: ethernet-phy@18 {
++		compatible = "ethernet-phy-ieee802.3-c45";
++		reg = <24>;
++		reset-gpios = <&pio 83 GPIO_ACTIVE_LOW>;
++		reset-assert-us = <200000>;
++		reset-deassert-us = <350000>;
++		firmware-name = "as21x1x_fw.bin";
++
++		leds {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			phy24_led0: as21xxx_phy24_led0@0 {
++				reg = <0>;
++				linux,default-trigger = "netdev";
++				active-high;
++				status = "okay";
++			};
++
++			phy24_led1: as21xxx_phy24_led1@1 {
++				reg = <1>;
++				linux,default-trigger = "netdev";
++				active-high;
++				status = "okay";
++			};
++		};
++	};
++
++	phy28: ethernet-phy@1c {
++		compatible = "ethernet-phy-ieee802.3-c45";
++		reg = <28>;
++		reset-gpios = <&pio 82 GPIO_ACTIVE_LOW>;
++		reset-assert-us = <200000>;
++		reset-deassert-us = <350000>;
++		firmware-name = "as21x1x_fw.bin";
++
++		leds {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			phy28_led0: as21xxx_phy28_led0@0 {
++				reg = <0>;
++				linux,default-trigger = "netdev";
++				active-high;
++				status = "okay";
++			};
++
++			phy28_led1: as21xxx_phy28_led1@1 {
++				reg = <1>;
++				linux,default-trigger = "netdev";
++				active-high;
++				status = "okay";
++			};
++		};
++	};
++
 +	switch16: switch@16 {
 +		compatible = "maxlinear,mxl86252";
 +		reg = <16>;

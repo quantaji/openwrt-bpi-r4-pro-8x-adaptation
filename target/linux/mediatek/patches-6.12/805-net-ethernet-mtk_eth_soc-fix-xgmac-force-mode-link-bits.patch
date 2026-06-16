@@ -1,0 +1,117 @@
+From 51cf06ddafc91e017beecfaf81b3b082033b0b93 Mon Sep 17 00:00:00 2001
+From: Daniel Golle <daniel@makrotopia.org>
+Date: Sun, 27 Apr 2025 13:09:43 +0100
+Subject: [PATCH] net: ethernet: mtk_eth_soc: fix XGMAC force mode/link bits
+
+Backport only the XGMAC force-mode / force-link bit split from upstream
+Linux commit 51cf06ddafc9 ("net: ethernet: mtk_eth_soc: add support for
+MT7988 internal 2.5G PHY").
+
+OpenWrt main uses a newer kernel where this register semantics is already
+present in the upstream driver.  OpenWrt 25.12.4 on kernel 6.12 does not
+carry it.  MTK's 25.12 feed carries an equivalent downstream patch named
+999-eth-03-mtk_eth_soc-revise-xgmac-force-mode.patch, and the direct BPI-R4
+Pro 8X vendor tree carries the older 6.6 version
+999-2702-net-ethernet-mtk_eth_soc-revise-xgmac-force-mode.patch.
+
+The 25.12 backport deliberately follows the upstream Linux/OpenWrt main
+boundary for GMAC1: the built-in switch path is not treated as a regular
+external XGMAC link.  MTK/vendor downstream trees carry additional GSW/SER
+link-down handling around GMAC1; M05.02 does not import that larger stack.
+Keep the generic force-mode/link transitions limited to GMAC2/GMAC3 so the
+existing GMAC1 -> GSW path used by lan5 remains unchanged.
+
+Do not copy the larger upstream MT7988 internal 2.5G PHY series here.  M05.02
+needs only this register bit split because runtime diagnostics showed GMAC2
+link-up with MTK_XGMAC_LINK_STS set while the old 6.12 code was still treating
+BIT(31) as the force-link bit instead of the force-mode bit.  Adapt the hunk
+shape to the current OpenWrt 25.12.4 6.12 driver, including the existing
+one-argument MTK_XMAC_MCR() macro and existing mac_prepare() hook.
+
+Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+---
+ drivers/net/ethernet/mediatek/mtk_eth_soc.c | 29 +++++++++++++++++----
+ drivers/net/ethernet/mediatek/mtk_eth_soc.h |  3 ++-
+ 2 files changed, 26 insertions(+), 6 deletions(-)
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -517,6 +517,6 @@ static void mtk_setup_bridge_switch(stru
+ {
+ 	/* Force Port1 XGMAC Link Up */
+-	mtk_m32(eth, 0, MTK_XGMAC_FORCE_LINK(MTK_GMAC1_ID),
++	mtk_m32(eth, 0, MTK_XGMAC_FORCE_MODE(MTK_GMAC1_ID),
+ 		MTK_XGMAC_STS(MTK_GMAC1_ID));
+ 
+ 	/* Adjust GSW bridge IPG to 11 */
+@@ -754,8 +754,20 @@ static int mtk_mac_prepare(struct phyli
+ {
+ 	struct mtk_mac *mac = container_of(config, struct mtk_mac,
+ 					   phylink_config);
++	struct mtk_eth *eth = mac->hw;
+ 
+-	if (mac->pextp && mac->interface != interface)
++	if (mtk_is_netsys_v3_or_greater(eth) &&
++	    mtk_interface_mode_is_xgmii(interface) &&
++	    mac->id != MTK_GMAC1_ID) {
++		mtk_m32(mac->hw, XMAC_MCR_TRX_DISABLE,
++			XMAC_MCR_TRX_DISABLE, MTK_XMAC_MCR(mac->id));
++
++		mtk_m32(mac->hw,
++			MTK_XGMAC_FORCE_MODE(mac->id) | MTK_XGMAC_FORCE_LINK(mac->id),
++			MTK_XGMAC_FORCE_MODE(mac->id), MTK_XGMAC_STS(mac->id));
++	}
++
++	if (mac->pextp && mac->interface != interface)
+ 		phy_reset(mac->pextp);
+ 
+ 	return 0;
+@@ -800,11 +812,11 @@ static void mtk_mac_link_down(struct ph
+ 					   phylink_config);
+ 
+ 	if (!mtk_interface_mode_is_xgmii(interface)) {
+-		mtk_m32(mac->hw, MAC_MCR_TX_EN | MAC_MCR_RX_EN | MAC_MCR_FORCE_LINK, 0, MTK_MAC_MCR(mac->id));
+-		if (mtk_is_netsys_v3_or_greater(mac->hw))
+-			mtk_m32(mac->hw, MTK_XGMAC_FORCE_LINK(mac->id), 0, MTK_XGMAC_STS(mac->id));
++		mtk_m32(mac->hw, MAC_MCR_TX_EN | MAC_MCR_RX_EN | MAC_MCR_FORCE_LINK,
++			0, MTK_MAC_MCR(mac->id));
+ 	} else if (mtk_is_netsys_v3_or_greater(mac->hw) && mac->id != MTK_GMAC1_ID) {
+ 		mtk_m32(mac->hw, XMAC_MCR_TRX_DISABLE, XMAC_MCR_TRX_DISABLE, MTK_XMAC_MCR(mac->id));
++		mtk_m32(mac->hw, MTK_XGMAC_FORCE_LINK(mac->id), 0, MTK_XGMAC_STS(mac->id));
+ 	}
+ }
+ 
+@@ -956,7 +969,7 @@ static void mtk_xgdm_mac_link_up(struct
+ 				 unsigned int mode, phy_interface_t interface,
+ 				 int speed, int duplex, bool tx_pause, bool rx_pause)
+ {
+-	u32 mcr, force_link = 0;
++	u32 mcr;
+ 
+ 	if (mac->id == MTK_GMAC1_ID)
+ 		return;
+@@ -966,10 +979,8 @@ static void mtk_xgdm_mac_link_up(struct
+ 	mdelay(20);
+ 	mtk_m32(mac->hw, XMAC_GLB_CNTCLR, XMAC_GLB_CNTCLR, MTK_XMAC_CNT_CTRL(mac->id));
+ 
+-	if (mac->interface == PHY_INTERFACE_MODE_INTERNAL || mac->id == MTK_GMAC3_ID)
+-		force_link = MTK_XGMAC_FORCE_LINK(mac->id);
+-
+-	mtk_m32(mac->hw, MTK_XGMAC_FORCE_LINK(mac->id), force_link, MTK_XGMAC_STS(mac->id));
++	mtk_m32(mac->hw, MTK_XGMAC_FORCE_LINK(mac->id),
++		MTK_XGMAC_FORCE_LINK(mac->id), MTK_XGMAC_STS(mac->id));
+ 
+ 	mcr = mtk_r32(mac->hw, MTK_XMAC_MCR(mac->id));
+ 	mcr &= ~(XMAC_MCR_FORCE_TX_FC | XMAC_MCR_FORCE_RX_FC | XMAC_MCR_TRX_DISABLE);
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -443,7 +443,8 @@
+ 
+ /* XMAC status registers */
+ #define MTK_XGMAC_STS(x)	(((x) == MTK_GMAC3_ID) ? 0x1001C : 0x1000C)
+-#define MTK_XGMAC_FORCE_LINK(x)	(((x) == MTK_GMAC2_ID) ? BIT(31) : BIT(15))
++#define MTK_XGMAC_FORCE_MODE(x)	(((x) == MTK_GMAC2_ID) ? BIT(31) : BIT(15))
++#define MTK_XGMAC_FORCE_LINK(x)	(((x) == MTK_GMAC2_ID) ? BIT(27) : BIT(11))
+ #define MTK_USXGMII_PCS_LINK	BIT(8)
+ #define MTK_XGMAC_RX_FC		BIT(5)
+ #define MTK_XGMAC_TX_FC		BIT(4)

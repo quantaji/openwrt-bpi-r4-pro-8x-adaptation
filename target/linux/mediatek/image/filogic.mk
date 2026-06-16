@@ -763,7 +763,8 @@ define Device/bananapi_bpi-r4-pro-8x
   DEVICE_DTS_OVERLAY := mt7988a-bananapi-bpi-r4-pro-emmc mt7988a-bananapi-bpi-r4-pro-sd
   $(call Device/bananapi_bpi-r4-pro-common)
   DEVICE_PACKAGES := kmod-i2c-mux-pca954x kmod-gpio-pca953x \
-		     kmod-dsa-mxl862xx \
+		     kmod-dsa-mxl862xx kmod-phy-aeonsemi-as21xxx \
+		     ethtool-full tcpdump ip-full \
 		     kmod-eeprom-at24 kmod-rtc-pcf8563 \
 		     nand-utils e2fsprogs f2fsck mkf2fs
   IMAGES := sysupgrade.itb

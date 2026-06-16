@@ -1,0 +1,52 @@
+From 492b196e3c0b4e87513b82966221c4365d184d48 Mon Sep 17 00:00:00 2001
+From: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+Date: Thu, 28 Nov 2024 13:19:38 +0800
+Subject: [PATCH] net: phy: sfp: support shared mod-def0 gpio
+
+The SFP/PHY dynamic switching through the passive mux uses the same
+mod-def0 GPIO that the SFP cage uses for module detect.  Request the
+SFP mod-def0 GPIO as non-exclusive so the MediaTek Ethernet mux glue can
+read the same signal.
+
+Source: direct BPI-R4 Pro 8X vendor tree
+  target/linux/mediatek/patches-6.6/
+  999-2754-net-phy-sfp-support-shared-mod-def0-gpio.patch
+Source: MTK OpenWrt 25.12 feed
+  target/linux/mediatek/patches-6.12/
+  999-sfp-02-add-shared-mod-def0-gpio.patch
+
+Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/net/phy/sfp.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+--- a/drivers/net/phy/sfp.c
++++ b/drivers/net/phy/sfp.c
+@@ -156,7 +156,7 @@ static const char *gpio_names[] = {
+ };
+ 
+ static const enum gpiod_flags gpio_flags[] = {
+-	GPIOD_IN,
++	GPIOD_IN | GPIOD_FLAGS_BIT_NONEXCLUSIVE,
+ 	GPIOD_IN,
+ 	GPIOD_IN,
+ 	GPIOD_ASIS,
+@@ -630,7 +630,7 @@ static unsigned int sfp_gpio_get_state(s
+ 	unsigned int i, state, v;
+ 
+ 	for (i = state = 0; i < GPIO_MAX; i++) {
+-		if (gpio_flags[i] != GPIOD_IN || !sfp->gpio[i])
++		if ((gpio_flags[i] & GPIOD_IN) != GPIOD_IN || !sfp->gpio[i])
+ 			continue;
+ 
+ 		v = gpiod_get_value_cansleep(sfp->gpio[i]);
+@@ -3128,7 +3128,7 @@ static int sfp_probe(struct platform_dev
+ 	}
+ 
+ 	for (i = 0; i < GPIO_MAX; i++) {
+-		if (gpio_flags[i] != GPIOD_IN || !sfp->gpio[i])
++		if ((gpio_flags[i] & GPIOD_IN) != GPIOD_IN || !sfp->gpio[i])
+ 			continue;
+ 
+ 		sfp->gpio_irq[i] = gpiod_to_irq(sfp->gpio[i]);

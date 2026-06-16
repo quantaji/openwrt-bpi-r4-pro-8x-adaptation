@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 15 Jun 2026 00:00:00 -0700
+Subject: [PATCH] arm64: dts: mediatek: mt7988a: move XFI TPHYs to PCS nodes
+
+Move MT7988 XFI TPHY ownership from the GMAC nodes to the PCS nodes.
+The MediaTek USXGMII PCS driver is the layer that configures the PMA/PMD
+mode for USXGMII, 10GBase-R and 5GBase-R; keeping the TPHY on the MAC node
+leaves the MAC and PCS paths fighting over the same SerDes resource.
+
+Sources:
+  - OpenWrt main:
+    target/linux/mediatek/patches-6.18/
+    186-arm64-dts-mt7988a-complete-dtsi.patch
+  - MTK OpenWrt 25.12 feed:
+    target/linux/mediatek/patches-6.12/
+    999-dts-mt7988a-rfb-05-arm64-dts-mediatek-move-phys-to-sgmiipcs-and-usxgmiisy.patch
+  - Direct BPI-R4 Pro 8X vendor tree:
+    target/linux/mediatek/patches-6.6/
+    999-2000-arm64-dts-mt7988-move-phys-to-sgmiipcs-and-usxgmiisy.patch
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ arch/arm64/boot/dts/mediatek/mt7988a.dtsi | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+--- a/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
+@@ -303,7 +303,8 @@
+ 				clocks = <&topckgen CLK_TOP_SGM_0_SEL>,
+ 					 <&sgmiisys0 CLK_SGM0_TX_EN>,
+ 					 <&sgmiisys0 CLK_SGM0_RX_EN>;
+ 				clock-names = "sgmii_sel", "sgmii_tx", "sgmii_rx";
++				phys = <&xfi_tphy0>;
+ 				#pcs-cells = <0>;
+ 			};
+ 		};
+@@ -322,7 +323,8 @@
+ 				clocks = <&topckgen CLK_TOP_SGM_1_SEL>,
+ 					 <&sgmiisys1 CLK_SGM1_TX_EN>,
+ 					 <&sgmiisys1 CLK_SGM1_RX_EN>;
+ 				clock-names = "sgmii_sel", "sgmii_tx", "sgmii_rx";
++				phys = <&xfi_tphy1>;
+ 				#pcs-cells = <0>;
+ 			};
+ 		};
+@@ -331,8 +333,9 @@
+ 		usxgmiisys0: pcs@10080000 {
+ 			compatible = "mediatek,mt7988-usxgmiisys";
+ 			reg = <0 0x10080000 0 0x1000>;
+ 			resets = <&watchdog 12>;
+ 			clocks = <&topckgen CLK_TOP_USXGMII_SBUS_0_SEL>;
++			phys = <&xfi_tphy0>;
+ 			#pcs-cells = <0>;
+ 		};
+ 
+@@ -340,8 +343,9 @@
+ 		usxgmiisys1: pcs@10081000 {
+ 			compatible = "mediatek,mt7988-usxgmiisys";
+ 			reg = <0 0x10081000 0 0x1000>;
+ 			resets = <&watchdog 13>;
+ 			clocks = <&topckgen CLK_TOP_USXGMII_SBUS_1_SEL>;
++			phys = <&xfi_tphy1>;
+ 			#pcs-cells = <0>;
+ 		};
+ 
+@@ -984,15 +988,13 @@
+ 			gmac1: mac@1 {
+ 				compatible = "mediatek,eth-mac";
+ 				reg = <1>;
+ 				pcs-handle = <&sgmiipcs1>, <&usxgmiisys1>;
+-				phys = <&xfi_tphy1>;
+ 				status = "disabled";
+ 			};
+ 
+ 			gmac2: mac@2 {
+ 				compatible = "mediatek,eth-mac";
+ 				reg = <2>;
+ 				pcs-handle = <&sgmiipcs0>, <&usxgmiisys0>;
+-				phys = <&xfi_tphy0>;
+ 				status = "disabled";
+ 			};
