@@ -764,6 +764,7 @@ define Device/bananapi_bpi-r4-pro-8x
   $(call Device/bananapi_bpi-r4-pro-common)
   DEVICE_PACKAGES := kmod-i2c-mux-pca954x kmod-gpio-pca953x \
 		     kmod-dsa-mxl862xx kmod-phy-aeonsemi-as21xxx \
+		     kmod-sfp \
 		     ethtool-full tcpdump ip-full \
 		     kmod-eeprom-at24 kmod-rtc-pcf8563 \
 		     nand-utils e2fsprogs f2fsck mkf2fs
