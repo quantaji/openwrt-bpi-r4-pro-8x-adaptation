@@ -1,0 +1,83 @@
+From: Mason Chang <mason-cw.chang@mediatek.com>
+Date: Fri, 26 Sep 2025 16:28:37 +0800
+Subject: [PATCH] arm64: dts: mediatek: mt7988: add cpufreq cooling
+
+Register the MT7988 CPU cluster as a thermal cooling device and add active
+thermal trips that can throttle CPU frequency when the CPU LVTS zones reach
+the configured threshold.
+
+Source: MTK OpenWrt 25.12
+  target/linux/mediatek/patches-6.12/
+  999-dts-04-arm64-dts-mediatek-add-mt7988-cpufreq-cooling-device.patch
+
+Adaptation notes:
+  - Rename from MTK's local 999-* patch and place after the local mt7988a
+    dtsi completion patch so the CPU OPP/nvmem properties are already
+    present.
+  - Keep this as DTS-only thermal policy; no cpufreq driver behavior is
+    changed here.
+
+Signed-off-by: Mason Chang <mason-cw.chang@mediatek.com>
+Signed-off-by: Codex <codex@openai.com>
+---
+ arch/arm64/boot/dts/mediatek/mt7988a.dtsi | 30 ++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+--- a/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
+@@ -6,5 +6,7 @@
+ #include <dt-bindings/pinctrl/mt65xx.h>
+ #include <dt-bindings/reset/mediatek,mt7988-resets.h>
+ #include <dt-bindings/leds/common.h>
++#include <dt-bindings/thermal/thermal.h>
++#include <dt-bindings/thermal/mediatek,lvts-thermal.h>
+ 
+ / {
+@@ -58,6 +59,7 @@
+ 			nvmem-cells = <&cpufreq_calibration>;
+ 			nvmem-cell-names = "calibration-data";
+ 			mediatek,cci = <&cci>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu1: cpu@1 {
+@@ -1313,6 +1315,19 @@
+ 					hysteresis = <2000>;
+ 					type = "critical";
+ 				};
++
++				cpu_trip_active_hot: active-hot {
++					temperature = <117000>;
++					hysteresis = <2000>;
++					type = "active";
++				};
++			};
++
++			cooling-maps {
++				cpu-active-hot {
++					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++					trip = <&cpu_trip_active_hot>;
++				};
+ 			};
+ 		};
+ 
+@@ -1326,6 +1341,19 @@
+ 					hysteresis = <2000>;
+ 					type = "critical";
+ 				};
++
++				cpu_1_trip_active_hot: active-hot {
++					temperature = <117000>;
++					hysteresis = <2000>;
++					type = "active";
++				};
++			};
++
++			cooling-maps {
++				cpu-active-hot {
++					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++					trip = <&cpu_1_trip_active_hot>;
++				};
+ 			};
+ 		};
+ 

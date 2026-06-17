@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Wed, 17 Jun 2026 00:00:00 -0700
+Subject: [PATCH] net: dsa: mxl862xx: preserve tagged bridge VLANs in 8021Q mode
+
+In mxl862xx-8021q mode, user-port egress EVLAN appends catchall rules
+which strip the outer tag from CPU-to-user frames so the tag_8021q
+management VID is removed before transmit.
+
+Tagged bridge VIDs currently do not get per-VID egress rules. Ordinary
+user-to-user service-tagged frames can therefore fall through to those
+catchalls and lose their service tag.
+
+Add explicit accept rules for tagged service VIDs before the catchalls.
+Skip the tag_8021q management VID so CPU-to-user frames are still handled
+by the strip rules.
+
+Source: authored locally for BPI-R4 Pro 8X M05 DSA/VLAN validation after
+observing that tagged port-to-port VLAN traffic reached the CPU but did
+not survive MxL862xx user-port egress in mxl862xx-8021q mode.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+--- a/drivers/net/dsa/mxl862xx/mxl862xx.c
++++ b/drivers/net/dsa/mxl862xx/mxl862xx.c
+@@ -214,6 +214,21 @@
+ 	{ FT_NORMAL,    FT_NO_TAG,    TP_8021Q, TP_NONE,  true, EVLAN_REASSIGN },
+ };
+ 
++/*
++ * User port egress pass-through rules for tagged bridge VIDs in
++ * tag_8021q mode.
++ *
++ * These match ordinary user-to-user bridge VLAN frames whose outer tag is
++ * the service VID. They must run before the tag_8021q management VID strip
++ * catchalls so the service tag is preserved.
++ */
++static const struct mxl862xx_evlan_rule_desc tag_8021q_egress_accept_tagged[] = {
++	/* Service VID outer + any inner tag present */
++	{ FT_NORMAL, FT_NORMAL, TP_8021Q, TP_8021Q, true, EVLAN_ACCEPT },
++	/* Service VID outer, no inner */
++	{ FT_NORMAL, FT_NO_TAG, TP_8021Q, TP_NONE, true, EVLAN_ACCEPT },
++};
++
+ /* User port egress catchall rules for tag_8021q mode.
+  * Strip the outer management VID tag from CPU->user frames that were
+  * not matched by any per-VID egress rule. Appended to the user port
+@@ -1148,8 +1163,10 @@
+ 
+ 		/* Egress block: remaining budget divided equally among
+ 		 * user ports. Each untagged VID needs vid_rules (2)
+-		 * EVLAN entries for tag stripping. Tagged-only VIDs
+-		 * need no EVLAN rules at all. The block also includes
++		 * EVLAN entries for tag stripping. In tag_8021q mode,
++		 * tagged service VIDs also need pass-through rules before
++		 * the management VID strip catchalls, using the same
++		 * per-VID entry budget. The block also includes
+ 		 * space for the tag_8021q egress catchall rules.
+ 		 */
+ 		max_vlans = (MXL862XX_TOTAL_EVLAN_ENTRIES - evlan_reserved) /
+@@ -1726,10 +1743,11 @@
+ 	struct mxl862xx_port *p = &priv->ports[port];
+ 	struct mxl862xx_evlan_block *blk = &p->egress_evlan;
+ 	const struct mxl862xx_evlan_rule_desc *vid_rules;
++	const struct mxl862xx_evlan_rule_desc *rules;
+ 	struct mxl862xx_vf_vid *vfv;
+ 	u16 old_active = blk->n_active;
+-	int n_vid, n_catch, ret;
+-	u16 idx = 0, i;
++	int n_vid, n_rules, n_catch, ret;
++	u16 idx = 0, i, j;
+ 
+ 	if (p->vlan_filtering) {
+ 		vid_rules = vid_accept_standard;
+@@ -1740,10 +1758,7 @@
+ 	}
+ 
+ 	list_for_each_entry(vfv, &p->vf.vids, list) {
+-		if (!vfv->untagged)
+-			continue;
+-
+-		/* Skip the tag_8021q management VID -- it must NOT get
++		/* Skip the tag_8021q management VID - it must NOT get
+ 		 * per-VID egress rules. The management VID arrives as
+ 		 * the outer tag on CPU->user frames and is stripped by
+ 		 * the catchall rules appended below. A per-VID rule
+@@ -1753,19 +1768,27 @@
+ 		if (p->tag_8021q_vid && vfv->vid == p->tag_8021q_vid)
+ 			continue;
+ 
+-		if (idx + n_vid > blk->block_size)
+-			return -ENOSPC;
++		if (vfv->untagged) {
++			rules = vid_rules;
++			n_rules = n_vid;
++		} else if (priv->tag_proto == DSA_TAG_PROTO_MXL862_8021Q) {
++			/* Tagged service VIDs must be accepted before the
++			 * tag_8021q egress catchalls. Otherwise normal
++			 * user-to-user tagged bridge traffic can be stripped
++			 * like CPU-to-user management-tagged traffic.
++			 */
++			rules = tag_8021q_egress_accept_tagged;
++			n_rules = ARRAY_SIZE(tag_8021q_egress_accept_tagged);
++		} else {
++			continue;
++		}
+ 
+-		ret = mxl862xx_evlan_write_rule(priv, blk->block_id,
+-						idx++, &vid_rules[0],
+-						vfv->vid, vfv->untagged,
+-						p->pvid, 0);
+-		if (ret)
+-			return ret;
++		if (idx + n_rules > blk->block_size)
++			return -ENOSPC;
+ 
+-		if (n_vid > 1) {
++		for (j = 0; j < n_rules; j++) {
+ 			ret = mxl862xx_evlan_write_rule(priv, blk->block_id,
+-							idx++, &vid_rules[1],
++							idx++, &rules[j],
+ 							vfv->vid,
+ 							vfv->untagged,
+ 							p->pvid, 0);

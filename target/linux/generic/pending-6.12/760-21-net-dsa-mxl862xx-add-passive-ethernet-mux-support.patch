@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Codex <codex@openai.com>
 Date: Tue, 16 Jun 2026 00:00:00 -0700
-Subject: [PATCH] DO NOT SUBMIT: net: dsa: mxl862xx: add passive mux support
+Subject: [PATCH] net: dsa: mxl862xx: add passive Ethernet mux support
 
 Add MxL862xx DSA-side passive mux glue for BPI-R4 Pro 8X combo-lan.
 The mux mirrors the MediaTek Ethernet mux state machine structure while
@@ -11,6 +11,15 @@ The mux uses MOD_DEF0 to select the SFP channel and falls back to the
 RJ45 PHY channel when no SFP module is present.  The channel-select GPIO
 switches the external passive mux, and the active DSA port phylink is
 rebuilt from the selected channel node.
+
+Source: authored for BPI-R4 Pro 8X M05.03/M05.04 validation.
+
+Adaptation notes:
+  - Keep the generic state-machine layout aligned with the MediaTek passive
+    mux patch while using MxL862xx DSA/phylink-specific action functions.
+  - Use create-before-destroy phylink switching to avoid transient netdev
+    teardown events observed during runtime mux transitions.
+  - Keep this implementation local to the MxL862xx 6.12 driver backport.
 
 Signed-off-by: Codex <codex@openai.com>
 ---

@@ -575,7 +575,7 @@ $(eval $(call KernelPackage,phy-vitesse))
 define KernelPackage/phy-aeonsemi-as21xxx
   SUBMENU:=$(NETWORK_DEVICES_MENU)
   TITLE:=Aeonsemi AS21xxx 10G Ethernet PHY
-  DEPENDS:=+aeonsemi-as21xxx-firmware +kmod-libphy
+  DEPENDS:=+aeonsemi-as21xxx-firmware +kmod-libphy +kmod-hwmon-core
   KCONFIG:=CONFIG_AS21XXX_PHY
   FILES:= \
    $(LINUX_DIR)/drivers/net/phy/as21xxx.ko

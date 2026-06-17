@@ -10,13 +10,14 @@ Subject: [PATCH 2/2] cpufreq: mt7988: enable using efuse calibration data for
 
 --- a/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
 +++ b/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
-@@ -55,6 +55,8 @@
+@@ -55,7 +55,9 @@
  				 <&topckgen CLK_TOP_XTAL>;
  			clock-names = "cpu", "intermediate";
  			operating-points-v2 = <&cluster0_opp>;
 +			nvmem-cells = <&cpufreq_calibration>;
 +			nvmem-cell-names = "calibration-data";
  			mediatek,cci = <&cci>;
+			#cooling-cells = <2>;
  		};
  
 @@ -67,6 +69,8 @@

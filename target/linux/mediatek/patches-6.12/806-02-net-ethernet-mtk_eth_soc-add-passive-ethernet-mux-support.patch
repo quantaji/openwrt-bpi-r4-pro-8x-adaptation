@@ -1,7 +1,7 @@
 From 4349947a1d8d9d52cc6820fb8544ef41a47c5068 Mon Sep 17 00:00:00 2001
 From: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
 Date: Thu, 18 Sep 2025 17:20:56 +0800
-Subject: [PATCH] net: ethernet: mtk_eth_soc: support ethernet passive mux
+Subject: [PATCH] net: ethernet: mtk_eth_soc: add passive Ethernet mux support
 
 Add MediaTek Ethernet passive mux glue for boards where one SerDes path
 is physically switched between an RJ45 PHY and an SFP cage.  The mux uses
@@ -24,8 +24,8 @@ Adaptation notes:
   - Keep direct 8X DTS property name "sfp-present-channel".
   - Also accept MTK RFB's "sfp-connected-channel" for compatibility.
   - Use kzalloc() and release the mux-bus node outside the child loop.
-  - This is temporary 6.12 glue for M05.  Future upstream-style support
-    should move to phy_port / port-state style APIs when available.
+  - Keep this as 6.12 glue for M05; future upstream-style support can move
+    to phy_port / port-state style APIs when available.
 
 Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
 Signed-off-by: Codex <codex@openai.com>

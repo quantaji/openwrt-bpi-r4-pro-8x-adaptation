@@ -8,8 +8,8 @@ USXGMII, 10GBase-R and 5GBase-R.  Acquire the XFI TPHY from the PCS
 device tree node and perform reset, power and mode changes from the PCS
 ops instead of relying on the MAC node to own the same SerDes resource.
 
-This patch is adapted to the local 25.12/6.12 stack after the M05.02
-diagnostic patch and the existing polarity handling in pcs-mtk-usxgmii.c.
+This patch is adapted to the local 25.12/6.12 stack and the existing
+polarity handling in pcs-mtk-usxgmii.c.
 
 Sources:
   - OpenWrt main:
@@ -21,8 +21,8 @@ Sources:
 
 Signed-off-by: Codex <codex@openai.com>
 ---
- drivers/net/pcs/pcs-mtk-usxgmii.c | 36 +++++++++++++++++++++++++++++++
- 1 file changed, 36 insertions(+)
+ drivers/net/pcs/pcs-mtk-usxgmii.c | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
 
 --- a/drivers/net/pcs/pcs-mtk-usxgmii.c
 +++ b/drivers/net/pcs/pcs-mtk-usxgmii.c
@@ -50,17 +50,15 @@ Signed-off-by: Codex <codex@openai.com>
  	mtk_usxgmii_reset(mpcs);
  
  	/* Configure the interface polarity */
-@@ -250,6 +253,9 @@ static int mtk_usxgmii_pcs_config(struct
+@@ -250,4 +253,7 @@ static int mtk_usxgmii_pcs_config(struct
  	if (an_ctrl & USXGMII_AN_ENABLE)
  		mtk_m32(mpcs, RG_PHY_TOP_SPEED_CTRL1, USXGMII_IF_FORCE_EN, 0);
  
 +	/* Setup PMA/PMD */
 +	phy_set_mode_ext(mpcs->xfi_tphy, PHY_MODE_ETHERNET, interface);
 +
- 	mtk_usxgmii_pcs_m05_diag(mpcs, "pcs_config", NULL);
- 
  	return mode_changed;
-@@ -356,13 +362,25 @@ static void mtk_usxgmii_pcs_link_up(stru
+@@ -356,10 +362,23 @@ static void mtk_usxgmii_pcs_link_up(stru
  				    phy_interface_t interface,
  				    int speed, int duplex)
  {
@@ -72,10 +70,6 @@ Signed-off-by: Codex <codex@openai.com>
  	mtk_usxgmii_pcs_config(pcs, neg_mode, interface, NULL, false);
 +	phy_reset(mpcs->xfi_tphy);
 +	phy_set_mode_ext(mpcs->xfi_tphy, PHY_MODE_ETHERNET, interface);
- 
--	mtk_usxgmii_pcs_m05_diag(pcs_to_mtk_usxgmii_pcs(pcs),
--				 "pcs_link_up", NULL);
-+	mtk_usxgmii_pcs_m05_diag(mpcs, "pcs_link_up", NULL);
 +}
 +
 +static int mtk_usxgmii_pcs_enable(struct phylink_pcs *pcs)
@@ -88,7 +82,7 @@ Signed-off-by: Codex <codex@openai.com>
  }
  
  static void mtk_usxgmii_pcs_disable(struct phylink_pcs *pcs)
-@@ -374,6 +395,8 @@ static void mtk_usxgmii_pcs_disable(stru
+@@ -374,6 +393,8 @@ static void mtk_usxgmii_pcs_disable(stru
  
  	mpcs->interface = PHY_INTERFACE_MODE_NA;
  	mpcs->neg_mode = -1;
@@ -97,14 +91,14 @@ Signed-off-by: Codex <codex@openai.com>
  }
  
  static const struct phylink_pcs_ops mtk_usxgmii_pcs_ops = {
-@@ -382,5 +405,6 @@ static const struct phylink_pcs_ops mtk_
+@@ -382,5 +403,6 @@ static const struct phylink_pcs_ops mtk_
  	.pcs_get_state = mtk_usxgmii_pcs_get_state,
  	.pcs_an_restart = mtk_usxgmii_pcs_restart_an,
  	.pcs_link_up = mtk_usxgmii_pcs_link_up,
 +	.pcs_enable = mtk_usxgmii_pcs_enable,
  	.pcs_disable = mtk_usxgmii_pcs_disable,
  };
-@@ -405,6 +429,10 @@ static int mtk_usxgmii_probe(struct plat
+@@ -405,6 +427,10 @@ static int mtk_usxgmii_probe(struct plat
  	if (IS_ERR(mpcs->clk))
  		return PTR_ERR(mpcs->clk);
  
