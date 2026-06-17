@@ -14,8 +14,8 @@ later migration steps.
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-8x.dts  |  16 +
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-emmc.dtso |  33 +
  .../mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso |  55 ++
- .../mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi | 787 ++++++++++++++++++
- 5 files changed, 895 insertions(+)
+ .../mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi | 810 ++++++++++++++++++
+ 5 files changed, 918 insertions(+)
 
 --- a/arch/arm64/boot/dts/mediatek/Makefile
 +++ b/arch/arm64/boot/dts/mediatek/Makefile
@@ -38,7 +38,7 @@ later migration steps.
  DTC_FLAGS_mt8395-radxa-nio-12l := -@
 --- /dev/null
 +++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
-@@ -0,0 +1,787 @@
+@@ -0,0 +1,810 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR MIT)
 +/*
 + * Copyright (C) 2025 MediaTek Inc.
@@ -574,10 +574,9 @@ later migration steps.
 +			port@13 {
 +				reg = <13>;
 +				label = "combo-lan";
-+				phy-mode = "10gbase-r";
-+				phy-connection-type = "10gbase-r";
-+				managed = "in-band-status";
-+				sfp = <&sfp1>;
++				phy-mode = "usxgmii";
++				phy-connection-type = "usxgmii";
++				phy-handle = <&phy24>;
 +				status = "okay";
 +			};
 +
@@ -591,6 +590,37 @@ later migration steps.
 +				fixed-link {
 +					speed = <10000>;
 +					full-duplex;
++				};
++			};
++		};
++
++		mux-bus {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			mxl_mux13: ds-mux@13 {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				compatible = "mxl862xx,ds-mux";
++				reg = <13>;
++				chan-sel-gpios = <&pio 54 GPIO_ACTIVE_HIGH>;
++				mod-def0-gpios = <&pio 69 GPIO_ACTIVE_LOW>;
++				sfp-present-channel = <0>;
++
++				channel@0 {
++					reg = <0>;
++					phy-mode = "10gbase-r";
++					phy-connection-type = "10gbase-r";
++					managed = "in-band-status";
++					sfp = <&sfp1>;
++				};
++
++				channel@1 {
++					reg = <1>;
++					phy-mode = "usxgmii";
++					phy-connection-type = "usxgmii";
++					phy-handle = <&phy24>;
 +				};
 +			};
 +		};
@@ -709,13 +739,6 @@ later migration steps.
 +		gpio-hog;
 +		gpios = <63 GPIO_ACTIVE_HIGH>;
 +		output-high;
-+	};
-+
-+	combo-lan-sfp1-mux-select-hog {
-+		gpio-hog;
-+		gpios = <54 GPIO_ACTIVE_HIGH>;
-+		output-low;
-+		line-name = "combo-lan-sfp1-mux-select";
 +	};
 +
 +	pwm0_pins: pwm0-pins {
