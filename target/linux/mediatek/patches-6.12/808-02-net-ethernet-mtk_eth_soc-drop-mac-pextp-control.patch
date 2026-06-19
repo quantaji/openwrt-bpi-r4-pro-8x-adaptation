@@ -96,9 +96,9 @@ Signed-off-by: Codex <codex@openai.com>
 -		}
 -	}
 -
- 	memset(mac->hwlro_ip, 0, sizeof(mac->hwlro_ip));
- 
- 	eth->netdev[id]->irq = eth->irq[0];
+ 	/*
+ 	 * Initialize the DSA user-port queue map to an identity mapping
+ 	 * starting at MTK_MAX_DEVS, so that a mac without any DSA switch
 --- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
 +++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
 @@ -1400,7 +1400,6 @@ struct mtk_mac {

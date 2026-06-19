@@ -63,7 +63,7 @@ Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
 +	mtk_hw_dump_reg(eth, "FE", 0x1400, 0x300);
 +	mtk_hw_dump_reg(eth, "ADMA", reg_map->pdma.rx_ptr, 0x300);
 +	if (MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA)) {
-+		for (id = 0; id < MTK_QDMA_NUM_QUEUES / 16; id++) {
++		for (id = 0; id < eth->soc->num_tx_queues / 16; id++) {
 +			mtk_w32(eth, id, reg_map->qdma.page);
 +			pr_info("\nQDMA PAGE:%x ", mtk_r32(eth, reg_map->qdma.page));
 +			mtk_hw_dump_reg(eth, "QDMA", reg_map->qdma.qtx_cfg, 0x100);
