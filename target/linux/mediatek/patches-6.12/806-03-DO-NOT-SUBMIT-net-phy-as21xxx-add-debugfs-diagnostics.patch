@@ -1,0 +1,506 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 23 Jun 2026 00:00:00 -0700
+Subject: [PATCH] DO NOT SUBMIT: net: phy: as21xxx: add debugfs diagnostics
+
+Add temporary AS21xx diagnostics split out from the mixed AS21xx/MxL debug
+patches. The debugfs files expose read-only firmware-side diagnostics for
+combo RJ45 testing, and the trace logs preserve the existing temporary
+AS21xx lifecycle probes.
+
+This is downstream validation code only and must be removed once the
+AS21xx/MxL combo RJ45 failure has been isolated.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index d5a88c0..bac8d6e 100644
+--- a/drivers/net/phy/as21xxx.c
++++ b/drivers/net/phy/as21xxx.c
+@@ -6,13 +6,16 @@
+  */
+ 
+ #include <linux/bitfield.h>
++#include <linux/debugfs.h>
+ #include <linux/firmware.h>
+ #include <linux/hwmon.h>
+ #include <linux/math64.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/phy.h>
++#include <linux/seq_file.h>
+ #include <linux/slab.h>
++#include <linux/unaligned.h>
+ 
+ #define VEND1_GLB_REG_CPU_RESET_ADDR_LO_BASEADDR 0x3
+ #define VEND1_GLB_REG_CPU_RESET_ADDR_HI_BASEADDR 0x4
+@@ -67,6 +70,10 @@
+ #define IPC_CMD_TEMP_MON		0x15 /* Temperature monitoring function */
+ #define IPC_CMD_SET_LED			0x23 /* Set led */
+ 
++#define IPC_OPCODE_DBGCMD		22
++#define IPC_OPCODE_POLL			23
++#define IPC_OPCODE_RBUF			25
++
+ #define VEND1_IPC_STS			0x5802
+ #define   AS21XXX_IPC_STS_PARITY	BIT(15)
+ #define   AS21XXX_IPC_STS_SIZE		GENMASK(14, 10)
+@@ -114,6 +121,24 @@
+ #define IPC_CFG_PARAM_DIRECT_DPC_SDS_WAIT_ETH 0x8
+ #define IPC_CFG_PARAM_DIRECT_WDT	0x9
+ 
++/* Temporary diagnostic DBGCMD command groups. */
++#define IPC_DBGCMD_NGPHY		0x80
++#define IPC_DBGCMD_DPC			0x8b
++#define IPC_DBGCMD_CU_AN		0xa0
++#define CFG_NGPHY_CNT_DUMP		4
++#define IPC_CMD_RA_GET_CFG		7
++#define IPC_CMD_CU_AN_CNT_GET		10
++#define CFG_DPC_CNT_DUMP		13
++#define CFG_SUPPORT_FC_GET		14
++#define CFG_DP_PKT_DUMP			19
++
++#define IPC_DUMP_NGPHY_NUM		5
++#define IPC_DUMP_CU_AN_NUM		1
++#define IPC_DUMP_DPC_NUM		3
++#define IPC_DP_DUMP_NUM			34
++#define AS21XXX_DIAG_POLL_MAX		100
++#define AS21XXX_DIAG_MAX_BYTES		(IPC_DP_DUMP_NUM * sizeof(u32))
++
+ /* Sub command of CMD_TEMP_MON */
+ #define IPC_CMD_TEMP_MON_GET		0x4
+ 
+@@ -196,10 +221,13 @@ struct as21xxx_priv {
+ 	bool ipc_parity;
+ 	bool cu_an_top_speed_valid;
+ 	u16 cu_an_top_speed;
++	struct dentry *debugfs_dir;
+ 	/* Protect concurrent IPC access */
+ 	struct mutex ipc_lock;
+ };
+ 
++static struct dentry *as21xxx_debugfs_root;
++
+ static struct as21xxx_led_pattern_info as21xxx_led_supported_pattern[] = {
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_10),
+@@ -602,6 +630,323 @@ out:
+ 	return ret;
+ }
+ 
++static int as21xxx_diag_send_locked(struct phy_device *phydev,
++				    struct as21xxx_priv *priv, u16 opcode,
++				    const u16 *tx, unsigned int tx_words)
++{
++	u16 sts;
++	int ret;
++	int i;
++
++	if (tx_words > AS21XXX_IPC_DATA_NUM_REGISTERS)
++		return -EMSGSIZE;
++	if (tx_words && !tx)
++		return -EINVAL;
++
++	for (i = 0; i < tx_words; i++) {
++		ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
++				    VEND1_IPC_DATA(i), tx[i]);
++		if (ret)
++			return ret;
++	}
++
++	ret = as21xxx_ipc_send_cmd_locked(phydev, priv, opcode, tx_words,
++					  true, &sts);
++	if (ret)
++		return ret;
++
++	return as21xxx_ipc_status_to_errno(sts);
++}
++
++static int as21xxx_diag_sync_parity_locked(struct phy_device *phydev,
++					   struct as21xxx_priv *priv)
++{
++	bool parity;
++	int ret;
++
++	ret = as21xxx_ipc_send_cmd_locked(phydev, priv, IPC_CMD_NOOP, 0,
++					  false, NULL);
++	if (ret)
++		return ret;
++
++	priv->ipc_parity = false;
++	parity = priv->ipc_parity;
++
++	ret = as21xxx_ipc_send_cmd_locked(phydev, priv, IPC_CMD_NOOP, 0,
++					  false, NULL);
++	if (ret)
++		return ret;
++
++	return as21xxx_ipc_wait_ready(phydev, parity);
++}
++
++static int as21xxx_diag_read_data_bytes(struct phy_device *phydev, u8 *buf,
++					unsigned int len)
++{
++	unsigned int i;
++	int ret;
++	u16 val;
++
++	if (len > AS21XXX_IPC_DATA_MAX)
++		return -EMSGSIZE;
++
++	for (i = 0; i < DIV_ROUND_UP(len, sizeof(u16)); i++) {
++		ret = phy_read_mmd(phydev, MDIO_MMD_VEND1,
++				   VEND1_IPC_DATA(i));
++		if (ret < 0)
++			return ret;
++
++		val = ret;
++		buf[i * 2] = val & 0xff;
++		if (i * 2 + 1 < len)
++			buf[i * 2 + 1] = val >> 8;
++	}
++
++	return 0;
++}
++
++static int as21xxx_diag_debug_read(struct phy_device *phydev, u16 dbg_sec,
++				   u16 dbg_cmd, void *buf, unsigned int len)
++{
++	struct as21xxx_priv *priv = phydev->priv;
++	u8 rbuf[AS21XXX_IPC_DATA_MAX];
++	u8 *dst = buf;
++	unsigned int copied = 0;
++	u16 tx[3];
++	int ret;
++	int val;
++	int i;
++
++	if (len > AS21XXX_DIAG_MAX_BYTES)
++		return -EMSGSIZE;
++
++	tx[0] = (dbg_sec << 8) | dbg_cmd;
++	tx[1] = 0;
++	tx[2] = 0;
++
++	mutex_lock(&priv->ipc_lock);
++
++	ret = as21xxx_diag_send_locked(phydev, priv, IPC_OPCODE_DBGCMD,
++				       tx, ARRAY_SIZE(tx));
++	if (ret)
++		goto out;
++
++	ret = as21xxx_diag_sync_parity_locked(phydev, priv);
++	if (ret)
++		goto out;
++
++	for (i = 0; i < AS21XXX_DIAG_POLL_MAX; i++) {
++		ret = as21xxx_diag_send_locked(phydev, priv, IPC_OPCODE_POLL,
++					       NULL, 0);
++		if (ret)
++			goto out;
++
++		val = phy_read_mmd(phydev, MDIO_MMD_VEND1,
++				   VEND1_IPC_DATA0);
++		if (val < 0) {
++			ret = val;
++			goto out;
++		}
++		if (val)
++			break;
++
++		usleep_range(1000, 2000);
++	}
++
++	if (i == AS21XXX_DIAG_POLL_MAX) {
++		ret = -ETIMEDOUT;
++		goto out;
++	}
++
++	while (copied < len) {
++		unsigned int chunk = min_t(unsigned int, sizeof(rbuf),
++					   len - copied);
++
++		ret = as21xxx_diag_send_locked(phydev, priv, IPC_OPCODE_RBUF,
++					       NULL, 0);
++		if (ret)
++			goto out;
++
++		ret = as21xxx_diag_read_data_bytes(phydev, rbuf, chunk);
++		if (ret)
++			goto out;
++
++		memcpy(dst + copied, rbuf, chunk);
++		copied += chunk;
++	}
++
++	ret = as21xxx_diag_sync_parity_locked(phydev, priv);
++
++out:
++	mutex_unlock(&priv->ipc_lock);
++
++	return ret;
++}
++
++static int as21xxx_diag_read_u8(struct phy_device *phydev, u16 dbg_sec,
++				u16 dbg_cmd, u8 *val)
++{
++	return as21xxx_diag_debug_read(phydev, dbg_sec, dbg_cmd, val,
++				       sizeof(*val));
++}
++
++static int as21xxx_diag_read_u32s(struct phy_device *phydev, u16 dbg_sec,
++				  u16 dbg_cmd, u32 *buf,
++				  unsigned int count)
++{
++	u8 raw[AS21XXX_DIAG_MAX_BYTES];
++	unsigned int i;
++	int ret;
++
++	if (count * sizeof(*buf) > sizeof(raw))
++		return -EMSGSIZE;
++
++	ret = as21xxx_diag_debug_read(phydev, dbg_sec, dbg_cmd, raw,
++				      count * sizeof(*buf));
++	if (ret)
++		return ret;
++
++	for (i = 0; i < count; i++)
++		buf[i] = get_unaligned_le32(&raw[i * sizeof(*buf)]);
++
++	return 0;
++}
++
++static void as21xxx_diag_print_phy_state(struct seq_file *s,
++					 struct phy_device *phydev)
++{
++	seq_printf(s,
++		   "phy=%s interface=%s link=%d autoneg_complete=%d speed=%d duplex=%d pause=%d asym_pause=%d rate_matching=%d\n",
++		   dev_name(&phydev->mdio.dev), phy_modes(phydev->interface),
++		   phydev->link, phydev->autoneg_complete, phydev->speed,
++		   phydev->duplex, phydev->pause, phydev->asym_pause,
++		   phydev->rate_matching);
++}
++
++static void as21xxx_diag_print_u32s(struct seq_file *s, const char *name,
++				    const u32 *buf, unsigned int count)
++{
++	unsigned int i;
++
++	for (i = 0; i < count; i++)
++		seq_printf(s, "%s[%u]=%u\n", name, i, buf[i]);
++}
++
++static int as21xxx_mac_side_show(struct seq_file *s, void *unused)
++{
++	struct phy_device *phydev = s->private;
++	u32 ngphy[IPC_DUMP_NGPHY_NUM];
++	u32 cu_an[IPC_DUMP_CU_AN_NUM];
++	u32 dpc[IPC_DUMP_DPC_NUM];
++	u8 val;
++	int ret;
++
++	as21xxx_diag_print_phy_state(s, phydev);
++
++	ret = as21xxx_diag_read_u8(phydev, IPC_DBGCMD_DPC,
++				   IPC_CMD_RA_GET_CFG, &val);
++	if (ret)
++		seq_printf(s, "ra_mode_error=%pe\n", ERR_PTR(ret));
++	else
++		seq_printf(s, "ra_mode=%u\n", val);
++
++	ret = as21xxx_diag_read_u8(phydev, IPC_DBGCMD_DPC,
++				   CFG_SUPPORT_FC_GET, &val);
++	if (ret)
++		seq_printf(s, "dpc_flow_control_error=%pe\n", ERR_PTR(ret));
++	else
++		seq_printf(s, "dpc_flow_control=%u\n", val);
++
++	ret = as21xxx_diag_read_u32s(phydev, IPC_DBGCMD_NGPHY,
++				     CFG_NGPHY_CNT_DUMP, ngphy,
++				     ARRAY_SIZE(ngphy));
++	if (ret)
++		seq_printf(s, "ngphy_error=%pe\n", ERR_PTR(ret));
++	else
++		as21xxx_diag_print_u32s(s, "ngphy", ngphy,
++					ARRAY_SIZE(ngphy));
++
++	ret = as21xxx_diag_read_u32s(phydev, IPC_DBGCMD_CU_AN,
++				     IPC_CMD_CU_AN_CNT_GET, cu_an,
++				     ARRAY_SIZE(cu_an));
++	if (ret)
++		seq_printf(s, "cu_an_error=%pe\n", ERR_PTR(ret));
++	else
++		as21xxx_diag_print_u32s(s, "cu_an", cu_an,
++					ARRAY_SIZE(cu_an));
++
++	ret = as21xxx_diag_read_u32s(phydev, IPC_DBGCMD_DPC,
++				     CFG_DPC_CNT_DUMP, dpc,
++				     ARRAY_SIZE(dpc));
++	if (ret)
++		seq_printf(s, "dpc_error=%pe\n", ERR_PTR(ret));
++	else
++		as21xxx_diag_print_u32s(s, "dpc", dpc, ARRAY_SIZE(dpc));
++
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(as21xxx_mac_side);
++
++static int as21xxx_dp_pkt_try_show(struct seq_file *s, void *unused)
++{
++	struct phy_device *phydev = s->private;
++	u32 dp[IPC_DP_DUMP_NUM];
++	int ret;
++
++	as21xxx_diag_print_phy_state(s, phydev);
++
++	ret = as21xxx_diag_read_u32s(phydev, IPC_DBGCMD_DPC,
++				     CFG_DP_PKT_DUMP, dp, ARRAY_SIZE(dp));
++	if (ret)
++		seq_printf(s, "dp_error=%pe\n", ERR_PTR(ret));
++	else
++		as21xxx_diag_print_u32s(s, "dp", dp, ARRAY_SIZE(dp));
++
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(as21xxx_dp_pkt_try);
++
++static void as21xxx_debugfs_remove(void *data)
++{
++	struct phy_device *phydev = data;
++	struct as21xxx_priv *priv = phydev->priv;
++
++	debugfs_remove_recursive(priv->debugfs_dir);
++	priv->debugfs_dir = NULL;
++}
++
++static int as21xxx_debugfs_init(struct phy_device *phydev)
++{
++	struct as21xxx_priv *priv = phydev->priv;
++	struct dentry *dir;
++	int ret;
++
++	if (IS_ERR_OR_NULL(as21xxx_debugfs_root))
++		as21xxx_debugfs_root = debugfs_create_dir("as21xxx", NULL);
++	if (IS_ERR(as21xxx_debugfs_root))
++		return PTR_ERR(as21xxx_debugfs_root);
++
++	dir = debugfs_create_dir(dev_name(&phydev->mdio.dev),
++				 as21xxx_debugfs_root);
++	if (IS_ERR(dir))
++		return PTR_ERR(dir);
++
++	priv->debugfs_dir = dir;
++	debugfs_create_file("mac_side", 0444, dir, phydev,
++			    &as21xxx_mac_side_fops);
++	debugfs_create_file("dp_pkt_try", 0444, dir, phydev,
++			    &as21xxx_dp_pkt_try_fops);
++
++	ret = devm_add_action_or_reset(&phydev->mdio.dev,
++				       as21xxx_debugfs_remove, phydev);
++	if (ret)
++		return ret;
++
++	return 0;
++}
++
+ static int as21xxx_ipc_noop_locked(struct phy_device *phydev,
+ 				   struct as21xxx_priv *priv,
+ 				   bool wait_status, u16 *sts)
+@@ -693,9 +1038,14 @@ static int as21xxx_dpc_ra_enable(struct phy_device *phydev)
+ 		IPC_CFG_PARAM_DIRECT,
+ 		IPC_CFG_PARAM_DIRECT_DPC_RA,
+ 	};
++	int ret;
+ 
+-	return as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
+-				NULL, 0, NULL);
++	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
++			       NULL, 0, NULL);
++	phydev_info(phydev, "diag: DPC RA enable interface %s ret %d\n",
++		    phy_modes(phydev->interface), ret);
++
++	return ret;
+ }
+ 
+ static int as21xxx_cu_an_set_top_speed_changed(struct phy_device *phydev,
+@@ -711,8 +1061,11 @@ static int as21xxx_cu_an_set_top_speed_changed(struct phy_device *phydev,
+ 	int ret;
+ 
+ 	if (priv->cu_an_top_speed_valid &&
+-	    priv->cu_an_top_speed == top_speed)
++	    priv->cu_an_top_speed == top_speed) {
++		phydev_info(phydev, "diag: top speed unchanged 0x%x\n",
++			    top_speed);
+ 		return 0;
++	}
+ 
+ 	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
+ 			       NULL, 0, NULL);
+@@ -720,6 +1073,8 @@ static int as21xxx_cu_an_set_top_speed_changed(struct phy_device *phydev,
+ 		return ret;
+ 
+ 	priv->cu_an_top_speed = top_speed;
++	phydev_info(phydev, "diag: top speed set 0x%x\n", top_speed);
++
+ 	priv->cu_an_top_speed_valid = true;
+ 
+ 	return 1;
+@@ -762,6 +1117,10 @@ static int as21xxx_config_init(struct phy_device *phydev)
+ 	phydev->rate_matching =
+ 		as21xxx_runtime_rate_matching(phydev->interface);
+ 
++	phydev_info(phydev, "diag: config_init interface %s rate_matching %d\n",
++		    phy_modes(phydev->interface),
++		    phydev->rate_matching);
++
+ 	ret = as21xxx_enable_ptp_clock(phydev);
+ 	if (ret)
+ 		return ret;
+@@ -853,6 +1212,9 @@ static int as21xxx_check_and_restart_aneg(struct phy_device *phydev,
+ 	if (!restart)
+ 		return 0;
+ 
++	phydev_info(phydev, "diag: restart AN interface %s\n",
++		    phy_modes(phydev->interface));
++
+ 	ret = genphy_c45_restart_aneg(phydev);
+ 	if (ret)
+ 		return ret;
+@@ -891,6 +1253,10 @@ static int as21xxx_config_aneg(struct phy_device *phydev)
+ 	if (top_speed < 0)
+ 		return top_speed;
+ 
++	phydev_info(phydev,
++		    "diag: config_aneg autoneg %d interface %s top_speed 0x%x changed %d\n",
++		    phydev->autoneg, phy_modes(phydev->interface), top_speed, changed);
++
+ 	ret = as21xxx_cu_an_set_top_speed_changed(phydev, top_speed);
+ 	if (ret < 0)
+ 		return ret;
+@@ -1090,6 +1456,11 @@ static int as21xxx_probe(struct phy_device *phydev)
+ 		phydev_warn(phydev, "failed to register hwmon device: %pe\n",
+ 			    ERR_PTR(ret));
+ 
++	ret = as21xxx_debugfs_init(phydev);
++	if (ret)
++		phydev_warn(phydev, "failed to create debugfs diagnostics: %pe\n",
++			    ERR_PTR(ret));
++
+ 	return 0;
+ }
+ 
+@@ -1279,6 +1650,12 @@ static int as21xxx_read_status(struct phy_device *phydev)
+ 	if (phydev->autoneg == AUTONEG_ENABLE)
+ 		phy_resolve_aneg_pause(phydev);
+ 
++	phydev_info(phydev,
++		    "diag: read_status interface %s link %d an_complete %d speed %d duplex %d pause %d asym_pause %d rate_matching %d\n",
++		    phy_modes(phydev->interface), phydev->link,
++		    phydev->autoneg_complete, phydev->speed, phydev->duplex,
++		    phydev->pause, phydev->asym_pause, phydev->rate_matching);
++
+ 	return 0;
+ }
+ 
