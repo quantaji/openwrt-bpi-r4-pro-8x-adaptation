@@ -1,38 +1,15 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Codex <codex@openai.com>
-Date: Tue, 16 Jun 2026 00:00:00 -0700
-Subject: [PATCH] net: phy: as21xxx: add hwmon temperature support
+Subject: [PATCH] net: phy: as21xxx: expose firmware temperature via hwmon
 
-Expose the AS21xxx firmware temperature monitor through the standard hwmon
-interface.
-
-The upstream-style AS21xxx PHY driver already has the IPC transport helpers,
-but the firmware temperature monitor used by the MTK OpenWrt 25.12 driver is
-reached through the cfg-param direct path, not the IPC_CMD_TEMP_MON opcode.
-The response layout and fixed-point conversion are based on the temperature
-monitor path in MTK OpenWrt 25.12:
-
-  target/linux/mediatek/patches-6.12/
-  999-ephy-as21xxx-01-update-driver-to-v1.9.1.patch
-
-This implementation is rewritten for the upstream-style AS21xxx driver and
-uses Linux hwmon instead of the vendor debugfs interface.  The cfg-param
-module number is intentionally kept as AS21XXX_CFG_TEMP_MON (11/0xb) because
-the existing upstream define IPC_CFG_PARAM_DIRECT_TEMP_MON is 0x11 and does
-not match the vendor v1.9.1 CFG_TEMP_MON value.
-
-The hwmon init path configures continuous sampling and starts the firmware
-temperature monitor once during probe.  Each read then follows the vendor
-debugfs path by syncing IPC parity before sending the get-temperature command.
-
-Signed-off-by: Codex <codex@openai.com>
+Expose the firmware temperature monitor through the standard hwmon API.
+The temperature path uses the AS21xx CFG_PARAM direct temperature module
+and keeps registration optional so a hwmon failure does not prevent the
+PHY from binding or bringing up links.
 ---
- drivers/net/phy/as21xxx.c | 174 +++++++++++++++++++++++++++++++++++++-
- 1 file changed, 173 insertions(+), 1 deletion(-)
-
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index 7ccb547..7c51a6b 100644
 --- a/drivers/net/phy/as21xxx.c
 +++ b/drivers/net/phy/as21xxx.c
-@@ -7,6 +7,8 @@
+@@ -7,9 +7,12 @@
  
  #include <linux/bitfield.h>
  #include <linux/firmware.h>
@@ -41,11 +18,16 @@ Signed-off-by: Codex <codex@openai.com>
  #include <linux/module.h>
  #include <linux/of.h>
  #include <linux/phy.h>
-@@ -622,6 +624,172 @@ static int aeon_dpc_ra_enable(struct phy
- 				 sizeof(data), NULL);
++#include <linux/slab.h>
+ 
+ #define VEND1_GLB_REG_CPU_RESET_ADDR_LO_BASEADDR 0x3
+ #define VEND1_GLB_REG_CPU_RESET_ADDR_HI_BASEADDR 0x4
+@@ -897,6 +900,163 @@ static int as21xxx_config_aneg(struct phy_device *phydev)
+ 	return as21xxx_check_and_restart_aneg(phydev, changed);
  }
  
 +#if IS_REACHABLE(CONFIG_HWMON)
++/* Vendor CFG_TEMP_MON module id for IPC_CMD_CFG_PARAM/direct. */
 +#define AS21XXX_CFG_TEMP_MON			11
 +#define AS21XXX_TEMP_REGS			3
 +#define AS21XXX_TEMP_MON_START			1
@@ -57,67 +39,57 @@ Signed-off-by: Codex <codex@openai.com>
 +				      u16 sub_cmd, u16 param,
 +				      u16 *ret_data)
 +{
-+	u16 scratch[AEON_IPC_DATA_NUM_REGISTERS];
-+	u16 data[] = {
++	u16 rx[AS21XXX_IPC_DATA_NUM_REGISTERS];
++	u16 tx[] = {
 +		IPC_CFG_PARAM_DIRECT,
 +		AS21XXX_CFG_TEMP_MON,
 +		sub_cmd,
 +		param,
 +	};
++	unsigned int rx_bytes;
++	int ret;
++
++	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
++			       ret_data ? rx : NULL,
++			       ret_data ? ARRAY_SIZE(rx) : 0,
++			       ret_data ? &rx_bytes : NULL);
++	if (ret)
++		return ret;
 +
 +	if (!ret_data)
-+		ret_data = scratch;
++		return 0;
 +
-+	return aeon_ipc_send_msg(phydev, IPC_CMD_CFG_PARAM, data,
-+				 sizeof(data), ret_data);
++	if (rx_bytes < AS21XXX_TEMP_REGS * sizeof(u16))
++		return -ENODATA;
++
++	memcpy(ret_data, rx, AS21XXX_TEMP_REGS * sizeof(u16));
++
++	return 0;
 +}
 +
 +static int as21xxx_hwmon_init_temp_monitor(struct phy_device *phydev)
 +{
-+	struct as21xxx_priv *priv = phydev->priv;
 +	int ret;
-+
-+	ret = aeon_ipc_sync_parity(phydev, priv);
-+	if (ret)
-+		return ret;
 +
 +	ret = as21xxx_hwmon_temp_monitor(phydev, AS21XXX_TEMP_MON_CONFIG,
 +					 AS21XXX_TEMP_MON_CONTINUOUS, NULL);
-+	if (ret < 0)
++	if (ret)
 +		return ret;
 +
-+	ret = as21xxx_hwmon_temp_monitor(phydev, AS21XXX_TEMP_MON_START,
-+					 0, NULL);
-+	if (ret < 0)
-+		return ret;
-+
-+	return 0;
++	return as21xxx_hwmon_temp_monitor(phydev, AS21XXX_TEMP_MON_START,
++					  0, NULL);
 +}
 +
 +static int as21xxx_hwmon_get_temp_regs(struct phy_device *phydev,
 +				       u16 *ret_data)
 +{
-+	struct as21xxx_priv *priv = phydev->priv;
-+	int ret;
-+
-+	ret = aeon_ipc_sync_parity(phydev, priv);
-+	if (ret)
-+		return ret;
-+
-+	ret = as21xxx_hwmon_temp_monitor(phydev, AS21XXX_TEMP_MON_GET,
-+					 0, ret_data);
-+	if (ret < 0)
-+		return ret;
-+
-+	if (ret < AS21XXX_TEMP_REGS * sizeof(u16))
-+		return -ENODATA;
-+
-+	return ret;
++	return as21xxx_hwmon_temp_monitor(phydev, AS21XXX_TEMP_MON_GET,
++					  0, ret_data);
 +}
 +
 +static int as21xxx_hwmon_get_temp(struct phy_device *phydev, long *val)
 +{
-+	u16 ret_data[AEON_IPC_DATA_NUM_REGISTERS];
++	u16 ret_data[AS21XXX_IPC_DATA_NUM_REGISTERS];
 +	s32 raw_temp;
 +	int ret;
 +
@@ -213,19 +185,19 @@ Signed-off-by: Codex <codex@openai.com>
 +
  static int as21xxx_probe(struct phy_device *phydev)
  {
- 	struct as21xxx_priv *priv;
-@@ -664,7 +832,11 @@ static int as21xxx_probe(struct phy_devi
- 	if (ret)
- 		return ret;
+ 	char fw_version[AS21XXX_IPC_DATA_MAX + 1];
+@@ -925,6 +1085,11 @@ static int as21xxx_probe(struct phy_device *phydev)
  
--	return aeon_dpc_ra_enable(phydev);
-+	ret = aeon_dpc_ra_enable(phydev);
+ 	phydev_info(phydev, "Firmware Version: %s\n", fw_version);
+ 
++	ret = as21xxx_hwmon_register(phydev);
 +	if (ret)
-+		return ret;
++		phydev_warn(phydev, "failed to register hwmon device: %pe\n",
++			    ERR_PTR(ret));
 +
-+	return as21xxx_hwmon_register(phydev);
+ 	return 0;
  }
  
- static int as21xxx_read_link(struct phy_device *phydev, int *bmcr)
 -- 
-2.45.2
+2.53.0
+

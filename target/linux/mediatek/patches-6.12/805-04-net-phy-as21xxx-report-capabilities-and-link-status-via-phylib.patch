@@ -1,0 +1,196 @@
+Subject: [PATCH] net: phy: as21xxx: report capabilities and link status via
+ phylib
+
+Move the Clause 45 autonegotiation view cleanup into get_features(), use
+the generic C45 PMA ability reader for the supported link modes and keep
+AS21xx-specific status decoding in read_status(). Extend link partner
+reporting to the mapped C22 and 10GBase-T status registers and clear
+stale autonegotiation state while restart is pending.
+---
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index 0b583a7..12b6267 100644
+--- a/drivers/net/phy/as21xxx.c
++++ b/drivers/net/phy/as21xxx.c
+@@ -701,13 +701,6 @@ static int as21xxx_probe(struct phy_device *phydev)
+ 	if (ret)
+ 		return ret;
+ 
+-	/* Even if PHY declare support for Clause 22 register,
+-	 * Clause 45 register should be used for ANEG configuration
+-	 * and restart. Clear the C22 bit for devices_in_package to
+-	 * force C45 generic OPs in generic PHY ANGE OPs.
+-	 */
+-	phydev->c45_ids.devices_in_package &= ~BIT(0);
+-
+ 	ret = as21xxx_ipc_sync_parity(phydev);
+ 	if (ret)
+ 		return ret;
+@@ -728,6 +721,29 @@ static int as21xxx_probe(struct phy_device *phydev)
+ 	return as21xxx_dpc_ra_enable(phydev);
+ }
+ 
++static int as21xxx_get_features(struct phy_device *phydev)
++{
++	int ret;
++
++	ret = genphy_c45_pma_read_abilities(phydev);
++	if (ret)
++		return ret;
++
++	linkmode_clear_bit(ETHTOOL_LINK_MODE_10baseT_Half_BIT,
++			   phydev->supported);
++	linkmode_clear_bit(ETHTOOL_LINK_MODE_10baseT_Full_BIT,
++			   phydev->supported);
++	linkmode_clear_bit(ETHTOOL_LINK_MODE_100baseT_Half_BIT,
++			   phydev->supported);
++
++	/* Even if the PHY declares Clause 22 registers, Clause 45 must be
++	 * used for autoneg configuration and restart.
++	 */
++	phydev->c45_ids.devices_in_package &= ~BIT(0);
++
++	return 0;
++}
++
+ static int as21xxx_read_link(struct phy_device *phydev, int *bmcr)
+ {
+ 	int status;
+@@ -745,6 +761,7 @@ static int as21xxx_read_link(struct phy_device *phydev, int *bmcr)
+ 	 */
+ 	if (*bmcr & BMCR_ANRESTART) {
+ 		phydev->link = 0;
++		phydev->autoneg_complete = 0;
+ 		return 0;
+ 	}
+ 
+@@ -764,7 +781,7 @@ static int as21xxx_read_link(struct phy_device *phydev, int *bmcr)
+ 	return 0;
+ }
+ 
+-static int as21xxx_read_c22_lpa(struct phy_device *phydev)
++static int as21xxx_read_lpa(struct phy_device *phydev)
+ {
+ 	int lpagb, lpa;
+ 
+@@ -800,6 +817,12 @@ static int as21xxx_read_c22_lpa(struct phy_device *phydev)
+ 
+ 	mii_lpa_mod_linkmode_lpa_t(phydev->lp_advertising, lpa);
+ 
++	lpa = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_10GBT_STAT);
++	if (lpa < 0)
++		return lpa;
++
++	mii_10gbt_stat_mod_linkmode_lpa_t(phydev->lp_advertising, lpa);
++
+ 	return 0;
+ }
+ 
+@@ -827,10 +850,12 @@ static int as21xxx_read_status(struct phy_device *phydev)
+ 			mii_stat1000_mod_linkmode_lpa_t(phydev->lp_advertising,
+ 							0);
+ 			mii_lpa_mod_linkmode_lpa_t(phydev->lp_advertising, 0);
++			mii_10gbt_stat_mod_linkmode_lpa_t(phydev->lp_advertising,
++							  0);
+ 			return 0;
+ 		}
+ 
+-		ret = as21xxx_read_c22_lpa(phydev);
++		ret = as21xxx_read_lpa(phydev);
+ 		if (ret)
+ 			return ret;
+ 	} else {
+@@ -864,7 +889,10 @@ static int as21xxx_read_status(struct phy_device *phydev)
+ 		break;
+ 	case VEND1_SPEED_100:
+ 		phydev->speed = SPEED_100;
+-		phydev->duplex = DUPLEX_FULL;
++		if (bmcr & BMCR_FULLDPLX)
++			phydev->duplex = DUPLEX_FULL;
++		else
++			phydev->duplex = DUPLEX_HALF;
+ 		break;
+ 	case VEND1_SPEED_10:
+ 		phydev->speed = SPEED_10;
+@@ -1089,6 +1117,7 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.name		= "Aeonsemi AS21011JB1",
+ 		.probe		= as21xxx_probe,
+ 		.match_phy_device = as21xxx_match_phy_device,
++		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+@@ -1103,6 +1132,7 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.name		= "Aeonsemi AS21011PB1",
+ 		.probe		= as21xxx_probe,
+ 		.match_phy_device = as21xxx_match_phy_device,
++		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+@@ -1117,6 +1147,7 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.name		= "Aeonsemi AS21010PB1",
+ 		.probe		= as21xxx_probe,
+ 		.match_phy_device = as21xxx_match_phy_device,
++		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+@@ -1131,6 +1162,7 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.name		= "Aeonsemi AS21010JB1",
+ 		.probe		= as21xxx_probe,
+ 		.match_phy_device = as21xxx_match_phy_device,
++		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+@@ -1145,6 +1177,7 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.name		= "Aeonsemi AS21210PB1",
+ 		.probe		= as21xxx_probe,
+ 		.match_phy_device = as21xxx_match_phy_device,
++		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+@@ -1159,6 +1192,7 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.name		= "Aeonsemi AS21510JB1",
+ 		.probe		= as21xxx_probe,
+ 		.match_phy_device = as21xxx_match_phy_device,
++		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+@@ -1173,6 +1207,7 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.name		= "Aeonsemi AS21510PB1",
+ 		.probe		= as21xxx_probe,
+ 		.match_phy_device = as21xxx_match_phy_device,
++		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+@@ -1187,6 +1222,7 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.name		= "Aeonsemi AS21511JB1",
+ 		.probe		= as21xxx_probe,
+ 		.match_phy_device = as21xxx_match_phy_device,
++		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+@@ -1201,6 +1237,7 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.name		= "Aeonsemi AS21210JB1",
+ 		.probe		= as21xxx_probe,
+ 		.match_phy_device = as21xxx_match_phy_device,
++		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+@@ -1215,6 +1252,7 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.name		= "Aeonsemi AS21511PB1",
+ 		.probe		= as21xxx_probe,
+ 		.match_phy_device = as21xxx_match_phy_device,
++		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+-- 
+2.53.0
+

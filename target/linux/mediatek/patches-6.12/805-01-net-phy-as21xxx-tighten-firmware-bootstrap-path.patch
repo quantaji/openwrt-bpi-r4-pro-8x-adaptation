@@ -1,0 +1,125 @@
+Subject: [PATCH] net: phy: as21xxx: tighten firmware bootstrap path
+
+Validate the runtime firmware image before writing it through the
+indirect MDIO loader and propagate read errors from the loader status
+register. Rename the helpers to the driver prefix while keeping the
+match-time firmware bootstrap narrowly scoped to loading and starting
+firmware.
+---
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index c65f4a8..2c1c5e7 100644
+--- a/drivers/net/phy/as21xxx.c
++++ b/drivers/net/phy/as21xxx.c
+@@ -147,10 +147,10 @@
+ #define AEON_IPC_DATA_NUM_REGISTERS	8
+ #define AEON_IPC_DATA_MAX		(AEON_IPC_DATA_NUM_REGISTERS * sizeof(u16))
+ 
+-#define AEON_BOOT_ADDR			0x1000
+-#define AEON_CPU_BOOT_ADDR		0x2000
+-#define AEON_CPU_CTRL_FW_LOAD		(BIT(4) | BIT(2) | BIT(1) | BIT(0))
+-#define AEON_CPU_CTRL_FW_START		BIT(0)
++#define AS21XXX_BOOT_ADDR		0x1000
++#define AS21XXX_CPU_BOOT_ADDR		0x2000
++#define AS21XXX_CPU_CTRL_FW_LOAD	(BIT(4) | BIT(2) | BIT(1) | BIT(0))
++#define AS21XXX_CPU_CTRL_FW_START	BIT(0)
+ 
+ enum as21xxx_led_event {
+ 	VEND1_LED_REG_A_EVENT_ON_10 = 0x0,
+@@ -294,19 +294,25 @@ static struct as21xxx_led_pattern_info as21xxx_led_supported_pattern[] = {
+ 	}
+ };
+ 
+-static int aeon_firmware_boot(struct phy_device *phydev, const u8 *data,
+-			      size_t size)
++static int as21xxx_firmware_boot(struct phy_device *phydev, const u8 *data,
++				 size_t size)
+ {
+ 	int i, ret;
+ 	u16 val;
+ 
++	if (!size || size % sizeof(u16)) {
++		phydev_err(phydev, "invalid firmware size: %zu\n", size);
++		return -EINVAL;
++	}
++
+ 	ret = phy_modify_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLB_REG_CPU_CTRL,
+-			     VEND1_GLB_CPU_CTRL_MASK, AEON_CPU_CTRL_FW_LOAD);
++			     VEND1_GLB_CPU_CTRL_MASK,
++			     AS21XXX_CPU_CTRL_FW_LOAD);
+ 	if (ret)
+ 		return ret;
+ 
+ 	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_FW_START_ADDR,
+-			    AEON_BOOT_ADDR);
++			    AS21XXX_BOOT_ADDR);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -316,8 +322,12 @@ static int aeon_firmware_boot(struct phy_device *phydev, const u8 *data,
+ 	if (ret)
+ 		return ret;
+ 
+-	val = phy_read_mmd(phydev, MDIO_MMD_VEND1,
++	ret = phy_read_mmd(phydev, MDIO_MMD_VEND1,
+ 			   VEND1_GLB_REG_MDIO_INDIRECT_STATUS);
++	if (ret < 0)
++		return ret;
++
++	val = ret;
+ 	if (val > 1) {
+ 		phydev_err(phydev, "wrong origin mdio_indirect_status: %x\n", val);
+ 		return -EINVAL;
+@@ -335,21 +345,28 @@ static int aeon_firmware_boot(struct phy_device *phydev, const u8 *data,
+ 
+ 	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
+ 			    VEND1_GLB_REG_CPU_RESET_ADDR_LO_BASEADDR,
+-			    lower_16_bits(AEON_CPU_BOOT_ADDR));
++			    lower_16_bits(AS21XXX_CPU_BOOT_ADDR));
+ 	if (ret)
+ 		return ret;
+ 
+ 	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
+ 			    VEND1_GLB_REG_CPU_RESET_ADDR_HI_BASEADDR,
+-			    upper_16_bits(AEON_CPU_BOOT_ADDR));
++			    upper_16_bits(AS21XXX_CPU_BOOT_ADDR));
+ 	if (ret)
+ 		return ret;
+ 
+ 	return phy_modify_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLB_REG_CPU_CTRL,
+-			      VEND1_GLB_CPU_CTRL_MASK, AEON_CPU_CTRL_FW_START);
++			      VEND1_GLB_CPU_CTRL_MASK,
++			      AS21XXX_CPU_CTRL_FW_START);
+ }
+ 
+-static int aeon_firmware_load(struct phy_device *phydev)
++/*
++ * Vendor trees also program MDC timing/default values around firmware load.
++ * The current OpenWrt/upstream-style baseline boots firmware without those
++ * vendor defaults, so keep this bootstrap path limited to loading and
++ * starting firmware.
++ */
++static int as21xxx_firmware_load(struct phy_device *phydev)
+ {
+ 	struct device *dev = &phydev->mdio.dev;
+ 	const struct firmware *fw;
+@@ -368,7 +385,7 @@ static int aeon_firmware_load(struct phy_device *phydev)
+ 		return ret;
+ 	}
+ 
+-	ret = aeon_firmware_boot(phydev, fw->data, fw->size);
++	ret = as21xxx_firmware_boot(phydev, fw->data, fw->size);
+ 
+ 	release_firmware(fw);
+ 
+@@ -937,7 +954,7 @@ static int as21xxx_match_phy_device(struct phy_device *phydev,
+ 
+ 	mutex_init(&priv->ipc_lock);
+ 
+-	ret = aeon_firmware_load(phydev);
++	ret = as21xxx_firmware_load(phydev);
+ 	if (ret)
+ 		goto out;
+ 
+-- 
+2.53.0
+

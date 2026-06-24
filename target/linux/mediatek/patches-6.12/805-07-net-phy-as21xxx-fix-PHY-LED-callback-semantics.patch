@@ -1,0 +1,112 @@
+Subject: [PATCH] net: phy: as21xxx: fix PHY LED callback semantics
+
+Tighten the PHY LED callback semantics: reject indexes outside the
+0..AS21XXX_MAX_LEDS - 1 range, treat rules == 0 as LED hardware control
+off and report unsupported non-zero rule combinations with -EOPNOTSUPP.
+---
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index 7c51a6b..d5a88c0 100644
+--- a/drivers/net/phy/as21xxx.c
++++ b/drivers/net/phy/as21xxx.c
+@@ -150,7 +150,7 @@
+ #define PHY_ID_AS21210PB1		0x75009492
+ #define PHY_VENDOR_AEONSEMI		0x75009400
+ 
+-#define AEON_MAX_LEDS			5
++#define AS21XXX_MAX_LEDS		5
+ #define AS21XXX_IPC_CMD_DELAY_US	10000
+ #define AS21XXX_IPC_POLL_US		10000
+ #define AS21XXX_IPC_TIMEOUT_US		2000000
+@@ -1287,7 +1287,7 @@ static int as21xxx_led_brightness_set(struct phy_device *phydev,
+ {
+ 	u16 val = VEND1_LED_REG_A_EVENT_OFF;
+ 
+-	if (index > AEON_MAX_LEDS)
++	if (index >= AS21XXX_MAX_LEDS)
+ 		return -EINVAL;
+ 
+ 	if (value)
+@@ -1304,9 +1304,12 @@ static int as21xxx_led_hw_is_supported(struct phy_device *phydev, u8 index,
+ {
+ 	int i;
+ 
+-	if (index > AEON_MAX_LEDS)
++	if (index >= AS21XXX_MAX_LEDS)
+ 		return -EINVAL;
+ 
++	if (!rules)
++		return 0;
++
+ 	for (i = 0; i < ARRAY_SIZE(as21xxx_led_supported_pattern); i++)
+ 		if (rules == as21xxx_led_supported_pattern[i].pattern)
+ 			return 0;
+@@ -1319,7 +1322,7 @@ static int as21xxx_led_hw_control_get(struct phy_device *phydev, u8 index,
+ {
+ 	int i, val;
+ 
+-	if (index > AEON_MAX_LEDS)
++	if (index >= AS21XXX_MAX_LEDS)
+ 		return -EINVAL;
+ 
+ 	val = phy_read_mmd(phydev, MDIO_MMD_VEND1, VEND1_LED_REG(index));
+@@ -1327,30 +1330,39 @@ static int as21xxx_led_hw_control_get(struct phy_device *phydev, u8 index,
+ 		return val;
+ 
+ 	val = FIELD_GET(VEND1_LED_REG_A_EVENT, val);
++	if (val == VEND1_LED_REG_A_EVENT_OFF) {
++		*rules = 0;
++		return 0;
++	}
++
+ 	for (i = 0; i < ARRAY_SIZE(as21xxx_led_supported_pattern); i++)
+ 		if (val == as21xxx_led_supported_pattern[i].val) {
+ 			*rules = as21xxx_led_supported_pattern[i].pattern;
+ 			return 0;
+ 		}
+ 
+-	/* Should be impossible */
+-	return -EINVAL;
++	return -EOPNOTSUPP;
+ }
+ 
+ static int as21xxx_led_hw_control_set(struct phy_device *phydev, u8 index,
+ 				      unsigned long rules)
+ {
+-	u16 val = 0;
++	u16 val = VEND1_LED_REG_A_EVENT_OFF;
+ 	int i;
+ 
+-	if (index > AEON_MAX_LEDS)
++	if (index >= AS21XXX_MAX_LEDS)
+ 		return -EINVAL;
+ 
+-	for (i = 0; i < ARRAY_SIZE(as21xxx_led_supported_pattern); i++)
+-		if (rules == as21xxx_led_supported_pattern[i].pattern) {
+-			val = as21xxx_led_supported_pattern[i].val;
+-			break;
+-		}
++	if (rules) {
++		for (i = 0; i < ARRAY_SIZE(as21xxx_led_supported_pattern); i++)
++			if (rules == as21xxx_led_supported_pattern[i].pattern) {
++				val = as21xxx_led_supported_pattern[i].val;
++				break;
++			}
++
++		if (i == ARRAY_SIZE(as21xxx_led_supported_pattern))
++			return -EOPNOTSUPP;
++	}
+ 
+ 	return phy_modify_mmd(phydev, MDIO_MMD_VEND1,
+ 			      VEND1_LED_REG(index),
+@@ -1365,7 +1377,7 @@ static int as21xxx_led_polarity_set(struct phy_device *phydev, int index,
+ 	u16 mask, val = 0;
+ 	u32 mode;
+ 
+-	if (index > AEON_MAX_LEDS)
++	if (index >= AS21XXX_MAX_LEDS)
+ 		return -EINVAL;
+ 
+ 	for_each_set_bit(mode, &modes, __PHY_LED_MODES_NUM) {
+-- 
+2.53.0
+

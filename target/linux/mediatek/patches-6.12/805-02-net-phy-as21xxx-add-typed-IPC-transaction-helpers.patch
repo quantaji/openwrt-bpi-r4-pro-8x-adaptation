@@ -1,0 +1,611 @@
+Subject: [PATCH] net: phy: as21xxx: add typed IPC transaction helpers
+
+Replace the vendor-style IPC helper with an internal transaction helper
+which serializes access, tracks firmware parity in the PHY private data,
+validates the fixed eight-register data window and reports normal kernel
+0/-errno status. Keep the existing DPC RA command on top of the typed
+helper so later lifecycle code can call it without exposing the vendor
+transport shape.
+---
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index 2c1c5e7..a223a38 100644
+--- a/drivers/net/phy/as21xxx.c
++++ b/drivers/net/phy/as21xxx.c
+@@ -50,9 +50,9 @@
+ #define   VEND1_SPEED_10		FIELD_PREP_CONST(VEND1_SPEED_MASK, 0x0)
+ 
+ #define VEND1_IPC_CMD			0x5801
+-#define   AEON_IPC_CMD_PARITY		BIT(15)
+-#define   AEON_IPC_CMD_SIZE		GENMASK(10, 6)
+-#define   AEON_IPC_CMD_OPCODE		GENMASK(5, 0)
++#define   AS21XXX_IPC_CMD_PARITY	BIT(15)
++#define   AS21XXX_IPC_CMD_SIZE		GENMASK(10, 6)
++#define   AS21XXX_IPC_CMD_OPCODE	GENMASK(5, 0)
+ 
+ #define IPC_CMD_NOOP			0x0  /* Do nothing */
+ #define IPC_CMD_INFO			0x1  /* Get Firmware Version */
+@@ -65,16 +65,16 @@
+ #define IPC_CMD_SET_LED			0x23 /* Set led */
+ 
+ #define VEND1_IPC_STS			0x5802
+-#define   AEON_IPC_STS_PARITY		BIT(15)
+-#define   AEON_IPC_STS_SIZE		GENMASK(14, 10)
+-#define   AEON_IPC_STS_OPCODE		GENMASK(9, 4)
+-#define   AEON_IPC_STS_STATUS		GENMASK(3, 0)
+-#define   AEON_IPC_STS_STATUS_RCVD	FIELD_PREP_CONST(AEON_IPC_STS_STATUS, 0x1)
+-#define   AEON_IPC_STS_STATUS_PROCESS	FIELD_PREP_CONST(AEON_IPC_STS_STATUS, 0x2)
+-#define   AEON_IPC_STS_STATUS_SUCCESS	FIELD_PREP_CONST(AEON_IPC_STS_STATUS, 0x4)
+-#define   AEON_IPC_STS_STATUS_ERROR	FIELD_PREP_CONST(AEON_IPC_STS_STATUS, 0x8)
+-#define   AEON_IPC_STS_STATUS_BUSY	FIELD_PREP_CONST(AEON_IPC_STS_STATUS, 0xe)
+-#define   AEON_IPC_STS_STATUS_READY	FIELD_PREP_CONST(AEON_IPC_STS_STATUS, 0xf)
++#define   AS21XXX_IPC_STS_PARITY	BIT(15)
++#define   AS21XXX_IPC_STS_SIZE		GENMASK(14, 10)
++#define   AS21XXX_IPC_STS_OPCODE	GENMASK(9, 4)
++#define   AS21XXX_IPC_STS_STATUS	GENMASK(3, 0)
++#define   AS21XXX_IPC_STS_STATUS_RCVD	FIELD_PREP_CONST(AS21XXX_IPC_STS_STATUS, 0x1)
++#define   AS21XXX_IPC_STS_STATUS_PROCESS FIELD_PREP_CONST(AS21XXX_IPC_STS_STATUS, 0x2)
++#define   AS21XXX_IPC_STS_STATUS_SUCCESS FIELD_PREP_CONST(AS21XXX_IPC_STS_STATUS, 0x4)
++#define   AS21XXX_IPC_STS_STATUS_ERROR	FIELD_PREP_CONST(AS21XXX_IPC_STS_STATUS, 0x8)
++#define   AS21XXX_IPC_STS_STATUS_BUSY	FIELD_PREP_CONST(AS21XXX_IPC_STS_STATUS, 0xe)
++#define   AS21XXX_IPC_STS_STATUS_READY	FIELD_PREP_CONST(AS21XXX_IPC_STS_STATUS, 0xf)
+ 
+ #define VEND1_IPC_DATA0			0x5808
+ #define VEND1_IPC_DATA1			0x5809
+@@ -108,9 +108,6 @@
+ #define IPC_CFG_PARAM_DIRECT_DPC_PKT_CHK 0x7
+ #define IPC_CFG_PARAM_DIRECT_DPC_SDS_WAIT_ETH 0x8
+ #define IPC_CFG_PARAM_DIRECT_WDT	0x9
+-#define IPC_CFG_PARAM_DIRECT_SDS_RESTART_AN 0x10
+-#define IPC_CFG_PARAM_DIRECT_TEMP_MON	0x11
+-#define IPC_CFG_PARAM_DIRECT_WOL	0x12
+ 
+ /* Sub command of CMD_TEMP_MON */
+ #define IPC_CMD_TEMP_MON_GET		0x4
+@@ -142,10 +139,11 @@
+ #define PHY_VENDOR_AEONSEMI		0x75009400
+ 
+ #define AEON_MAX_LEDS			5
+-#define AEON_IPC_DELAY			10000
+-#define AEON_IPC_TIMEOUT		(AEON_IPC_DELAY * 100)
+-#define AEON_IPC_DATA_NUM_REGISTERS	8
+-#define AEON_IPC_DATA_MAX		(AEON_IPC_DATA_NUM_REGISTERS * sizeof(u16))
++#define AS21XXX_IPC_CMD_DELAY_US	10000
++#define AS21XXX_IPC_POLL_US		10000
++#define AS21XXX_IPC_TIMEOUT_US		2000000
++#define AS21XXX_IPC_DATA_NUM_REGISTERS	8
++#define AS21XXX_IPC_DATA_MAX		(AS21XXX_IPC_DATA_NUM_REGISTERS * sizeof(u16))
+ 
+ #define AS21XXX_BOOT_ADDR		0x1000
+ #define AS21XXX_CPU_BOOT_ADDR		0x2000
+@@ -183,7 +181,7 @@ struct as21xxx_led_pattern_info {
+ };
+ 
+ struct as21xxx_priv {
+-	bool parity_status;
++	bool ipc_parity;
+ 	/* Protect concurrent IPC access */
+ 	struct mutex ipc_lock;
+ };
+@@ -392,143 +390,197 @@ static int as21xxx_firmware_load(struct phy_device *phydev)
+ 	return ret;
+ }
+ 
+-static bool aeon_ipc_ready(u16 val, bool parity_status)
++static bool as21xxx_ipc_status_done(u16 sts, bool parity, u16 opcode)
+ {
+ 	u16 status;
+ 
+-	if (FIELD_GET(AEON_IPC_STS_PARITY, val) != parity_status)
++	if (FIELD_GET(AS21XXX_IPC_STS_PARITY, sts) != parity)
+ 		return false;
+ 
+-	status = val & AEON_IPC_STS_STATUS;
++	if (FIELD_GET(AS21XXX_IPC_STS_OPCODE, sts) != opcode)
++		return false;
++
++	status = sts & AS21XXX_IPC_STS_STATUS;
+ 
+-	return status != AEON_IPC_STS_STATUS_RCVD &&
+-	       status != AEON_IPC_STS_STATUS_PROCESS &&
+-	       status != AEON_IPC_STS_STATUS_BUSY;
++	return status != AS21XXX_IPC_STS_STATUS_RCVD &&
++	       status != AS21XXX_IPC_STS_STATUS_PROCESS &&
++	       status != AS21XXX_IPC_STS_STATUS_BUSY;
+ }
+ 
+-static int aeon_ipc_wait_cmd(struct phy_device *phydev, bool parity_status)
++static bool as21xxx_ipc_status_done_any(u16 sts, bool parity)
+ {
+-	u16 val;
++	u16 status;
+ 
+-	/* Exit condition logic:
+-	 * - Wait for parity bit equal
+-	 * - Wait for status success, error OR ready
+-	 */
+-	return phy_read_mmd_poll_timeout(phydev, MDIO_MMD_VEND1, VEND1_IPC_STS, val,
+-					 aeon_ipc_ready(val, parity_status),
+-					 AEON_IPC_DELAY, AEON_IPC_TIMEOUT, false);
++	if (FIELD_GET(AS21XXX_IPC_STS_PARITY, sts) != parity)
++		return false;
++
++	status = sts & AS21XXX_IPC_STS_STATUS;
++
++	return status != AS21XXX_IPC_STS_STATUS_RCVD &&
++	       status != AS21XXX_IPC_STS_STATUS_PROCESS &&
++	       status != AS21XXX_IPC_STS_STATUS_BUSY;
+ }
+ 
+-static int aeon_ipc_send_cmd(struct phy_device *phydev,
+-			     struct as21xxx_priv *priv,
+-			     u16 cmd, u16 *ret_sts)
++static int as21xxx_ipc_status_to_errno(u16 sts)
+ {
+-	bool curr_parity;
++	switch (sts & AS21XXX_IPC_STS_STATUS) {
++	case AS21XXX_IPC_STS_STATUS_SUCCESS:
++		return 0;
++	case AS21XXX_IPC_STS_STATUS_READY:
++	case AS21XXX_IPC_STS_STATUS_ERROR:
++	default:
++		return -EIO;
++	}
++}
++
++static int as21xxx_ipc_wait_status(struct phy_device *phydev, bool parity,
++				   u16 opcode, u16 *sts)
++{
++	u16 val;
+ 	int ret;
+ 
+-	/* The IPC sync by using a single parity bit.
+-	 * Each CMD have alternately this bit set or clear
+-	 * to understand correct flow and packet order.
+-	 */
+-	curr_parity = priv->parity_status;
+-	if (priv->parity_status)
+-		cmd |= AEON_IPC_CMD_PARITY;
++	ret = phy_read_mmd_poll_timeout(phydev, MDIO_MMD_VEND1,
++					VEND1_IPC_STS, val,
++					as21xxx_ipc_status_done(val, parity,
++								opcode),
++					AS21XXX_IPC_POLL_US,
++					AS21XXX_IPC_TIMEOUT_US,
++					false);
++	if (ret)
++		return ret;
+ 
+-	/* Always update parity for next packet */
+-	priv->parity_status = !priv->parity_status;
++	*sts = val;
+ 
+-	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_IPC_CMD, cmd);
++	return 0;
++}
++
++static int as21xxx_ipc_wait_ready(struct phy_device *phydev, bool parity)
++{
++	u16 status;
++	u16 val;
++	int ret;
++
++	ret = phy_read_mmd_poll_timeout(phydev, MDIO_MMD_VEND1,
++					VEND1_IPC_STS, val,
++					as21xxx_ipc_status_done_any(val,
++								    parity),
++					AS21XXX_IPC_POLL_US,
++					AS21XXX_IPC_TIMEOUT_US,
++					false);
+ 	if (ret)
+ 		return ret;
+ 
+-	/* Wait for packet to be processed */
+-	usleep_range(AEON_IPC_DELAY, AEON_IPC_DELAY + 5000);
++	status = val & AS21XXX_IPC_STS_STATUS;
++	if (status != AS21XXX_IPC_STS_STATUS_READY &&
++	    status != AS21XXX_IPC_STS_STATUS_SUCCESS)
++		return -EIO;
++
++	return 0;
++}
++
++static int as21xxx_ipc_send_cmd_locked(struct phy_device *phydev,
++				       struct as21xxx_priv *priv,
++				       u16 opcode, unsigned int tx_words,
++				       bool wait_status, u16 *sts)
++{
++	bool parity;
++	u16 cmd;
++	int ret;
+ 
+-	/* With no ret_sts, ignore waiting for packet completion
+-	 * (ipc parity bit sync)
++	/* IPC uses a single parity bit that alternates for each command
++	 * to keep firmware and driver packet order in sync.
+ 	 */
+-	if (!ret_sts)
+-		return 0;
++	parity = priv->ipc_parity;
++	cmd = FIELD_PREP(AS21XXX_IPC_CMD_SIZE, tx_words * sizeof(u16)) |
++	      FIELD_PREP(AS21XXX_IPC_CMD_OPCODE, opcode);
++
++	if (parity)
++		cmd |= AS21XXX_IPC_CMD_PARITY;
+ 
+-	ret = aeon_ipc_wait_cmd(phydev, curr_parity);
++	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_IPC_CMD, cmd);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = phy_read_mmd(phydev, MDIO_MMD_VEND1, VEND1_IPC_STS);
+-	if (ret < 0)
+-		return ret;
++	priv->ipc_parity = !priv->ipc_parity;
+ 
+-	*ret_sts = ret;
+-	if ((*ret_sts & AEON_IPC_STS_STATUS) != AEON_IPC_STS_STATUS_SUCCESS)
+-		return -EINVAL;
++	/* Wait for the firmware to start processing the packet. */
++	usleep_range(AS21XXX_IPC_CMD_DELAY_US,
++		     AS21XXX_IPC_CMD_DELAY_US + 5000);
+ 
+-	return 0;
++	if (!wait_status)
++		return 0;
++
++	return as21xxx_ipc_wait_status(phydev, parity, opcode, sts);
+ }
+ 
+-/* If data is NULL, return 0 or negative error.
+- * If data not NULL, return number of Bytes received from IPC or
+- * a negative error.
+- */
+-static int aeon_ipc_send_msg(struct phy_device *phydev,
+-			     u16 opcode, u16 *data, unsigned int data_len,
+-			     u16 *ret_data)
++static int as21xxx_ipc_xfer(struct phy_device *phydev, u16 opcode,
++			    const u16 *tx, unsigned int tx_words,
++			    u16 *rx, unsigned int rx_words,
++			    unsigned int *rx_bytes)
+ {
+ 	struct as21xxx_priv *priv = phydev->priv;
+-	unsigned int ret_size;
+-	u16 cmd, ret_sts;
++	unsigned int ret_bytes;
++	u16 sts;
+ 	int ret;
+ 	int i;
+ 
+-	/* IPC have a max of 8 register to transfer data,
+-	 * make sure we never exceed this.
+-	 */
+-	if (data_len > AEON_IPC_DATA_MAX)
++	/* IPC uses eight 16-bit data registers. */
++	if (tx_words > AS21XXX_IPC_DATA_NUM_REGISTERS)
++		return -EMSGSIZE;
++	if (tx_words && !tx)
+ 		return -EINVAL;
+ 
+-	for (i = 0; i < data_len / sizeof(u16); i++)
+-		phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_IPC_DATA(i),
+-			      data[i]);
++	mutex_lock(&priv->ipc_lock);
+ 
+-	cmd = FIELD_PREP(AEON_IPC_CMD_SIZE, data_len) |
+-	      FIELD_PREP(AEON_IPC_CMD_OPCODE, opcode);
++	for (i = 0; i < tx_words; i++) {
++		ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
++				    VEND1_IPC_DATA(i), tx[i]);
++		if (ret)
++			goto out;
++	}
+ 
+-	mutex_lock(&priv->ipc_lock);
++	ret = as21xxx_ipc_send_cmd_locked(phydev, priv, opcode,
++					  tx_words, true, &sts);
++	if (ret)
++		goto out;
+ 
+-	ret = aeon_ipc_send_cmd(phydev, priv, cmd, &ret_sts);
+-	if (ret) {
+-		phydev_err(phydev, "failed to send ipc msg for %x: %d\n",
+-			   opcode, ret);
++	ret = as21xxx_ipc_status_to_errno(sts);
++	if (ret)
+ 		goto out;
+-	}
+ 
+-	if (!data)
++	/* Firmware reports return size in bytes. */
++	ret_bytes = FIELD_GET(AS21XXX_IPC_STS_SIZE, sts);
++	if (ret_bytes > AS21XXX_IPC_DATA_MAX) {
++		ret = -EMSGSIZE;
+ 		goto out;
++	}
++
++	if (!rx) {
++		if (rx_bytes)
++			*rx_bytes = ret_bytes;
+ 
+-	if ((ret_sts & AEON_IPC_STS_STATUS) == AEON_IPC_STS_STATUS_ERROR) {
+-		ret = -EINVAL;
++		ret = 0;
+ 		goto out;
+ 	}
+ 
+-	/* Prevent IPC from stack smashing the kernel.
+-	 * We can't trust IPC to return a good value and we always
+-	 * preallocate space for 16 Bytes.
+-	 */
+-	ret_size = FIELD_GET(AEON_IPC_STS_SIZE, ret_sts);
+-	if (ret_size > AEON_IPC_DATA_MAX) {
+-		ret = -EINVAL;
++	if (ret_bytes > rx_words * sizeof(u16)) {
++		ret = -EMSGSIZE;
+ 		goto out;
+ 	}
+ 
+-	/* Read data from IPC data register for ret_size value from IPC */
+-	for (i = 0; i < DIV_ROUND_UP(ret_size, sizeof(u16)); i++) {
++	/* Read returned bytes from IPC data registers. */
++	for (i = 0; i < DIV_ROUND_UP(ret_bytes, sizeof(u16)); i++) {
+ 		ret = phy_read_mmd(phydev, MDIO_MMD_VEND1, VEND1_IPC_DATA(i));
+ 		if (ret < 0)
+ 			goto out;
+ 
+-		ret_data[i] = ret;
++		rx[i] = ret;
+ 	}
+ 
+-	ret = ret_size;
++	if (rx_bytes)
++		*rx_bytes = ret_bytes;
++
++	ret = 0;
+ 
+ out:
+ 	mutex_unlock(&priv->ipc_lock);
+@@ -536,89 +588,105 @@ out:
+ 	return ret;
+ }
+ 
+-static int aeon_ipc_noop(struct phy_device *phydev,
+-			 struct as21xxx_priv *priv, u16 *ret_sts)
++static int as21xxx_ipc_noop_locked(struct phy_device *phydev,
++				   struct as21xxx_priv *priv,
++				   bool wait_status, u16 *sts)
+ {
+-	u16 cmd;
+-
+-	cmd = FIELD_PREP(AEON_IPC_CMD_SIZE, 0) |
+-	      FIELD_PREP(AEON_IPC_CMD_OPCODE, IPC_CMD_NOOP);
+-
+-	return aeon_ipc_send_cmd(phydev, priv, cmd, ret_sts);
++	return as21xxx_ipc_send_cmd_locked(phydev, priv, IPC_CMD_NOOP, 0,
++					   wait_status, sts);
+ }
+ 
+-/* Logic to sync parity bit with IPC.
+- * We send 2 NOP cmd with same partity and we wait for IPC
+- * to handle the packet only for the second one. This way
+- * we make sure we are sync for every next cmd.
++/*
++ * Sync local IPC parity with firmware. Send one unchecked NOOP using the
++ * current parity, reset local parity, then send a second NOOP and wait for
++ * firmware to report either READY or command SUCCESS.
+  */
+-static int aeon_ipc_sync_parity(struct phy_device *phydev,
+-				struct as21xxx_priv *priv)
++static int as21xxx_ipc_sync_parity_priv(struct phy_device *phydev,
++					struct as21xxx_priv *priv)
+ {
+-	u16 ret_sts;
++	bool parity;
+ 	int ret;
+ 
+ 	mutex_lock(&priv->ipc_lock);
+ 
+-	/* Send NOP with no parity */
+-	aeon_ipc_noop(phydev, priv, NULL);
++	ret = as21xxx_ipc_noop_locked(phydev, priv, false, NULL);
++	if (ret)
++		goto out;
++
++	priv->ipc_parity = false;
+ 
+-	/* Reset packet parity */
+-	priv->parity_status = false;
++	parity = priv->ipc_parity;
+ 
+-	/* Send second NOP with no parity */
+-	ret = aeon_ipc_noop(phydev, priv, &ret_sts);
++	ret = as21xxx_ipc_noop_locked(phydev, priv, false, NULL);
++	if (ret)
++		goto out;
+ 
++	ret = as21xxx_ipc_wait_ready(phydev, parity);
++out:
+ 	mutex_unlock(&priv->ipc_lock);
+ 
+-	/* We expect to return -EINVAL */
+-	if (ret != -EINVAL)
+-		return ret;
++	return ret;
++}
+ 
+-	if ((ret_sts & AEON_IPC_STS_STATUS) != AEON_IPC_STS_STATUS_READY) {
+-		phydev_err(phydev, "Invalid IPC status on sync parity: %x\n",
+-			   ret_sts);
+-		return -EINVAL;
+-	}
++static int as21xxx_ipc_sync_parity(struct phy_device *phydev)
++{
++	return as21xxx_ipc_sync_parity_priv(phydev, phydev->priv);
++}
+ 
+-	return 0;
++static int as21xxx_ipc_noop(struct phy_device *phydev,
++			    struct as21xxx_priv *priv)
++{
++	u16 sts;
++	int ret;
++
++	mutex_lock(&priv->ipc_lock);
++	ret = as21xxx_ipc_noop_locked(phydev, priv, true, &sts);
++	mutex_unlock(&priv->ipc_lock);
++	if (ret)
++		return ret;
++
++	return as21xxx_ipc_status_to_errno(sts);
+ }
+ 
+-static int aeon_ipc_get_fw_version(struct phy_device *phydev)
++static int as21xxx_ipc_read_fw_version(struct phy_device *phydev,
++				       char *fw_version, size_t len)
+ {
+-	u16 ret_data[AEON_IPC_DATA_NUM_REGISTERS], data[1];
+-	char fw_version[AEON_IPC_DATA_MAX + 1];
++	u16 rx[AS21XXX_IPC_DATA_NUM_REGISTERS];
++	u16 tx[] = { IPC_INFO_VERSION };
++	unsigned int rx_bytes;
++	size_t copy_len;
+ 	int ret;
+ 
+-	data[0] = IPC_INFO_VERSION;
++	if (!len)
++		return -EINVAL;
+ 
+-	ret = aeon_ipc_send_msg(phydev, IPC_CMD_INFO, data,
+-				sizeof(data), ret_data);
+-	if (ret < 0)
++	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_INFO, tx, ARRAY_SIZE(tx),
++			       rx, ARRAY_SIZE(rx), &rx_bytes);
++	if (ret)
+ 		return ret;
+ 
+ 	/* Make sure FW version is NULL terminated */
+-	memcpy(fw_version, ret_data, ret);
+-	fw_version[ret] = '\0';
+-
+-	phydev_info(phydev, "Firmware Version: %s\n", fw_version);
++	copy_len = min_t(size_t, rx_bytes, len - 1);
++	memcpy(fw_version, rx, copy_len);
++	fw_version[copy_len] = '\0';
+ 
+ 	return 0;
+ }
+ 
+-static int aeon_dpc_ra_enable(struct phy_device *phydev)
++static int as21xxx_dpc_ra_enable(struct phy_device *phydev)
+ {
+-	u16 data[2];
++	u16 tx[] = {
++		IPC_CFG_PARAM_DIRECT,
++		IPC_CFG_PARAM_DIRECT_DPC_RA,
++	};
+ 
+-	data[0] = IPC_CFG_PARAM_DIRECT;
+-	data[1] = IPC_CFG_PARAM_DIRECT_DPC_RA;
+-
+-	return aeon_ipc_send_msg(phydev, IPC_CMD_CFG_PARAM, data,
+-				 sizeof(data), NULL);
++	return as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
++				NULL, 0, NULL);
+ }
+ 
+ static int as21xxx_probe(struct phy_device *phydev)
+ {
++	char fw_version[AS21XXX_IPC_DATA_MAX + 1];
+ 	struct as21xxx_priv *priv;
+ 	int ret;
+ 
+@@ -640,21 +708,24 @@ static int as21xxx_probe(struct phy_device *phydev)
+ 	 */
+ 	phydev->c45_ids.devices_in_package &= ~BIT(0);
+ 
+-	ret = aeon_ipc_sync_parity(phydev, priv);
++	ret = as21xxx_ipc_sync_parity(phydev);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = aeon_ipc_get_fw_version(phydev);
++	ret = as21xxx_ipc_read_fw_version(phydev, fw_version,
++					  sizeof(fw_version));
+ 	if (ret)
+ 		return ret;
+ 
++	phydev_info(phydev, "Firmware Version: %s\n", fw_version);
++
+ 	/* Enable PTP clk if not already Enabled */
+ 	ret = phy_set_bits_mmd(phydev, MDIO_MMD_VEND1, VEND1_PTP_CLK,
+ 			       VEND1_PTP_CLK_EN);
+ 	if (ret)
+ 		return ret;
+ 
+-	return aeon_dpc_ra_enable(phydev);
++	return as21xxx_dpc_ra_enable(phydev);
+ }
+ 
+ static int as21xxx_read_link(struct phy_device *phydev, int *bmcr)
+@@ -921,7 +992,6 @@ static int as21xxx_match_phy_device(struct phy_device *phydev,
+ 				    const struct phy_driver *phydrv)
+ {
+ 	struct as21xxx_priv *priv;
+-	u16 ret_sts;
+ 	u32 phy_id;
+ 	int ret;
+ 
+@@ -947,7 +1017,13 @@ static int as21xxx_match_phy_device(struct phy_device *phydev,
+ 	if (phy_id != PHY_ID_AS21XXX)
+ 		return phy_id == phydrv->phy_id;
+ 
+-	/* Allocate temp priv and load the firmware */
++	/* The pre-firmware AS21xxx ID is not a usable runtime part ID.
++	 * Loading firmware from this generic match path is intentional:
++	 * after firmware boot the PHY exposes a concrete AS21xx ID, and
++	 * returning 0 lets phylib continue matching the later concrete
++	 * driver entries. Keep this path limited to firmware bootstrap;
++	 * LED, hwmon, AN and DPC policy belong in their own lifecycle hooks.
++	 */
+ 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+ 	if (!priv)
+ 		return -ENOMEM;
+@@ -958,28 +1034,21 @@ static int as21xxx_match_phy_device(struct phy_device *phydev,
+ 	if (ret)
+ 		goto out;
+ 
+-	/* Sync parity... */
+-	ret = aeon_ipc_sync_parity(phydev, priv);
++	ret = as21xxx_ipc_sync_parity_priv(phydev, priv);
+ 	if (ret)
+ 		goto out;
+ 
+-	/* ...and send a third NOOP cmd to wait for firmware finish loading */
+-	ret = aeon_ipc_noop(phydev, priv, &ret_sts);
+-	if (ret)
+-		goto out;
++	ret = as21xxx_ipc_noop(phydev, priv);
+ 
+ out:
+ 	mutex_destroy(&priv->ipc_lock);
+ 	kfree(priv);
+ 
+-	/* Return can either be 0 or a negative error code.
+-	 * Returning 0 here means THIS is NOT a suitable PHY.
+-	 *
+-	 * For the specific case of the generic Aeonsemi PHY ID that
+-	 * needs the firmware the be loaded first to have a correct PHY ID,
+-	 * this is OK as a matching PHY ID will be found right after.
+-	 * This relies on the driver probe order where the first PHY driver
+-	 * probed is the generic one.
++	/* If firmware bootstrap fails, return the negative errno so the
++	 * generic pre-firmware ID is not silently treated as a normal mismatch.
++	 * On success, return 0 and let the later concrete AS21xx entries call
++	 * this match hook again; that path re-reads the live PHY ID registers
++	 * and matches the runtime part ID exposed by firmware.
+ 	 */
+ 	return ret;
+ }
+-- 
+2.53.0
+

@@ -1,0 +1,43 @@
+Subject: [PATCH] net: phy: as21xxx: clean up C45 read workaround
+
+Keep the Aeonsemi-confirmed post-read dummy write workaround but remove
+the unresolved FIXME. Use the read-only C22 BMSR target for the dummy
+write and report its error if the original C45 read succeeded.
+---
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index a223a38..0b583a7 100644
+--- a/drivers/net/phy/as21xxx.c
++++ b/drivers/net/phy/as21xxx.c
+@@ -1053,19 +1053,24 @@ out:
+ 	return ret;
+ }
+ 
+-static int as21xxx_read_mmd(struct phy_device *phydev, int devad,
+-			    u16 regnum)
++static int as21xxx_read_mmd(struct phy_device *phydev, int devad, u16 regnum)
+ {
+ 	struct mii_bus *bus = phydev->mdio.bus;
++	int ret;
+ 	int val;
+ 
+ 	val = __mdiobus_c45_read(bus, phydev->mdio.addr, devad,
+ 				 regnum);
+ 
+-	/* FIXME: verify if it's actually ok to limit this to MII_BMSR */
+-	__mdiobus_write(bus, 0x0, MII_BMSR, 0x1);
++	/* AS21xx needs a post-read dummy write to keep later MDIO reads
++	 * stable. Use C22 BMSR to avoid side effects from writable registers.
++	 */
++	ret = __mdiobus_write(bus, 0x0, MII_BMSR, 0x1);
++
++	if (val < 0)
++		return val;
+ 
+-	return val;
++	return ret ?: val;
+ }
+ 
+ static struct phy_driver as21xxx_drivers[] = {
+-- 
+2.53.0
+
