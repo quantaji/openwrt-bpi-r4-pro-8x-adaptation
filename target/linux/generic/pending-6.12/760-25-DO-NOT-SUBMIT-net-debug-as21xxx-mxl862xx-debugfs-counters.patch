@@ -1,0 +1,421 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 23 Jun 2026 00:00:00 -0700
+Subject: [PATCH] DO NOT SUBMIT: net: dsa: mxl862xx: add debugfs counters
+
+Add temporary read-only debugfs diagnostics for the MxL862xx switch path.
+The files are intended for before/after MSS tests and report cumulative
+firmware/RMON counters without clearing or programming hardware state.
+
+This is downstream validation code only and must be removed once the
+combo RJ45 failure has been isolated.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-api.h	2026-06-23 17:27:33.938393072 -0700
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-api.h	2026-06-23 17:30:48.429029527 -0700
+@@ -2549,6 +2549,65 @@
+ 	__le64 tx_good_bytes;
+ } __packed;
+ 
++struct mxl862xx_debug_rmon_port_cnt {
++	__le16 port_id;
++	__le32 port_type; /* enum mxl862xx_rmon_port_type */
++	__le32 rx_extended_vlan_discard_pkts;
++	__le32 mtu_exceed_discard_pkts;
++	__le32 tx_under_size_good_pkts;
++	__le32 tx_oversize_good_pkts;
++	__le32 rx_good_pkts;
++	__le32 rx_unicast_pkts;
++	__le32 rx_broadcast_pkts;
++	__le32 rx_multicast_pkts;
++	__le32 rx_fcserror_pkts;
++	__le32 rx_under_size_good_pkts;
++	__le32 rx_oversize_good_pkts;
++	__le32 rx_under_size_error_pkts;
++	__le32 rx_good_pause_pkts;
++	__le32 rx_oversize_error_pkts;
++	__le32 rx_align_error_pkts;
++	__le32 rx_filtered_pkts;
++	__le32 rx64byte_pkts;
++	__le32 rx127byte_pkts;
++	__le32 rx255byte_pkts;
++	__le32 rx511byte_pkts;
++	__le32 rx1023byte_pkts;
++	__le32 rx_max_byte_pkts;
++	__le32 tx_good_pkts;
++	__le32 tx_unicast_pkts;
++	__le32 tx_broadcast_pkts;
++	__le32 tx_multicast_pkts;
++	__le32 tx_single_coll_count;
++	__le32 tx_mult_coll_count;
++	__le32 tx_late_coll_count;
++	__le32 tx_excess_coll_count;
++	__le32 tx_coll_count;
++	__le32 tx_pause_count;
++	__le32 tx64byte_pkts;
++	__le32 tx127byte_pkts;
++	__le32 tx255byte_pkts;
++	__le32 tx511byte_pkts;
++	__le32 tx1023byte_pkts;
++	__le32 tx_max_byte_pkts;
++	__le32 tx_dropped_pkts;
++	__le32 tx_acm_dropped_pkts;
++	__le32 rx_dropped_pkts;
++	__le64 rx_good_bytes;
++	__le64 rx_bad_bytes;
++	__le64 tx_good_bytes;
++	__le32 rx_unicast_pkts_yellow_red;
++	__le32 rx_broadcast_pkts_yellow_red;
++	__le32 rx_multicast_pkts_yellow_red;
++	__le64 rx_good_bytes_yellow_red;
++	__le32 rx_good_pkts_yellow_red;
++	__le32 tx_unicast_pkts_yellow_red;
++	__le32 tx_broadcast_pkts_yellow_red;
++	__le32 tx_multicast_pkts_yellow_red;
++	__le64 tx_good_bytes_yellow_red;
++	__le32 tx_good_pkts_yellow_red;
++} __packed;
++
+ /**
+  * enum mxl862xx_xpcs_if_mode - XPCS interface mode
+  * @MXL862XX_XPCS_IF_SGMII: SGMII
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h	2026-06-23 17:27:33.939678143 -0700
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h	2026-06-23 17:30:17.930640814 -0700
+@@ -18,6 +18,7 @@
+ #define MXL862XX_CTP_MAGIC		0x500
+ #define MXL862XX_QOS_MAGIC		0x600
+ #define MXL862XX_RMON_MAGIC		0x700
++#define MXL862XX_DEBUG_MAGIC		0x800
+ #define MXL862XX_SWMAC_MAGIC		0xa00
+ #define MXL862XX_EXTVLAN_MAGIC		0xb00
+ #define MXL862XX_VLANFILTER_MAGIC	0xc00
+@@ -60,6 +61,7 @@
+ #define MXL862XX_QOS_PMAPPERTABLESET	(MXL862XX_QOS_MAGIC + 0x2e)
+ 
+ #define MXL862XX_RMON_PORT_GET		(MXL862XX_RMON_MAGIC + 0x1)
++#define MXL862XX_DEBUG_RMON_PORT_GET	(MXL862XX_DEBUG_MAGIC + 0x1)
+ 
+ #define MXL862XX_MAC_TABLECLEAR		(MXL862XX_SWMAC_MAGIC + 0x1)
+ #define MXL862XX_MAC_TABLEENTRYADD	(MXL862XX_SWMAC_MAGIC + 0x2)
+--- a/drivers/net/dsa/mxl862xx/mxl862xx.c	2026-06-23 17:27:33.933557647 -0700
++++ b/drivers/net/dsa/mxl862xx/mxl862xx.c	2026-06-23 17:32:23.372241781 -0700
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include <linux/bitfield.h>
++#include <linux/debugfs.h>
+ #include <linux/delay.h>
+ #include <linux/etherdevice.h>
+ #include <linux/icmpv6.h>
+@@ -18,6 +19,7 @@
+ #include <linux/of_mdio.h>
+ #include <linux/phy.h>
+ #include <linux/phylink.h>
++#include <linux/seq_file.h>
+ #include <linux/dsa/8021q.h>
+ #include <net/dsa.h>
+ 
+@@ -78,6 +80,8 @@
+ 
+ #define MXL862XX_TCM_INST_SEL		0xe00
+ #define MXL862XX_TCM_CBS		0xe12
++
++static struct dentry *mxl862xx_debugfs_root;
+ #define MXL862XX_TCM_EBS		0xe13
+ 
+ static const int mxl862xx_flood_meters[] = {
+@@ -4088,6 +4092,242 @@
+ 	return MXL862XX_API_READ(ds->priv, MXL862XX_RMON_PORT_GET, *cnt);
+ }
+ 
++#define MXL862XX_DIAG_PORT		13
++#define MXL862XX_DEBUG_RMON_PORT(port)	((port) + 1)
++
++static void mxl862xx_diag_print_rmon(struct seq_file *s, const char *name,
++				     const struct mxl862xx_rmon_port_cnt *cnt)
++{
++	seq_printf(s,
++		   "%s rx_good=%u rx_bytes=%llu rx_fcs=%u rx_align=%u rx_drop=%u rx_mtu_drop=%u rx_pause=%u tx_good=%u tx_bytes=%llu tx_drop=%u tx_acm_drop=%u tx_pause=%u\n",
++		   name, le32_to_cpu(cnt->rx_good_pkts),
++		   le64_to_cpu(cnt->rx_good_bytes),
++		   le32_to_cpu(cnt->rx_fcserror_pkts),
++		   le32_to_cpu(cnt->rx_align_error_pkts),
++		   le32_to_cpu(cnt->rx_dropped_pkts),
++		   le32_to_cpu(cnt->mtu_exceed_discard_pkts),
++		   le32_to_cpu(cnt->rx_good_pause_pkts),
++		   le32_to_cpu(cnt->tx_good_pkts),
++		   le64_to_cpu(cnt->tx_good_bytes),
++		   le32_to_cpu(cnt->tx_dropped_pkts),
++		   le32_to_cpu(cnt->tx_acm_dropped_pkts),
++		   le32_to_cpu(cnt->tx_pause_count));
++}
++
++static int mxl862xx_port13_rmon_show(struct seq_file *s, void *unused)
++{
++	struct mxl862xx_priv *priv = s->private;
++	struct mxl862xx_rmon_port_cnt cnt;
++	int ret;
++
++	ret = mxl862xx_read_rmon(priv->ds, MXL862XX_DIAG_PORT, &cnt);
++	if (ret) {
++		seq_printf(s, "port=%u standard_rmon_error=%pe\n",
++			   MXL862XX_DIAG_PORT, ERR_PTR(ret));
++		return 0;
++	}
++
++	seq_printf(s, "port=%u source=standard_rmon\n", MXL862XX_DIAG_PORT);
++	mxl862xx_diag_print_rmon(s, "standard_rmon", &cnt);
++
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(mxl862xx_port13_rmon);
++
++static int mxl862xx_diag_read_debug_rmon(struct mxl862xx_priv *priv, int port,
++					 enum mxl862xx_rmon_port_type type,
++					 struct mxl862xx_debug_rmon_port_cnt *cnt)
++{
++	memset(cnt, 0, sizeof(*cnt));
++	cnt->port_id = cpu_to_le16(MXL862XX_DEBUG_RMON_PORT(port));
++	cnt->port_type = cpu_to_le32(type);
++
++	return MXL862XX_API_READ_QUIET(priv, MXL862XX_DEBUG_RMON_PORT_GET,
++				       *cnt);
++}
++
++static void
++mxl862xx_diag_print_debug_rmon(struct seq_file *s, const char *name,
++			       const struct mxl862xx_debug_rmon_port_cnt *cnt)
++{
++	seq_printf(s,
++		   "%s rx_good=%u rx_bytes=%llu rx_fcs=%u rx_align=%u rx_drop=%u rx_mtu_drop=%u rx_pause=%u tx_good=%u tx_bytes=%llu tx_drop=%u tx_acm_drop=%u tx_pause=%u\n",
++		   name, le32_to_cpu(cnt->rx_good_pkts),
++		   le64_to_cpu(cnt->rx_good_bytes),
++		   le32_to_cpu(cnt->rx_fcserror_pkts),
++		   le32_to_cpu(cnt->rx_align_error_pkts),
++		   le32_to_cpu(cnt->rx_dropped_pkts),
++		   le32_to_cpu(cnt->mtu_exceed_discard_pkts),
++		   le32_to_cpu(cnt->rx_good_pause_pkts),
++		   le32_to_cpu(cnt->tx_good_pkts),
++		   le64_to_cpu(cnt->tx_good_bytes),
++		   le32_to_cpu(cnt->tx_dropped_pkts),
++		   le32_to_cpu(cnt->tx_acm_dropped_pkts),
++		   le32_to_cpu(cnt->tx_pause_count));
++}
++
++static void mxl862xx_diag_print_legacy_sfp(struct seq_file *s,
++					   struct mxl862xx_priv *priv,
++					   int port)
++{
++	struct mxl862xx_sys_sfp_cfg ser_intf = {
++		.port_id = MXL862XX_SERDES_PORT_ID(port),
++		.option = 0,
++	};
++	int ret;
++
++	if (port < MXL862XX_FIRST_SERDES_PORT ||
++	    port >= MXL862XX_FIRST_SERDES_PORT + ARRAY_SIZE(priv->serdes_ports) ||
++	    MXL862XX_SERDES_SLOT(port))
++		return;
++
++	ret = MXL862XX_API_READ(priv, SYS_MISC_SFP_GET, ser_intf);
++	if (ret) {
++		seq_printf(s, "legacy_sfp_option0_error=%pe\n", ERR_PTR(ret));
++	} else {
++		seq_printf(s,
++			   "legacy_sfp_option0 serdes=%u mode=%u speed=%u link=%u\n",
++			   MXL862XX_SERDES_PORT_ID(port), ser_intf.mode,
++			   ser_intf.speed, ser_intf.link);
++	}
++
++	ser_intf = (struct mxl862xx_sys_sfp_cfg) {
++		.port_id = MXL862XX_SERDES_PORT_ID(port),
++		.option = 1,
++	};
++
++	ret = MXL862XX_API_READ(priv, SYS_MISC_SFP_GET, ser_intf);
++	if (ret)
++		seq_printf(s, "legacy_sfp_option1_error=%pe\n", ERR_PTR(ret));
++	else
++		seq_printf(s, "legacy_sfp_option1 serdes=%u fc_en=%u\n",
++			   MXL862XX_SERDES_PORT_ID(port), ser_intf.fc_en);
++}
++
++static int mxl862xx_port13_state_show(struct seq_file *s, void *unused)
++{
++	struct mxl862xx_priv *priv = s->private;
++	struct mxl862xx_port_link_cfg link_cfg = {
++		.port_id = cpu_to_le16(MXL862XX_DIAG_PORT),
++	};
++	struct mxl862xx_port_cfg port_cfg = {
++		.port_id = cpu_to_le16(MXL862XX_DIAG_PORT),
++	};
++	int ret;
++
++	seq_printf(s, "port=%u fw=%u.%u.%u tag_proto=%u\n",
++		   MXL862XX_DIAG_PORT,
++		   priv->fw_version.major, priv->fw_version.minor,
++		   priv->fw_version.revision, priv->tag_proto);
++
++	ret = MXL862XX_API_READ(priv, MXL862XX_COMMON_PORTLINKCFGGET,
++				link_cfg);
++	if (ret) {
++		seq_printf(s, "port_link_cfg_error=%pe\n", ERR_PTR(ret));
++	} else {
++		seq_printf(s,
++			   "port_link link_force=%u link=%u speed_force=%u speed=%u duplex_force=%u duplex=%u mii_mode=%u mii_type=%u clk_mode=%u lpi=%u\n",
++			   link_cfg.link_force, le32_to_cpu(link_cfg.link),
++			   link_cfg.speed_force, le32_to_cpu(link_cfg.speed),
++			   link_cfg.duplex_force, le32_to_cpu(link_cfg.duplex),
++			   le32_to_cpu(link_cfg.mii_mode),
++			   le32_to_cpu(link_cfg.mii_type),
++			   le32_to_cpu(link_cfg.clk_mode), link_cfg.lpi);
++	}
++
++	ret = MXL862XX_API_READ(priv, MXL862XX_COMMON_PORTCFGGET,
++				port_cfg);
++	if (ret) {
++		seq_printf(s, "port_cfg_error=%pe\n", ERR_PTR(ret));
++	} else {
++		seq_printf(s,
++			   "port_cfg port_type=%u enable=%u drops=%u/%u/%u/%u aging=%u learning=%u flow_ctrl=%u monitor=%u if_counters=%u if_start=%u if_rmonmode=%u\n",
++			   le32_to_cpu(port_cfg.port_type),
++			   le32_to_cpu(port_cfg.enable),
++			   port_cfg.unicast_unknown_drop,
++			   port_cfg.multicast_unknown_drop,
++			   port_cfg.reserved_packet_drop,
++			   port_cfg.broadcast_drop, port_cfg.aging,
++			   port_cfg.learning, le32_to_cpu(port_cfg.flow_ctrl),
++			   le32_to_cpu(port_cfg.port_monitor),
++			   port_cfg.if_counters,
++			   le32_to_cpu(port_cfg.if_count_start_idx),
++			   le32_to_cpu(port_cfg.if_rmonmode));
++	}
++
++	mxl862xx_diag_print_legacy_sfp(s, priv, MXL862XX_DIAG_PORT);
++
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(mxl862xx_port13_state);
++
++static int mxl862xx_port13_debug_rmon_show(struct seq_file *s, void *unused)
++{
++	static const struct {
++		enum mxl862xx_rmon_port_type type;
++		const char *name;
++	} rmon_tables[] = {
++		{ MXL862XX_RMON_CTP_PORT_RX, "debug_ctp_rx" },
++		{ MXL862XX_RMON_CTP_PORT_TX, "debug_ctp_tx" },
++	};
++	struct mxl862xx_priv *priv = s->private;
++	struct mxl862xx_debug_rmon_port_cnt cnt;
++	int ret;
++	int i;
++
++	seq_printf(s, "port=%u debug_port=%u source=debug_rmon_try\n",
++		   MXL862XX_DIAG_PORT,
++		   MXL862XX_DEBUG_RMON_PORT(MXL862XX_DIAG_PORT));
++
++	for (i = 0; i < ARRAY_SIZE(rmon_tables); i++) {
++		ret = mxl862xx_diag_read_debug_rmon(priv, MXL862XX_DIAG_PORT,
++						    rmon_tables[i].type, &cnt);
++		if (ret) {
++			seq_printf(s, "%s_error=%pe\n", rmon_tables[i].name,
++				   ERR_PTR(ret));
++			continue;
++		}
++
++		mxl862xx_diag_print_debug_rmon(s, rmon_tables[i].name, &cnt);
++	}
++
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(mxl862xx_port13_debug_rmon);
++
++static void mxl862xx_debugfs_init(struct mxl862xx_priv *priv)
++{
++	struct dsa_switch *ds = priv->ds;
++	struct dentry *dir;
++
++	if (IS_ERR_OR_NULL(mxl862xx_debugfs_root))
++		mxl862xx_debugfs_root = debugfs_create_dir("mxl862xx", NULL);
++	if (IS_ERR(mxl862xx_debugfs_root))
++		return;
++
++	dir = debugfs_create_dir(dev_name(ds->dev), mxl862xx_debugfs_root);
++	if (IS_ERR(dir))
++		return;
++
++	priv->debugfs_dir = dir;
++
++	debugfs_create_file("port13_state", 0444, dir, priv,
++			    &mxl862xx_port13_state_fops);
++	debugfs_create_file("port13_rmon", 0444, dir, priv,
++			    &mxl862xx_port13_rmon_fops);
++	debugfs_create_file("port13_debug_rmon_try", 0444, dir, priv,
++			    &mxl862xx_port13_debug_rmon_fops);
++}
++
++static void mxl862xx_debugfs_remove(struct mxl862xx_priv *priv)
++{
++	debugfs_remove_recursive(priv->debugfs_dir);
++	priv->debugfs_dir = NULL;
++}
++
+ static void mxl862xx_get_ethtool_stats(struct dsa_switch *ds, int port,
+ 				       u64 *data)
+ {
+@@ -4446,6 +4643,7 @@
+ 		for (i = 0; i < MXL862XX_MAX_PORTS; i++)
+ 			cancel_work_sync(&priv->ports[i].host_flood_work);
+ 	} else {
++		mxl862xx_debugfs_init(priv);
+ 		mxl862xx_muxes_init(priv);
+ 	}
+ 
+@@ -4463,6 +4661,8 @@
+ 
+ 	priv = ds->priv;
+ 
++	mxl862xx_debugfs_remove(priv);
++
+ 	set_bit(MXL862XX_FLAG_WORK_STOPPED, &priv->flags);
+ 	cancel_delayed_work_sync(&priv->stats_work);
+ 
+@@ -4504,6 +4704,7 @@
+ 
+ 	priv = ds->priv;
+ 
++	mxl862xx_debugfs_remove(priv);
+ 	mxl862xx_muxes_teardown(priv);
+ 	dsa_switch_shutdown(ds);
+ 
+--- a/drivers/net/dsa/mxl862xx/mxl862xx.h	2026-06-23 17:27:33.936678061 -0700
++++ b/drivers/net/dsa/mxl862xx/mxl862xx.h	2026-06-23 17:30:56.862137073 -0700
+@@ -9,6 +9,7 @@
+ #include <net/dsa.h>
+ 
+ struct gpio_desc;
++struct dentry;
+ struct mxl862xx_priv;
+ struct mxl_mux;
+ 
+@@ -441,6 +448,7 @@
+  *                      session is active; used to detect monitor port conflicts
+  * @stats_work:         periodic work item that polls RMON hardware counters
+  *                      and accumulates them into 64-bit per-port stats
++ * @debugfs_dir:        temporary diagnostics debugfs directory
+  */
+ struct mxl862xx_priv {
+ 	struct dsa_switch *ds;
+@@ -466,6 +475,7 @@
+ 	bool block_host;
+ 	bool skip_teardown;
+ 	struct delayed_work stats_work;
++	struct dentry *debugfs_dir;
+ };
+ 
+ #endif /* __MXL862XX_H */

@@ -1,0 +1,277 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 23 Jun 2026 00:00:00 -0700
+Subject: [PATCH] DO NOT SUBMIT: net: dsa: mxl862xx: program legacy MAC link
+ state
+
+The legacy SYS_MISC_SFP_SET-based PCS fallback is selected for firmware
+versions older than 1.0.84. That path configures the SerDes mode, but
+unlike the XPCS firmware API it does not carry the final MAC link state
+or pause decision supplied by phylink.
+
+Program the legacy port link state from mac_link_up() and force the link
+down from mac_link_down() for the SerDes interface modes handled by the
+legacy PCS fallback. Also program the legacy SerDes and port
+flow-control settings from phylink's pause decisions. This keeps the
+policy in phylink/MAC code instead of adding board-specific handling to
+the PHY driver.
+
+This commit is for downstream old-firmware validation only and must not
+be submitted upstream as-is.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/net/dsa/mxl862xx/mxl862xx-cmd.h     |   2 +
+ drivers/net/dsa/mxl862xx/mxl862xx-phylink.c | 161 ++++++++++++++++++-
+ 2 files changed, 163 insertions(+), 1 deletion(-)
+
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h
+@@ -28,7 +28,9 @@
+ #define MXL862XX_XPCS_MAGIC		0x1a00
+ 
+ #define MXL862XX_COMMON_PORTLINKCFGGET	(MXL862XX_COMMON_MAGIC + 0x5)
++#define MXL862XX_COMMON_PORTLINKCFGSET	(MXL862XX_COMMON_MAGIC + 0x6)
+ #define MXL862XX_COMMON_PORTCFGGET	(MXL862XX_COMMON_MAGIC + 0x7)
++#define MXL862XX_COMMON_PORTCFGSET	(MXL862XX_COMMON_MAGIC + 0x8)
+ #define MXL862XX_COMMON_CFGGET		(MXL862XX_COMMON_MAGIC + 0x9)
+ #define MXL862XX_COMMON_CFGSET		(MXL862XX_COMMON_MAGIC + 0xa)
+ #define MXL862XX_COMMON_MONITORPORTCFGSET (MXL862XX_COMMON_MAGIC + 0xe)
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include <linux/atomic.h>
++#include <linux/err.h>
+ #include <linux/phylink.h>
+ #include <net/dsa.h>
+ 
+@@ -62,6 +63,18 @@ static struct mxl862xx_pcs *pcs_to_mxl86
+ 	return container_of(pcs, struct mxl862xx_pcs, pcs);
+ }
+ 
++static int mxl862xx_legacy_serdes_set_flow_ctrl(struct mxl862xx_priv *priv,
++						u8 serdes_id, bool enable)
++{
++	struct mxl862xx_sys_sfp_cfg ser_intf = {
++		.port_id = serdes_id,
++		.option = 1,
++		.fc_en = enable ? 1 : 0,
++	};
++
++	return MXL862XX_API_WRITE(priv, SYS_MISC_SFP_SET, ser_intf);
++}
++
+ /* Legacy SFP-based PCS implementation for firmware < 1.0.84 */
+ static int mxl862xx_legacy_pcs_config(struct phylink_pcs *pcs,
+ 				      unsigned int neg_mode,
+@@ -77,6 +90,7 @@ static int mxl862xx_legacy_pcs_config(st
+ 		.option = 0,
+ 		.mode = 1,
+ 	};
++	int ret;
+ 
+ 	if (mpcs->slot != 0)
+ 		return 0;
+@@ -107,7 +121,18 @@ static int mxl862xx_legacy_pcs_config(st
+ 		return -EINVAL;
+ 	}
+ 
+-	return MXL862XX_API_WRITE(priv, SYS_MISC_SFP_SET, ser_intf);
++	ret = MXL862XX_API_WRITE(priv, SYS_MISC_SFP_SET, ser_intf);
++	if (ret)
++		return ret;
++
++	ret = mxl862xx_legacy_serdes_set_flow_ctrl(priv, mpcs->serdes_id,
++						   permit_pause_to_mac);
++	if (ret)
++		dev_warn(priv->ds->dev,
++			 "failed to configure legacy SerDes flow control on port %u: %pe\n",
++			 MXL862XX_PCS_PORT(mpcs), ERR_PTR(ret));
++
++	return 0;
+ }
+ 
+ static void mxl862xx_legacy_pcs_get_state(struct phylink_pcs *pcs,
+@@ -537,16 +538,163 @@ mxl862xx_phylink_mac_select_pcs(struct p
+ 	}
+ }
+ 
++static int mxl862xx_port_speed(int speed)
++{
++	switch (speed) {
++	case SPEED_10:
++		return MXL862XX_PORT_SPEED_10;
++	case SPEED_100:
++		return MXL862XX_PORT_SPEED_100;
++	case SPEED_1000:
++		return MXL862XX_PORT_SPEED_1000;
++	case SPEED_2500:
++		return MXL862XX_PORT_SPEED_2500;
++	case SPEED_5000:
++		return MXL862XX_PORT_SPEED_5000;
++	case SPEED_10000:
++		return MXL862XX_PORT_SPEED_10000;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int mxl862xx_port_duplex(int duplex)
++{
++	switch (duplex) {
++	case DUPLEX_HALF:
++		return MXL862XX_DUPLEX_HALF;
++	case DUPLEX_FULL:
++		return MXL862XX_DUPLEX_FULL;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int mxl862xx_port_set_link_up(struct mxl862xx_priv *priv, int port,
++				     int speed, int duplex)
++{
++	struct mxl862xx_port_link_cfg cfg = {
++		.port_id = cpu_to_le16(port),
++	};
++	int port_duplex;
++	int port_speed;
++
++	port_speed = mxl862xx_port_speed(speed);
++	if (port_speed < 0)
++		return port_speed;
++
++	port_duplex = mxl862xx_port_duplex(duplex);
++	if (port_duplex < 0)
++		return port_duplex;
++
++	cfg.link_force = true;
++	cfg.link = cpu_to_le32(MXL862XX_PORT_LINK_UP);
++	cfg.speed_force = true;
++	cfg.speed = cpu_to_le32(port_speed);
++	cfg.duplex_force = true;
++	cfg.duplex = cpu_to_le32(port_duplex);
++
++	return MXL862XX_API_WRITE(priv, MXL862XX_COMMON_PORTLINKCFGSET, cfg);
++}
++
++static int mxl862xx_port_set_link_down(struct mxl862xx_priv *priv, int port)
++{
++	struct mxl862xx_port_link_cfg cfg = {
++		.port_id = cpu_to_le16(port),
++	};
++
++	cfg.link_force = true;
++	cfg.link = cpu_to_le32(MXL862XX_PORT_LINK_DOWN);
++
++	return MXL862XX_API_WRITE(priv, MXL862XX_COMMON_PORTLINKCFGSET, cfg);
++}
++
++static int mxl862xx_port_set_flow_ctrl(struct mxl862xx_priv *priv, int port,
++				       bool tx_pause, bool rx_pause)
++{
++	struct mxl862xx_port_cfg cfg = {
++		.port_id = cpu_to_le16(port),
++	};
++	int ret;
++
++	ret = MXL862XX_API_READ(priv, MXL862XX_COMMON_PORTCFGGET, cfg);
++	if (ret)
++		return ret;
++
++	if (tx_pause && rx_pause)
++		cfg.flow_ctrl = cpu_to_le32(MXL862XX_FLOW_RXTX);
++	else if (tx_pause)
++		cfg.flow_ctrl = cpu_to_le32(MXL862XX_FLOW_TX);
++	else if (rx_pause)
++		cfg.flow_ctrl = cpu_to_le32(MXL862XX_FLOW_RX);
++	else
++		cfg.flow_ctrl = cpu_to_le32(MXL862XX_FLOW_OFF);
++
++	return MXL862XX_API_WRITE(priv, MXL862XX_COMMON_PORTCFGSET, cfg);
++}
++
++static void mxl862xx_phylink_mac_link_up_legacy(struct mxl862xx_priv *priv,
++						int port, int speed,
++						int duplex, bool tx_pause,
++						bool rx_pause)
++{
++	int ret;
++
++	ret = mxl862xx_port_set_link_up(priv, port, speed, duplex);
++	if (ret) {
++		dev_err(priv->ds->dev,
++			"failed to configure link up on port %d: %pe\n",
++			port, ERR_PTR(ret));
++		return;
++	}
++
++	ret = mxl862xx_port_set_flow_ctrl(priv, port, tx_pause, rx_pause);
++	if (ret)
++		dev_err(priv->ds->dev,
++			"failed to configure pause on port %d: %pe\n",
++			port, ERR_PTR(ret));
++}
++
++static bool
++mxl862xx_legacy_mac_needs_link_config(phy_interface_t interface)
++{
++	switch (interface) {
++	case PHY_INTERFACE_MODE_SGMII:
++	case PHY_INTERFACE_MODE_1000BASEX:
++	case PHY_INTERFACE_MODE_2500BASEX:
++	case PHY_INTERFACE_MODE_10GBASER:
++	case PHY_INTERFACE_MODE_USXGMII:
++		return true;
++	default:
++		return false;
++	}
++}
++
+ static void mxl862xx_phylink_mac_config(struct phylink_config *config,
+ 					unsigned int mode,
+ 					const struct phylink_link_state *state)
+ {
+ }
+ 
+ static void mxl862xx_phylink_mac_link_down(struct phylink_config *config,
+ 					   unsigned int mode,
+ 					   phy_interface_t interface)
+ {
++	struct dsa_port *dp = dsa_phylink_to_port(config);
++	struct mxl862xx_priv *priv = dp->ds->priv;
++	int ret;
++
++	if (MXL862XX_FW_VER_MIN(priv, 1, 0, 84))
++		return;
++
++	if (!mxl862xx_legacy_mac_needs_link_config(interface))
++		return;
++
++	ret = mxl862xx_port_set_link_down(priv, dp->index);
++	if (ret)
++		dev_err(priv->ds->dev,
++			"failed to configure link down on port %d: %pe\n",
++			dp->index, ERR_PTR(ret));
+ }
+ 
+ static void mxl862xx_phylink_mac_link_up(struct phylink_config *config,
+@@ -558,5 +705,16 @@ static void mxl862xx_phylink_mac_link_up
+ 					 bool tx_pause, bool rx_pause)
+ {
++	struct dsa_port *dp = dsa_phylink_to_port(config);
++	struct mxl862xx_priv *priv = dp->ds->priv;
++
++	if (MXL862XX_FW_VER_MIN(priv, 1, 0, 84))
++		return;
++
++	if (!mxl862xx_legacy_mac_needs_link_config(interface))
++		return;
++
++	mxl862xx_phylink_mac_link_up_legacy(priv, dp->index, speed, duplex,
++					    tx_pause, rx_pause);
+ }
+ 
+ const struct phylink_mac_ops mxl862xx_phylink_mac_ops = {

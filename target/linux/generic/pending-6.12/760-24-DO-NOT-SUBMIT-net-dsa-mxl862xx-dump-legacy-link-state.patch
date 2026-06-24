@@ -1,0 +1,211 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 23 Jun 2026 00:00:00 -0700
+Subject: [PATCH] DO NOT SUBMIT: net: dsa: mxl862xx: dump legacy link state
+
+Add temporary diagnostics for the MxL862xx legacy firmware path used by
+combo RJ45 ports. This keeps the MxL-only link, SFP fallback and flow
+control state dumps in a separate switch-side debug patch.
+
+This is downstream validation code only and must be removed once the
+combo RJ45 failure has been isolated.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h
+@@ -90,6 +90,7 @@
+ 
+ #define SYS_MISC_FW_UPDATE		(SYS_MISC_MAGIC + 0x1)
+ #define SYS_MISC_FW_VERSION		(SYS_MISC_MAGIC + 0x2)
++#define SYS_MISC_SFP_GET		(SYS_MISC_MAGIC + 0xd)
+ #define SYS_MISC_SFP_SET		(SYS_MISC_MAGIC + 0xe)
+ 
+ #define MXL862XX_XPCS_PCS_CONFIG	(MXL862XX_XPCS_MAGIC + 0x1)
+
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
+@@ -74,6 +74,44 @@ static int mxl862xx_legacy_serdes_set_fl
+ 	return MXL862XX_API_WRITE(priv, SYS_MISC_SFP_SET, ser_intf);
+ }
+ 
++static void mxl862xx_legacy_sfp_dump(struct mxl862xx_priv *priv,
++				     u8 serdes_id, const char *where)
++{
++	struct mxl862xx_sys_sfp_cfg ser_intf = {
++		.port_id = serdes_id,
++		.option = 0,
++	};
++	int ret;
++
++	ret = MXL862XX_API_READ(priv, SYS_MISC_SFP_GET, ser_intf);
++	if (ret) {
++		dev_info(priv->ds->dev,
++			 "diag: %s serdes %u option 0 read failed: %pe\n",
++			 where, serdes_id, ERR_PTR(ret));
++	} else {
++		dev_info(priv->ds->dev,
++			 "diag: %s serdes %u option 0 mode %u speed %u link %u\n",
++			 where, serdes_id, ser_intf.mode, ser_intf.speed,
++			 ser_intf.link);
++	}
++
++	ser_intf = (struct mxl862xx_sys_sfp_cfg) {
++		.port_id = serdes_id,
++		.option = 1,
++	};
++
++	ret = MXL862XX_API_READ(priv, SYS_MISC_SFP_GET, ser_intf);
++	if (ret) {
++		dev_info(priv->ds->dev,
++			 "diag: %s serdes %u option 1 read failed: %pe\n",
++			 where, serdes_id, ERR_PTR(ret));
++	} else {
++		dev_info(priv->ds->dev,
++			 "diag: %s serdes %u option 1 fc_en %u\n",
++			 where, serdes_id, ser_intf.fc_en);
++	}
++}
++
+ /* Legacy SFP-based PCS implementation for firmware < 1.0.84 */
+ static int mxl862xx_legacy_pcs_config(struct phylink_pcs *pcs,
+ 				      unsigned int neg_mode,
+@@ -121,16 +159,35 @@ static int mxl862xx_legacy_pcs_config(st
+ 		return -EINVAL;
+ 	}
+ 
++	dev_info(priv->ds->dev,
++		 "diag: legacy pcs_config port %u serdes %u slot %u interface %s neg_mode 0x%x permit_pause %u speed_code %u\n",
++		 MXL862XX_PCS_PORT(mpcs), mpcs->serdes_id, mpcs->slot,
++		 phy_modes(interface), neg_mode, permit_pause_to_mac,
++		 ser_intf.speed);
++
++	mxl862xx_legacy_sfp_dump(priv, mpcs->serdes_id,
++				 "legacy pcs_config before");
++
+ 	ret = MXL862XX_API_WRITE(priv, SYS_MISC_SFP_SET, ser_intf);
+ 	if (ret)
+ 		return ret;
+ 
++	mxl862xx_legacy_sfp_dump(priv, mpcs->serdes_id,
++				 "legacy pcs_config after mode");
++
+ 	ret = mxl862xx_legacy_serdes_set_flow_ctrl(priv, mpcs->serdes_id,
+ 						   permit_pause_to_mac);
++	dev_info(priv->ds->dev,
++		 "diag: legacy pcs_config flow_ctrl serdes %u enable %u ret %d\n",
++		 mpcs->serdes_id, permit_pause_to_mac, ret);
++
++	mxl862xx_legacy_sfp_dump(priv, mpcs->serdes_id,
++				 "legacy pcs_config after flow");
++
+ 	if (ret)
+ 		dev_warn(priv->ds->dev,
+ 			 "failed to configure legacy SerDes flow control on port %u: %pe\n",
+ 			 MXL862XX_PCS_PORT(mpcs), ERR_PTR(ret));
+ 
+ 	return 0;
+ }
+@@ -622,6 +679,53 @@ static int mxl862xx_port_set_flow_ctrl(s
+ 	return MXL862XX_API_WRITE(priv, MXL862XX_COMMON_PORTCFGSET, cfg);
+ }
+ 
++static void mxl862xx_port_dump_legacy_link(struct mxl862xx_priv *priv,
++					   int port, const char *where)
++{
++	struct mxl862xx_port_link_cfg link_cfg = {
++		.port_id = cpu_to_le16(port),
++	};
++	struct mxl862xx_port_cfg port_cfg = {
++		.port_id = cpu_to_le16(port),
++	};
++	int ret;
++
++	ret = MXL862XX_API_READ(priv, MXL862XX_COMMON_PORTLINKCFGGET, link_cfg);
++	if (ret) {
++		dev_info(priv->ds->dev,
++			 "diag: %s port %d link cfg read failed: %pe\n",
++			 where, port, ERR_PTR(ret));
++		return;
++	}
++
++	ret = MXL862XX_API_READ(priv, MXL862XX_COMMON_PORTCFGGET, port_cfg);
++	if (ret) {
++		dev_info(priv->ds->dev,
++			 "diag: %s port %d cfg read failed: %pe\n",
++			 where, port, ERR_PTR(ret));
++		return;
++	}
++
++	dev_info(priv->ds->dev,
++		 "diag: %s port %d link_force %u link %u speed_force %u speed %u duplex_force %u duplex %u mii_mode %u mii_type %u clk_mode %u lpi %u\n",
++		 where, port, link_cfg.link_force, le32_to_cpu(link_cfg.link),
++		 link_cfg.speed_force, le32_to_cpu(link_cfg.speed),
++		 link_cfg.duplex_force, le32_to_cpu(link_cfg.duplex),
++		 le32_to_cpu(link_cfg.mii_mode), le32_to_cpu(link_cfg.mii_type),
++		 le32_to_cpu(link_cfg.clk_mode), link_cfg.lpi);
++
++	dev_info(priv->ds->dev,
++		 "diag: %s port %d port_type %u enable %u drops %u/%u/%u/%u aging %u learning %u flow_ctrl %u monitor %u if_counters %u if_start %u if_rmonmode %u\n",
++		 where, port, le32_to_cpu(port_cfg.port_type),
++		 le32_to_cpu(port_cfg.enable), port_cfg.unicast_unknown_drop,
++		 port_cfg.multicast_unknown_drop, port_cfg.reserved_packet_drop,
++		 port_cfg.broadcast_drop, port_cfg.aging, port_cfg.learning,
++		 le32_to_cpu(port_cfg.flow_ctrl),
++		 le32_to_cpu(port_cfg.port_monitor), port_cfg.if_counters,
++		 le32_to_cpu(port_cfg.if_count_start_idx),
++		 le32_to_cpu(port_cfg.if_rmonmode));
++}
++
+ static void mxl862xx_phylink_mac_link_up_legacy(struct mxl862xx_priv *priv,
+ 						int port, int speed,
+ 						int duplex, bool tx_pause,
+@@ -631,6 +735,10 @@ static void mxl862xx_phylink_mac_link_up
+ {
+ 	int ret;
+ 
++	dev_info(priv->ds->dev,
++		 "diag: legacy mac_link_up port %d speed %d duplex %d tx_pause %u rx_pause %u\n",
++		 port, speed, duplex, tx_pause, rx_pause);
++
+ 	ret = mxl862xx_port_set_link_up(priv, port, speed, duplex);
+ 	if (ret) {
+ 		dev_err(priv->ds->dev,
+@@ -647,6 +755,8 @@ static void mxl862xx_phylink_mac_link_up
+ 		dev_err(priv->ds->dev,
+ 			"failed to configure pause on port %d: %pe\n",
+ 			port, ERR_PTR(ret));
++
++	mxl862xx_port_dump_legacy_link(priv, port, "legacy mac_link_up");
+ }
+ 
+ static void mxl862xx_phylink_mac_config(struct phylink_config *config,
+@@ -675,6 +785,8 @@ static void mxl862xx_phylink_mac_link_do
+ 		dev_err(priv->ds->dev,
+ 			"failed to configure link down on port %d: %pe\n",
+ 			dp->index, ERR_PTR(ret));
++	else
++		mxl862xx_port_dump_legacy_link(priv, dp->index, "legacy mac_link_down");
+ }
+ 
+ static void mxl862xx_phylink_mac_link_up(struct phylink_config *config,
+@@ -704,6 +816,19 @@ static void mxl862xx_phylink_mac_link_up
+ 	if (!mxl862xx_legacy_mac_needs_link_config(interface))
+ 		return;
+ 
++	dev_info(priv->ds->dev,
++		 "diag: legacy mac_link_up interface %s mode 0x%x\n",
++		 phy_modes(interface), mode);
++	if (phydev)
++		dev_info(priv->ds->dev,
++			 "diag: legacy mac_link_up phydev speed %d duplex %d link %d autoneg %d rate_matching %d pause %d asym_pause %d interface %s\n",
++			 phydev->speed, phydev->duplex, phydev->link,
++			 phydev->autoneg, phydev->rate_matching, phydev->pause,
++			 phydev->asym_pause, phy_modes(phydev->interface));
++	else
++		dev_info(priv->ds->dev,
++			 "diag: legacy mac_link_up has no phydev\n");
++
+ 	mxl862xx_phylink_mac_link_up_legacy(priv, dp->index, speed, duplex,
+ 					    tx_pause, rx_pause);
+ }
