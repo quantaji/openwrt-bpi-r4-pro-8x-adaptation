@@ -797,7 +797,8 @@ define Device/bananapi_bpi-r4-pro-common
 			mt7988a-bananapi-bpi-r4-pro-cn13 mt7988a-bananapi-bpi-r4-pro-cn14 \
 			mt7988a-bananapi-bpi-r4-pro-cn15 mt7988a-bananapi-bpi-r4-pro-cn18
   DEVICE_DTC_FLAGS := --pad 4096
-  DEVICE_PACKAGES :=
+  DEVICE_PACKAGES := kmod-eeprom-at24 kmod-gpio-pca953x \
+		     kmod-i2c-mux-pca954x kmod-rtc-pcf8563
   IMAGES := sysupgrade.itb
   KERNEL_LOADADDR := 0x48a00000
   KERNEL_INITRAMFS_SUFFIX := -recovery.itb
