@@ -5,12 +5,14 @@ Subject: [PATCH] uboot-mediatek: add support for BananaPi BPi-R4 Pro 8X
 The BPi R4 Pro 8X can boot from microSD, SPI-NAND and eMMC. Add the board
 definitions required for each storage option.
 
-Adapted for the OpenWrt main M01 and M02 migration:
+Adapted for the OpenWrt main M01 through M04 migration:
 - keep R4 Pro common data separate from the 8X model;
 - use the accepted upstream board and FIT configuration names;
-- implement only read-only SD production and recovery boot in M02;
+- implement read-only SD production and recovery boot in M02;
+- initialize and persist the complete SD environment in M04 so the
+  randomly generated MAC address survives reboot;
 - keep eMMC and SPI-NAND environments as explicit deferred markers; and
-- exclude TFTP, install, storage-write and persistent-environment flows.
+- exclude TFTP, installation, system-image writes, and onboard-storage flows.
 
 Original-OpenWrt-Commit: 2f225358194cd56b2d29d9e97d0271490fb5f807
 Original-Patch: package/boot/uboot-mediatek/patches/472-add-bpi-r4-pro-8x.patch
@@ -814,15 +816,16 @@ index 0000000000000000000000000000000000000000..3405eba6f00c6ff2b76eca01dd941615
 +bootcmd=echo M01 compile skeleton only: boot validation deferred
 diff --git a/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
 new file mode 100644
-index 0000000000000000000000000000000000000000..9b7a7da4bd426e6c6275f6f79dc5823152f6e74a
+index 0000000000000000000000000000000000000000..c129a4a0dd589c0a6bcd523cd84d0469977c311b
 --- /dev/null
 +++ b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
-@@ -0,0 +1,21 @@
-+bootdelay=3
+@@ -0,0 +1,25 @@
++bootdelay=0
 +bootmenu_default=0
-+bootmenu_delay=3
++bootmenu_delay=0
 +bootmenu_title=      OpenWrt [SD card]
-+bootmenu_0=Run default boot command.=run bootcmd
++bootmenu_0=Initialize environment.=run _firstboot
++bootmenu_0d=Run default boot command.=run bootcmd
 +bootmenu_1=Boot production system from SD card.=run boot_production
 +bootmenu_2=Boot recovery system from SD card.=run boot_recovery
 +loadaddr=0x50000000
@@ -839,6 +842,9 @@ index 0000000000000000000000000000000000000000..9b7a7da4bd426e6c6275f6f79dc58231
 +part_recovery=recovery
 +sdmmc_read_production=part start mmc 0 $part_default part_addr && part size mmc 0 $part_default part_size && run mmc_read_vol
 +sdmmc_read_recovery=part start mmc 0 $part_recovery part_addr && part size mmc 0 $part_recovery part_size && run mmc_read_vol
++_init_env=setenv _init_env ; saveenv ; saveenv
++_firstboot=setenv _firstboot ; run _switch_to_menu ; run _init_env ; run bootcmd
++_switch_to_menu=setenv _switch_to_menu ; setenv bootdelay 3 ; setenv bootmenu_delay 3 ; setenv bootmenu_0 $bootmenu_0d ; setenv bootmenu_0d
 diff --git a/defenvs/bananapi_bpi-r4-pro-8x_snand_env b/defenvs/bananapi_bpi-r4-pro-8x_snand_env
 new file mode 100644
 index 0000000000000000000000000000000000000000..3405eba6f00c6ff2b76eca01dd941615176d4461
