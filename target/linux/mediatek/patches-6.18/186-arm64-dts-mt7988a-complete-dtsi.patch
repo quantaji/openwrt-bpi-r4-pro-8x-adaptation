@@ -3,6 +3,11 @@ Date: Thu, 26 Jun 2025 00:54:32 +0100
 Subject: [PATCH] arm64: dts: mt7988a: complete dtsi
 
 Work-in-progress patch to complete mt7988a.dtsi
+
+Adapted for the BPI-R4 Pro upstream DTS backport by dropping the duplicate
+ssusb0 label change already supplied by commit f397471a6a8c.
+
+Signed-off-by: Codex <codex@openai.com>
 --- a/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
 +++ b/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
 @@ -192,7 +192,7 @@
@@ -126,15 +131,6 @@ Work-in-progress patch to complete mt7988a.dtsi
  		i2c0: i2c@11003000 {
  			compatible = "mediatek,mt7981-i2c";
  			reg = <0 0x11003000 0 0x1000>,
-@@ -424,7 +515,7 @@
- 			      <0 0x0f0f0018 0 0x20>;
- 		};
- 
--		usb@11190000 {
-+		ssusb0: usb@11190000 {
- 			compatible = "mediatek,mt7988-xhci", "mediatek,mtk-xhci";
- 			reg = <0 0x11190000 0 0x2e00>,
- 			      <0 0x11193e00 0 0x0100>;
 @@ -458,6 +549,35 @@
  			status = "disabled";
  		};

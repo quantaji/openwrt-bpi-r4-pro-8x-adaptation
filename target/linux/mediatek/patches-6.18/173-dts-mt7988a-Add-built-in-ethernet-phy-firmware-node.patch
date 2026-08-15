@@ -6,6 +6,11 @@ Subject: [PATCH 30/32] dts: mt7988a: Add built-in ethernet phy firmware node
 Add built-in ethernet phy firmware node in mt7988a.dtsi.
 
 Signed-off-by: Sky Huang <skylake.huang@mediatek.com>
+
+Adapted for the BPI-R4 Pro upstream DTS backport by refreshing the USB
+node context after commit f397471a6a8c adds the ssusb0 label.
+
+Signed-off-by: Codex <codex@openai.com>
 ---
  arch/arm64/boot/dts/mediatek/mt7988a.dtsi | 6 ++++++
  1 file changed, 6 insertions(+)
@@ -22,6 +27,6 @@ Signed-off-by: Sky Huang <skylake.huang@mediatek.com>
 +			      <0 0x0f0f0018 0 0x20>;
 +		};
 +
- 		usb@11190000 {
+ 		ssusb0: usb@11190000 {
  			compatible = "mediatek,mt7988-xhci", "mediatek,mtk-xhci";
  			reg = <0 0x11190000 0 0x2e00>,
