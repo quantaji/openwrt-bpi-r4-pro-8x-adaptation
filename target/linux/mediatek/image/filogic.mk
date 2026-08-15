@@ -79,6 +79,28 @@ define Build/mt798x-gpt
 	rm $@.tmp
 endef
 
+define Build/mt798x-gpt-r4pro-large-recovery
+	cp $@ $@.tmp 2>/dev/null || true
+	ptgen -g -o $@.tmp -a 1 -l 1024 \
+		$(if $(findstring sdmmc,$1), \
+			-H \
+			-t 0x83	-N bl2		-r	-p 4079k@17k \
+		) \
+			-t 0x83	-N ubootenv	-r	-p 512k@4M \
+			-t 0x83	-N factory	-r	-p 2M@4608k \
+			-t 0xef	-N fip		-r	-p 4M@6656k \
+				-N recovery	-r	-p 128M@12M \
+		$(if $(findstring sdmmc,$1), \
+				-N install	-r	-p 20M@140M \
+			-t 0x2e -N production		-p $(CONFIG_TARGET_ROOTFS_PARTSIZE)M@160M \
+		) \
+		$(if $(findstring emmc,$1), \
+			-t 0x2e -N production		-p $(CONFIG_TARGET_ROOTFS_PARTSIZE)M@160M \
+		)
+	cat $@.tmp >> $@
+	rm $@.tmp
+endef
+
 # Variation of the normal partition table to account
 # for factory and mfgdata partition
 #
@@ -772,6 +794,7 @@ define Device/bananapi_bpi-r4-pro-common
   DEVICE_DTS_DIR := $(DTS_DIR)/
   DEVICE_DTS_LOADADDR := 0x48900000
   DEVICE_DTS_OVERLAY := mt7988a-bananapi-bpi-r4-pro-emmc mt7988a-bananapi-bpi-r4-pro-sd \
+			mt7988a-bananapi-bpi-r4-pro-cn13 mt7988a-bananapi-bpi-r4-pro-cn14 \
 			mt7988a-bananapi-bpi-r4-pro-cn15 mt7988a-bananapi-bpi-r4-pro-cn18
   DEVICE_DTC_FLAGS := --pad 4096
   DEVICE_PACKAGES :=
@@ -782,27 +805,27 @@ define Device/bananapi_bpi-r4-pro-common
 	       emmc-gpt.bin emmc-preloader.bin emmc-bl31-uboot.fip \
 	       sdcard.img.gz \
 	       snand-preloader.bin snand-bl31-uboot.fip
-  ARTIFACT/emmc-gpt.bin		:= mt798x-gpt emmc
+  ARTIFACT/emmc-gpt.bin		:= mt798x-gpt-r4pro-large-recovery emmc
   ARTIFACT/emmc-preloader.bin	:= mt7988-bl2 emmc-$$(DEVICE_BL2)
   ARTIFACT/emmc-bl31-uboot.fip	:= mt7988-bl31-uboot $$(DEVICE_NAME)-emmc
   ARTIFACT/snand-preloader.bin	:= mt7988-bl2 spim-nand-ubi-$$(DEVICE_BL2)
   ARTIFACT/snand-bl31-uboot.fip	:= mt7988-bl31-uboot $$(DEVICE_NAME)-snand
-  ARTIFACT/sdcard.img.gz	:= mt798x-gpt sdmmc |\
+  ARTIFACT/sdcard.img.gz	:= mt798x-gpt-r4pro-large-recovery sdmmc |\
 				   pad-to 17k | mt7988-bl2 sdmmc-$$(DEVICE_BL2) |\
 				   pad-to 6656k | mt7988-bl31-uboot $$(DEVICE_NAME)-sdmmc |\
 				$(if $(CONFIG_TARGET_ROOTFS_INITRAMFS),\
-				   pad-to 12M | append-image-stage initramfs-recovery.itb | check-size 44m |\
+				   pad-to 12M | append-image-stage initramfs-recovery.itb | check-size 140m |\
 				) \
-				   pad-to 44M | mt7988-bl2 spim-nand-ubi-$$(DEVICE_BL2) |\
-				   pad-to 45M | mt7988-bl31-uboot $$(DEVICE_NAME)-snand |\
-				   pad-to 51M | mt7988-bl2 emmc-$$(DEVICE_BL2) |\
-				   pad-to 52M | mt7988-bl31-uboot $$(DEVICE_NAME)-emmc |\
-				   pad-to 56M | mt798x-gpt emmc |\
+				   pad-to 140M | mt7988-bl2 spim-nand-ubi-$$(DEVICE_BL2) |\
+				   pad-to 141M | mt7988-bl31-uboot $$(DEVICE_NAME)-snand |\
+				   pad-to 147M | mt7988-bl2 emmc-$$(DEVICE_BL2) |\
+				   pad-to 148M | mt7988-bl31-uboot $$(DEVICE_NAME)-emmc |\
+				   pad-to 152M | mt798x-gpt-r4pro-large-recovery emmc |\
 				$(if $(CONFIG_TARGET_ROOTFS_SQUASHFS),\
-				   pad-to 64M | append-image squashfs-sysupgrade.itb | check-size |\
+				   pad-to 160M | append-image squashfs-sysupgrade.itb | check-size |\
 				) \
 				  gzip
-  IMAGE_SIZE := $$(shell expr 64 + $$(CONFIG_TARGET_ROOTFS_PARTSIZE))m
+  IMAGE_SIZE := $$(shell expr 160 + $$(CONFIG_TARGET_ROOTFS_PARTSIZE))m
   KERNEL := kernel-bin | gzip
   KERNEL_INITRAMFS := kernel-bin | lzma | \
 	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k
@@ -815,6 +838,7 @@ define Device/bananapi_bpi-r4-pro-8x
   DEVICE_DTS_CONFIG := config-mt7988a-bananapi-bpi-r4-pro-8x
   DEVICE_BL2 := comb-4bg
   $(call Device/bananapi_bpi-r4-pro-common)
+  DEVICE_PACKAGES += e2fsprogs f2fsck mkf2fs
 endef
 TARGET_DEVICES += bananapi_bpi-r4-pro-8x
 

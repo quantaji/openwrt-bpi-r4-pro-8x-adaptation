@@ -1,18 +1,20 @@
-From 2f225358194cd56b2d29d9e97d0271490fb5f807 Mon Sep 17 00:00:00 2001
 From: Andrew LaMarche <andrewjlamarche@gmail.com>
 Date: Mon, 23 Feb 2026 01:25:00 +0000
 Subject: [PATCH] uboot-mediatek: add support for BananaPi BPi-R4 Pro 8X
 
-The BPi R4 Pro 8X can boot from microSD, SPI-NAND and eMMC. Add support
-for each storage option.
+The BPi R4 Pro 8X can boot from microSD, SPI-NAND and eMMC. Add the board
+definitions required for each storage option.
 
-Adapted for the OpenWrt main M01 build skeleton:
-- split true R4 Pro common data from the 8X model and compatible values;
-- keep the accepted upstream 8X machine name in all build targets; and
-- replace operational boot and storage-write environments with an explicit
-  non-booting M01 marker.
+Adapted for the OpenWrt main M01 and M02 migration:
+- keep R4 Pro common data separate from the 8X model;
+- use the accepted upstream board and FIT configuration names;
+- implement only read-only SD production and recovery boot in M02;
+- keep eMMC and SPI-NAND environments as explicit deferred markers; and
+- exclude TFTP, install, storage-write and persistent-environment flows.
 
-Source: OpenWrt PR #21083, commit 2f225358194cd56b2d29d9e97d0271490fb5f807
+Original-OpenWrt-Commit: 2f225358194cd56b2d29d9e97d0271490fb5f807
+Original-Patch: package/boot/uboot-mediatek/patches/472-add-bpi-r4-pro-8x.patch
+Source: OpenWrt PR #21083
 Co-authored-by: Frank Wunderlich <frank-w@public-files.de>
 Signed-off-by: Andrew LaMarche <andrewjlamarche@gmail.com>
 Signed-off-by: Codex <codex@openai.com>
@@ -812,12 +814,31 @@ index 0000000000000000000000000000000000000000..3405eba6f00c6ff2b76eca01dd941615
 +bootcmd=echo M01 compile skeleton only: boot validation deferred
 diff --git a/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
 new file mode 100644
-index 0000000000000000000000000000000000000000..3405eba6f00c6ff2b76eca01dd941615176d4461
+index 0000000000000000000000000000000000000000..9b7a7da4bd426e6c6275f6f79dc5823152f6e74a
 --- /dev/null
 +++ b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,21 @@
 +bootdelay=3
-+bootcmd=echo M01 compile skeleton only: boot validation deferred
++bootmenu_default=0
++bootmenu_delay=3
++bootmenu_title=      OpenWrt [SD card]
++bootmenu_0=Run default boot command.=run bootcmd
++bootmenu_1=Boot production system from SD card.=run boot_production
++bootmenu_2=Boot recovery system from SD card.=run boot_recovery
++loadaddr=0x50000000
++bootargs=console=ttyS0,115200n1 pci=pcie_bus_perf root=/dev/fit0 rootwait
++bootconf=config-mt7988a-bananapi-bpi-r4-pro-8x
++bootconf_sd=mt7988a-bananapi-bpi-r4-pro-sd
++bootconf_extra=mt7988a-bananapi-bpi-r4-pro-cn13#mt7988a-bananapi-bpi-r4-pro-cn14
++bootcmd=if pstore check ; then run boot_recovery ; else run boot_sdmmc ; fi
++boot_sdmmc=run boot_production ; run boot_recovery
++boot_production=run sdmmc_read_production && iminfo $loadaddr && bootm $loadaddr#$bootconf#$bootconf_sd#$bootconf_extra
++boot_recovery=run sdmmc_read_recovery && bootm $loadaddr#$bootconf#$bootconf_sd#$bootconf_extra
++mmc_read_vol=mmc read $loadaddr $part_addr 0x100 && imszb $loadaddr image_size && test 0x$image_size -le 0x$part_size && mmc read $loadaddr 0x$part_addr 0x$image_size && setexpr filesize $image_size * 0x200
++part_default=production
++part_recovery=recovery
++sdmmc_read_production=part start mmc 0 $part_default part_addr && part size mmc 0 $part_default part_size && run mmc_read_vol
++sdmmc_read_recovery=part start mmc 0 $part_recovery part_addr && part size mmc 0 $part_recovery part_size && run mmc_read_vol
 diff --git a/defenvs/bananapi_bpi-r4-pro-8x_snand_env b/defenvs/bananapi_bpi-r4-pro-8x_snand_env
 new file mode 100644
 index 0000000000000000000000000000000000000000..3405eba6f00c6ff2b76eca01dd941615176d4461
