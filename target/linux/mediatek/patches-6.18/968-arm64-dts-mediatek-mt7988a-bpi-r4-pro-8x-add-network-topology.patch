@@ -1,16 +1,16 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Codex <codex@openai.com>
 Date: Sun, 16 Aug 2026 00:00:00 -0700
-Subject: [PATCH] arm64: dts: mediatek: mt7988a-bpi-r4-pro: add AS21xx and
- passive muxes
+Subject: [PATCH] arm64: dts: mediatek: add BPI-R4 Pro 8X network topology
 
-Describe the two AS21xx PHYs, their firmware and LEDs, and the two
-independent passive SFP/RJ45 muxes used by BPI-R4 Pro 8X.
+Describe the two AS21xx PHYs and the independent WAN and LAN passive
+muxes on the BPI-R4 Pro 8X. Keep this topology in the 8X DTS so the
+shared BPI-R4 Pro description remains valid for other variants.
 
-GMAC1 uses RJ45 PHY28 on channel 0 and SFP2 on channel 1. MxL logical
-port 13 uses SFP1 on channel 0 and RJ45 PHY24 on channel 1. SFP module
-presence has priority on both paths. Keep GMAC1's PCS handles on the
-original MAC node and place only endpoint properties on mux channels.
+Use hexadecimal MDIO unit addresses for the PHYs at decimal addresses
+24 and 28. Enable the FPC port, name the GMAC1 mux combo-wan, and name
+the MxL port 13 mux combo-lan. Both USXGMII PHY paths use in-band status;
+the two SFP paths remain 10GBase-R with in-band status.
 
 Based on BPI-R4 Pro topology work by Sean McCully at OpenWrt PR revision
 80f610ddf0075cf896d1e9ccaa47c0f4aa26ef98, MediaTek vendor descriptions,
@@ -18,22 +18,20 @@ and locally validated BPI-R4 Pro 8X wiring.
 
 Signed-off-by: Codex <codex@openai.com>
 ---
---- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
-+++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
-@@ -16,6 +16,8 @@
- / {
- 	aliases {
- 		ethernet0 = &gmac0;
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x.dts
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x.dts
+@@ -13,4 +13,174 @@
+ 	compatible = "bananapi,bpi-r4-pro-8x",
+ 		     "bananapi,bpi-r4-pro",
+ 		     "mediatek,mt7988a";
++
++	aliases {
 +		ethernet1 = &gmac1;
 +		ethernet2 = &gmac2;
- 		i2c0 = &i2c0;
- 		i2c1 = &i2c1;
- 		i2c2 = &i2c2;
-@@ -183,12 +185,52 @@
- 	pinctrl-0 = <&mdio0_pins>;
- 	pinctrl-names = "default";
- 	status = "okay";
++	};
++};
 +
++&eth {
 +	mux-bus {
 +		#address-cells = <1>;
 +		#size-cells = <0>;
@@ -52,7 +50,7 @@ Signed-off-by: Codex <codex@openai.com>
 +				phy-mode = "usxgmii";
 +				phy-connection-type = "usxgmii";
 +				managed = "in-band-status";
-+				phy-handle = <&phy28>;
++				phy-handle = <&phy1c>;
 +			};
 +
 +			channel@1 {
@@ -64,32 +62,23 @@ Signed-off-by: Codex <codex@openai.com>
 +			};
 +		};
 +	};
- };
- 
- &gmac0 {
- 	status = "okay";
- };
- 
++};
++
 +&gmac1 {
++	openwrt,netdev-name = "combo-wan";
 +	phy-mode = "usxgmii";
 +	phy-connection-type = "usxgmii";
 +	mac-type = "xgdm";
 +	managed = "in-band-status";
-+	phy-handle = <&phy28>;
++	phy-handle = <&phy1c>;
 +	status = "okay";
 +};
 +
- &gmac2 {
- 	phy-mode = "10gbase-r";
- 	phy-connection-type = "10gbase-r";
-@@ -202,6 +244,72 @@
- };
- 
- &mdio_bus {
-+	phy24: ethernet-phy@24 {
++&mdio_bus {
++	phy18: ethernet-phy@18 {
 +		compatible = "ethernet-phy-id7500.9410",
 +			     "ethernet-phy-ieee802.3-c45";
-+		reg = <24>;
++		reg = <0x18>;
 +		reset-gpios = <&pio 83 GPIO_ACTIVE_LOW>;
 +		reset-assert-us = <200000>;
 +		reset-deassert-us = <350000>;
@@ -99,7 +88,7 @@ Signed-off-by: Codex <codex@openai.com>
 +			#address-cells = <1>;
 +			#size-cells = <0>;
 +
-+			phy24_led_0: led@0 {
++			phy18_led_0: led@0 {
 +				reg = <0>;
 +				function = LED_FUNCTION_LAN;
 +				function-enumerator = <0>;
@@ -108,7 +97,7 @@ Signed-off-by: Codex <codex@openai.com>
 +				status = "okay";
 +			};
 +
-+			phy24_led_1: led@1 {
++			phy18_led_1: led@1 {
 +				reg = <1>;
 +				function = LED_FUNCTION_LAN;
 +				function-enumerator = <1>;
@@ -119,10 +108,10 @@ Signed-off-by: Codex <codex@openai.com>
 +		};
 +	};
 +
-+	phy28: ethernet-phy@28 {
++	phy1c: ethernet-phy@1c {
 +		compatible = "ethernet-phy-id7500.9410",
 +			     "ethernet-phy-ieee802.3-c45";
-+		reg = <28>;
++		reg = <0x1c>;
 +		reset-gpios = <&pio 82 GPIO_ACTIVE_LOW>;
 +		reset-assert-us = <200000>;
 +		reset-deassert-us = <350000>;
@@ -132,7 +121,7 @@ Signed-off-by: Codex <codex@openai.com>
 +			#address-cells = <1>;
 +			#size-cells = <0>;
 +
-+			phy28_led_0: led@0 {
++			phy1c_led_0: led@0 {
 +				reg = <0>;
 +				function = LED_FUNCTION_WAN;
 +				function-enumerator = <0>;
@@ -141,7 +130,7 @@ Signed-off-by: Codex <codex@openai.com>
 +				status = "okay";
 +			};
 +
-+			phy28_led_1: led@1 {
++			phy1c_led_1: led@1 {
 +				reg = <1>;
 +				function = LED_FUNCTION_WAN;
 +				function-enumerator = <1>;
@@ -151,54 +140,58 @@ Signed-off-by: Codex <codex@openai.com>
 +			};
 +		};
 +	};
++};
 +
- 	switch16: switch@16 {
- 		compatible = "maxlinear,mxl86252";
- 		reg = <16>;
-@@ -256,6 +364,46 @@
- 					full-duplex;
- 				};
- 			};
-+
-+			port@13 {
-+				reg = <13>;
-+				label = "mxl_lan5";
-+				phy-mode = "usxgmii";
-+				managed = "in-band-status";
-+				phy-handle = <&phy24>;
-+				status = "okay";
-+			};
++&switch16 {
++	ports {
++		port@13 {
++			reg = <13>;
++			label = "combo-lan";
++			phy-mode = "usxgmii";
++			phy-connection-type = "usxgmii";
++			managed = "in-band-status";
++			phy-handle = <&phy18>;
++			status = "okay";
 +		};
++	};
 +
-+		mux-bus {
++	mux-bus {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		ds-mux@13 {
++			compatible = "mxl862xx,ds-mux";
++			reg = <13>;
 +			#address-cells = <1>;
 +			#size-cells = <0>;
++			chan-sel-gpios = <&pio 54 GPIO_ACTIVE_HIGH>;
++			mod-def0-gpios = <&pio 69 GPIO_ACTIVE_LOW>;
++			sfp-present-channel = <0>;
 +
-+			ds-mux@13 {
-+				compatible = "mxl862xx,ds-mux";
-+				reg = <13>;
-+				#address-cells = <1>;
-+				#size-cells = <0>;
-+				chan-sel-gpios = <&pio 54 GPIO_ACTIVE_HIGH>;
-+				mod-def0-gpios = <&pio 69 GPIO_ACTIVE_LOW>;
-+				sfp-present-channel = <0>;
-+
-+				channel@0 {
-+					reg = <0>;
-+					phy-mode = "10gbase-r";
-+					phy-connection-type = "10gbase-r";
-+					managed = "in-band-status";
-+					sfp = <&sfp1>;
-+				};
-+
-+				channel@1 {
-+					reg = <1>;
-+					phy-mode = "usxgmii";
-+					phy-connection-type = "usxgmii";
-+					managed = "in-band-status";
-+					phy-handle = <&phy24>;
-+				};
++			channel@0 {
++				reg = <0>;
++				phy-mode = "10gbase-r";
++				phy-connection-type = "10gbase-r";
++				managed = "in-band-status";
++				sfp = <&sfp1>;
 +			};
- 		};
- 
- 		mdio {
++
++			channel@1 {
++				reg = <1>;
++				phy-mode = "usxgmii";
++				phy-connection-type = "usxgmii";
++				managed = "in-band-status";
++				phy-handle = <&phy18>;
++			};
++		};
++	};
++};
++
++&gsw_phy3 {
++	status = "okay";
++};
++
++&gsw_port3 {
++	label = "fpc";
++	status = "okay";
+ };

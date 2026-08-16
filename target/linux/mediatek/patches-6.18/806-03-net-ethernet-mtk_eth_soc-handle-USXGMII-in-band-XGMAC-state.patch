@@ -1,0 +1,119 @@
+From 4cf29fecffdb76da1909faa7669c31404690bdb4 Mon Sep 17 00:00:00 2001
+From: Sean McCully <sean_mccully@yahoo.com>
+Date: Tue, 4 Aug 2026 13:39:48 -0700
+Subject: [PATCH] net: ethernet: mtk_eth_soc: handle USXGMII in-band XGMAC
+ state
+
+Teach the MT7988 XGMAC path to follow the USXGMII PCS link state when
+phylink selects in-band mode. Clear FORCE_MODE and FORCE_LINK only for
+USXGMII in-band operation, while retaining the existing forced-link
+behavior for PHY-managed USXGMII and 10GBase-R.
+
+Program the port-specific USXGMII PCS mode field from the negotiated
+speed. GMAC2 uses bits 19:17 and GMAC3 uses bits 3:1.
+
+Adapted from OpenWrt PR 24569:
+
+commit 4cf29fecffdb ("mediatek: filogic: add NETSYS v3 support")
+
+This patch extracts only the USXGMII force-state and PCS-mode behavior for
+the existing OpenWrt MediaTek driver; it does not carry the source commit's
+broader NETSYS v3, WED, reset, debug, or mt76 changes.
+
+Signed-off-by: Sean McCully <sean_mccully@yahoo.com>
+Signed-off-by: Codex <codex@openai.com>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -559,15 +559,21 @@
+ 	struct mtk_mac *mac = container_of(config, struct mtk_mac,
+ 					   phylink_config);
+ 	struct mtk_eth *eth = mac->hw;
++	u32 force_mode;
+ 
+ 	if (mtk_interface_mode_is_xgmii(eth, iface) &&
+ 	    mac->id != MTK_GMAC1_ID) {
+ 		mtk_m32(mac->hw, XMAC_MCR_TRX_DISABLE,
+ 			XMAC_MCR_TRX_DISABLE, MTK_XMAC_MCR(mac->id));
+ 
++		force_mode = MTK_XGMAC_FORCE_MODE(mac->id);
++		if (mode == MLO_AN_INBAND &&
++		    iface == PHY_INTERFACE_MODE_USXGMII)
++			force_mode = 0;
++
+ 		mtk_m32(mac->hw, MTK_XGMAC_FORCE_MODE(mac->id) |
+ 				 MTK_XGMAC_FORCE_LINK(mac->id),
+-			MTK_XGMAC_FORCE_MODE(mac->id), MTK_XGMAC_STS(mac->id));
++			force_mode, MTK_XGMAC_STS(mac->id));
+ 	}
+ 
+ 	return 0;
+@@ -930,7 +936,7 @@
+ 				 int speed, int duplex, bool tx_pause,
+ 				 bool rx_pause)
+ {
+-	u32 mcr;
++	u32 mcr, pcs_mode, sts;
+ 
+ 	if (mac->id == MTK_GMAC1_ID)
+ 		return;
+@@ -941,8 +947,41 @@
+ 	mtk_m32(mac->hw, XMAC_GLB_CNTCLR, XMAC_GLB_CNTCLR,
+ 		MTK_XMAC_CNT_CTRL(mac->id));
+ 
+-	mtk_m32(mac->hw, MTK_XGMAC_FORCE_LINK(mac->id),
+-		MTK_XGMAC_FORCE_LINK(mac->id), MTK_XGMAC_STS(mac->id));
++	sts = mtk_r32(mac->hw, MTK_XGMAC_STS(mac->id));
++	if (mode == MLO_AN_INBAND &&
++	    interface == PHY_INTERFACE_MODE_USXGMII)
++		sts &= ~MTK_XGMAC_FORCE_LINK(mac->id);
++	else
++		sts |= MTK_XGMAC_FORCE_LINK(mac->id);
++
++	if (interface == PHY_INTERFACE_MODE_USXGMII) {
++		switch (speed) {
++		case SPEED_10000:
++			pcs_mode = MTK_USXGMII_PCS_MODE_10G;
++			break;
++		case SPEED_5000:
++			pcs_mode = MTK_USXGMII_PCS_MODE_5G;
++			break;
++		case SPEED_2500:
++			pcs_mode = MTK_USXGMII_PCS_MODE_2500;
++			break;
++		default:
++			pcs_mode = MTK_USXGMII_PCS_MODE_1000;
++			break;
++		}
++
++		if (mac->id == MTK_GMAC2_ID) {
++			sts &= ~MTK_GMAC2_USXGMII_PCS_MODE;
++			sts |= FIELD_PREP(MTK_GMAC2_USXGMII_PCS_MODE,
++					  pcs_mode);
++		} else if (mac->id == MTK_GMAC3_ID) {
++			sts &= ~MTK_GMAC3_USXGMII_PCS_MODE;
++			sts |= FIELD_PREP(MTK_GMAC3_USXGMII_PCS_MODE,
++					  pcs_mode);
++		}
++	}
++
++	mtk_w32(mac->hw, sts, MTK_XGMAC_STS(mac->id));
+ 
+ 	mcr = mtk_r32(mac->hw, MTK_XMAC_MCR(mac->id));
+ 	mcr &= ~(XMAC_MCR_FORCE_TX_FC | XMAC_MCR_FORCE_RX_FC |
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -456,7 +456,12 @@
+ #define MTK_USXGMII_PCS_LINK	BIT(8)
+ #define MTK_XGMAC_RX_FC		BIT(5)
+ #define MTK_XGMAC_TX_FC		BIT(4)
+-#define MTK_USXGMII_PCS_MODE	GENMASK(3, 1)
++#define MTK_GMAC2_USXGMII_PCS_MODE	GENMASK(19, 17)
++#define MTK_GMAC3_USXGMII_PCS_MODE	GENMASK(3, 1)
++#define MTK_USXGMII_PCS_MODE_10G	0
++#define MTK_USXGMII_PCS_MODE_5G		1
++#define MTK_USXGMII_PCS_MODE_2500	2
++#define MTK_USXGMII_PCS_MODE_1000	3
+ #define MTK_XGMAC_LINK_STS	BIT(0)
+ 
+ /* GSW bridge registers */
