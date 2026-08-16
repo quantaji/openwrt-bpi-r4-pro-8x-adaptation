@@ -1,0 +1,34 @@
+From b88827cb0bd1a192855db40494970bbdd7aad939 Mon Sep 17 00:00:00 2001
+From: Frank Wunderlich <frank-w@public-files.de>
+Date: Mon, 27 Oct 2025 14:28:12 +0100
+Subject: [PATCH] dt-bindings: arm: mediatek: add BPI-R4 Pro board
+
+Add compatibles for Bananapi R4 Pro boards.
+
+Signed-off-by: Frank Wunderlich <frank-w@public-files.de>
+Reviewed-by: Krzysztof Kozlowski <krzysztof.kozlowski@linaro.org>
+Signed-off-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+---
+ Documentation/devicetree/bindings/arm/mediatek.yaml | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/arm/mediatek.yaml b/Documentation/devicetree/bindings/arm/mediatek.yaml
+index 2c5c92b87b3a..391b385c91dc 100644
+--- a/Documentation/devicetree/bindings/arm/mediatek.yaml
++++ b/Documentation/devicetree/bindings/arm/mediatek.yaml
+@@ -113,6 +113,12 @@ properties:
+           - const: bananapi,bpi-r4-2g5
+           - const: bananapi,bpi-r4
+           - const: mediatek,mt7988a
++      - items:
++          - enum:
++              - bananapi,bpi-r4-pro-4e
++              - bananapi,bpi-r4-pro-8x
++          - const: bananapi,bpi-r4-pro
++          - const: mediatek,mt7988a
+       - items:
+           - enum:
+               - mediatek,mt8127-moose
+-- 
+2.53.0
+

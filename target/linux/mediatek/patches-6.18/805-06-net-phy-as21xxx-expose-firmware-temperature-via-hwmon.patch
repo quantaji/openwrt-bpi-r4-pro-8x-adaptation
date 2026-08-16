@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sat, 15 Aug 2026 22:36:49 -0700
+Subject: [PATCH 6/7] net: phy: as21xxx: expose firmware temperature via hwmon
+
+Configure continuous firmware temperature monitoring once and expose its signed Q16.16 reading in millidegrees Celsius through the standard hwmon API.
+
+Based on the tested local migration by Guangda Ji in commit ceab4fe4af329eb191d54598feffa4af2e4abf93 and adapted to Linux 6.18.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/net/phy/as21xxx.c | 136 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 136 insertions(+)
+
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index f2005ab..b53f377 100644
+--- a/drivers/net/phy/as21xxx.c
++++ b/drivers/net/phy/as21xxx.c
+@@ -7,6 +7,8 @@
+ 
+ #include <linux/bitfield.h>
+ #include <linux/firmware.h>
++#include <linux/hwmon.h>
++#include <linux/math64.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/phy.h>
+@@ -863,6 +865,135 @@ static int as21xxx_config_aneg(struct phy_device *phydev)
+ 	return as21xxx_check_and_restart_aneg(phydev, changed);
+ }
+ 
++#if IS_REACHABLE(CONFIG_HWMON)
++/* Vendor CFG_TEMP_MON module id for IPC_CMD_CFG_PARAM/direct. */
++#define AS21XXX_CFG_TEMP_MON			11
++#define AS21XXX_TEMP_REGS			3
++#define AS21XXX_TEMP_MON_START			1
++#define AS21XXX_TEMP_MON_CONFIG			3
++#define AS21XXX_TEMP_MON_GET			IPC_CMD_TEMP_MON_GET
++#define AS21XXX_TEMP_MON_CONTINUOUS		1
++
++static int as21xxx_temp_monitor(struct phy_device *phydev, u16 sub_cmd,
++				u16 param, u16 *ret_data)
++{
++	u16 rx[AEON_IPC_DATA_NUM_REGISTERS];
++	u16 tx[] = {
++		IPC_CFG_PARAM_DIRECT,
++		AS21XXX_CFG_TEMP_MON,
++		sub_cmd,
++		param,
++	};
++	unsigned int rx_bytes;
++	int ret;
++
++	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
++			       ret_data ? rx : NULL,
++			       ret_data ? ARRAY_SIZE(rx) : 0,
++			       ret_data ? &rx_bytes : NULL);
++	if (ret)
++		return ret;
++
++	if (!ret_data)
++		return 0;
++
++	if (rx_bytes < AS21XXX_TEMP_REGS * sizeof(u16))
++		return -ENODATA;
++
++	memcpy(ret_data, rx, AS21XXX_TEMP_REGS * sizeof(u16));
++
++	return 0;
++}
++
++static int as21xxx_hwmon_init_temp_monitor(struct phy_device *phydev)
++{
++	int ret;
++
++	ret = as21xxx_temp_monitor(phydev, AS21XXX_TEMP_MON_CONFIG,
++				   AS21XXX_TEMP_MON_CONTINUOUS, NULL);
++	if (ret)
++		return ret;
++
++	return as21xxx_temp_monitor(phydev, AS21XXX_TEMP_MON_START, 0, NULL);
++}
++
++static umode_t as21xxx_hwmon_is_visible(const void *data,
++					enum hwmon_sensor_types type,
++					u32 attr, int channel)
++{
++	if (type != hwmon_temp || attr != hwmon_temp_input || channel)
++		return 0;
++
++	return 0444;
++}
++
++static int as21xxx_hwmon_read(struct device *dev,
++			      enum hwmon_sensor_types type,
++			      u32 attr, int channel, long *val)
++{
++	struct phy_device *phydev = dev_get_drvdata(dev);
++	u16 ret_data[AEON_IPC_DATA_NUM_REGISTERS];
++	s32 raw_temp;
++	int ret;
++
++	if (type != hwmon_temp || attr != hwmon_temp_input || channel)
++		return -EOPNOTSUPP;
++
++	ret = as21xxx_temp_monitor(phydev, AS21XXX_TEMP_MON_GET, 0,
++				   ret_data);
++	if (ret)
++		return ret;
++
++	raw_temp = (s32)((u32)ret_data[1] | ((u32)ret_data[2] << 16));
++	*val = div_s64((s64)raw_temp * 1000, 65536);
++
++	return 0;
++}
++
++static const struct hwmon_channel_info * const as21xxx_hwmon_info[] = {
++	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT),
++	NULL
++};
++
++static const struct hwmon_ops as21xxx_hwmon_ops = {
++	.is_visible	= as21xxx_hwmon_is_visible,
++	.read		= as21xxx_hwmon_read,
++};
++
++static const struct hwmon_chip_info as21xxx_hwmon_chip_info = {
++	.ops		= &as21xxx_hwmon_ops,
++	.info		= as21xxx_hwmon_info,
++};
++
++static int as21xxx_hwmon_register(struct phy_device *phydev)
++{
++	struct device *dev = &phydev->mdio.dev;
++	struct device *hwmon_dev;
++	char *hwmon_name;
++	int ret;
++
++	ret = as21xxx_hwmon_init_temp_monitor(phydev);
++	if (ret)
++		return ret;
++
++	hwmon_name = devm_hwmon_sanitize_name(dev, dev_name(dev));
++	if (IS_ERR(hwmon_name))
++		return PTR_ERR(hwmon_name);
++
++	hwmon_dev = devm_hwmon_device_register_with_info(dev, hwmon_name,
++							 phydev,
++							 &as21xxx_hwmon_chip_info,
++							 NULL);
++
++	return PTR_ERR_OR_ZERO(hwmon_dev);
++}
++#else
++static int as21xxx_hwmon_register(struct phy_device *phydev)
++{
++	return 0;
++}
++#endif
++
+ static int as21xxx_probe(struct phy_device *phydev)
+ {
+ 	char fw_version[AEON_IPC_DATA_MAX + 1];
+@@ -891,6 +1022,11 @@ static int as21xxx_probe(struct phy_device *phydev)
+ 
+ 	phydev_info(phydev, "Firmware Version: %s\n", fw_version);
+ 
++	ret = as21xxx_hwmon_register(phydev);
++	if (ret)
++		phydev_warn(phydev, "failed to register hwmon device: %pe\n",
++			    ERR_PTR(ret));
++
+ 	return 0;
+ }
+ 

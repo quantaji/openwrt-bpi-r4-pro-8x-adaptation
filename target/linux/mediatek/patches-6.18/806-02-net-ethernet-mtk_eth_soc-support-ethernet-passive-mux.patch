@@ -1,0 +1,542 @@
+From 4349947a1d8d9d52cc6820fb8544ef41a47c5068 Mon Sep 17 00:00:00 2001
+From: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+Date: Thu, 18 Sep 2025 17:20:56 +0800
+Subject: [PATCH] net: ethernet: mtk_eth_soc: support ethernet passive mux
+
+Add passive mux glue for a MediaTek MAC whose SerDes path is switched
+between an RJ45 PHY and an SFP cage. MOD_DEF0 gives SFP presence
+priority and a channel-select GPIO controls the external passive mux.
+
+Rebuild only the selected phylink endpoint. Keep the original MAC DT
+node immutable for PCS discovery, use the selected child node only for
+PHY/SFP attachment, and restore the previous endpoint if a live switch
+fails. Polling stops synchronously before driver-owned state is freed.
+
+Original MediaTek revision: 4349947a1d8d9d52cc6820fb8544ef41a47c5068.
+Original subject: net: ethernet: mtk_eth_soc: support ethernet passive mux.
+Adapted to Linux 6.18 and the BPI-R4 Pro WAN topology.
+
+Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+Signed-off-by: Codex <codex@openai.com>
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -26,6 +26,7 @@
+ #include <linux/pcs/pcs-mtk-lynxi.h>
+ #include <linux/pcs/pcs.h>
+ #include <linux/phy/phy.h>
++#include <linux/gpio/consumer.h>
+ #include <linux/jhash.h>
+ #include <linux/bitfield.h>
+ #include <net/dsa.h>
+@@ -3901,7 +3902,7 @@
+ 
+ 	ppe_num = eth->soc->ppe_num;
+ 
+-	err = phylink_of_phy_connect(mac->phylink, mac->of_node, 0);
++	err = phylink_of_phy_connect(mac->phylink, mac->phylink_node, 0);
+ 	if (err) {
+ 		netdev_err(dev, "%s: could not attach PHY: %d\n", __func__,
+ 			   err);
+@@ -5214,6 +5215,370 @@
+ #endif
+ };
+ 
++static void mtk_mux_put_channels(struct mtk_mux *mux)
++{
++	int i;
++
++	for (i = 0; i < MTK_MUX_CHANNELS_MAX; i++) {
++		of_node_put(mux->channels[i].of_node);
++		mux->channels[i].of_node = NULL;
++	}
++}
++
++static bool mtk_mux_is_running(struct mtk_mux *mux)
++{
++	struct mtk_mac *mac = mux->mac;
++
++	return netif_running(mac->hw->netdev[mac->id]);
++}
++
++static int mtk_mux_stop(struct mtk_mux *mux)
++{
++	struct mtk_mac *mac = mux->mac;
++	int err;
++
++	rtnl_lock();
++	err = mtk_stop(mac->hw->netdev[mac->id]);
++	rtnl_unlock();
++
++	return err;
++}
++
++static int mtk_mux_start(struct mtk_mux *mux)
++{
++	struct mtk_mac *mac = mux->mac;
++	int err;
++
++	rtnl_lock();
++	err = mtk_open(mac->hw->netdev[mac->id]);
++	rtnl_unlock();
++
++	return err;
++}
++
++static int mtk_mux_select_channel(struct mtk_mux *mux,
++				  unsigned int channel)
++{
++	struct mtk_mux_channel *chan;
++
++	if (channel >= MTK_MUX_CHANNELS_MAX)
++		return -EINVAL;
++
++	chan = &mux->channels[channel];
++	if (!chan->of_node)
++		return -EINVAL;
++
++	gpiod_set_value_cansleep(mux->chan_sel_gpio, channel);
++	mux->mac->phylink_node = chan->of_node;
++	mux->selected_channel = channel;
++
++	return 0;
++}
++
++static struct phylink *mtk_mux_create_phylink(struct mtk_mux *mux,
++					      unsigned int channel)
++{
++	struct mtk_mux_channel *chan = &mux->channels[channel];
++	struct mtk_mac *mac = mux->mac;
++
++	return phylink_create(&mac->phylink_config,
++			      of_fwnode_handle(chan->of_node),
++			      chan->phy_mode, &mtk_phylink_ops);
++}
++
++static int mtk_mux_apply_channel(struct mtk_mux *mux,
++				 unsigned int channel)
++{
++	struct phylink *phylink;
++	int err;
++
++	err = mtk_mux_select_channel(mux, channel);
++	if (err)
++		return err;
++
++	phylink = mtk_mux_create_phylink(mux, channel);
++	if (IS_ERR(phylink))
++		return PTR_ERR(phylink);
++
++	mux->mac->phylink = phylink;
++
++	return 0;
++}
++
++static int mtk_mux_restore_channel(struct mtk_mux *mux,
++				   unsigned int channel, bool restart)
++{
++	struct mtk_mac *mac = mux->mac;
++	struct mtk_eth *eth = mac->hw;
++	int err;
++
++	if (mac->phylink) {
++		rtnl_lock();
++		phylink_disconnect_phy(mac->phylink);
++		rtnl_unlock();
++		phylink_destroy(mac->phylink);
++		mac->phylink = NULL;
++	}
++
++	while (test_and_set_bit_lock(MTK_RESETTING, &eth->state))
++		cpu_relax();
++	err = mtk_mux_apply_channel(mux, channel);
++	clear_bit_unlock(MTK_RESETTING, &eth->state);
++	if (err)
++		return err;
++
++	if (restart)
++		return mtk_mux_start(mux);
++
++	return 0;
++}
++
++static int mtk_mux_switch_channel(struct mtk_mux *mux,
++				  unsigned int channel)
++{
++	struct mtk_mac *mac = mux->mac;
++	struct mtk_eth *eth = mac->hw;
++	unsigned int old_channel = mux->active_channel;
++	bool restart = mtk_mux_is_running(mux);
++	int err, restore_err;
++
++	if (channel == old_channel)
++		return 0;
++
++	mux->switching = true;
++
++	if (restart) {
++		err = mtk_mux_stop(mux);
++		if (err)
++			goto failed;
++	}
++
++	while (test_and_set_bit_lock(MTK_RESETTING, &eth->state))
++		cpu_relax();
++	phylink_destroy(mac->phylink);
++	mac->phylink = NULL;
++	err = mtk_mux_apply_channel(mux, channel);
++	clear_bit_unlock(MTK_RESETTING, &eth->state);
++	if (err)
++		goto restore;
++
++	if (restart) {
++		err = mtk_mux_start(mux);
++		if (err)
++			goto restore;
++	}
++
++	mux->active_channel = channel;
++	mux->last_error = 0;
++	mux->switch_count++;
++	mux->switching = false;
++	dev_info(eth->dev, "Ethernet mux: switched channel %u -> %u\n",
++		 old_channel, channel);
++
++	return 0;
++
++restore:
++	restore_err = mtk_mux_restore_channel(mux, old_channel, restart);
++	if (restore_err)
++		dev_err(eth->dev,
++			"Ethernet mux: restore channel %u failed: %d\n",
++			old_channel, restore_err);
++
++failed:
++	mux->last_error = err;
++	mux->switching = false;
++	dev_warn_ratelimited(eth->dev,
++			     "Ethernet mux: switch channel %u -> %u failed: %d\n",
++			     old_channel, channel, err);
++
++	return err;
++}
++
++static void mtk_mux_poll(struct work_struct *work)
++{
++	struct mtk_mux *mux = container_of(work, struct mtk_mux, poll.work);
++	struct mtk_eth *eth = mux->mac->hw;
++	unsigned int channel;
++	bool sfp_present;
++	int value;
++
++	value = gpiod_get_value_cansleep(mux->mod_def0_gpio);
++	if (value < 0) {
++		mux->last_error = value;
++		dev_warn_ratelimited(eth->dev,
++				     "Ethernet mux: failed to read MOD_DEF0: %d\n",
++				     value);
++		goto reschedule;
++	}
++
++	sfp_present = !!value;
++	channel = sfp_present ? mux->sfp_channel : mux->rj45_channel;
++	if (!mux->sfp_present_valid ||
++	    mux->last_sfp_present != sfp_present) {
++		dev_info(eth->dev,
++			 "Ethernet mux: SFP present=%u, desired channel %u\n",
++			 sfp_present, channel);
++		mux->sfp_present_valid = true;
++	}
++
++	mux->last_sfp_present = sfp_present;
++	mux->desired_channel = channel;
++
++	if (!mux->switching && mux->active_channel != channel &&
++	    mtk_mux_is_running(mux))
++		mtk_mux_switch_channel(mux, channel);
++
++reschedule:
++	if (!READ_ONCE(mux->stopping))
++		mod_delayed_work(system_wq, &mux->poll,
++				 msecs_to_jiffies(100));
++}
++
++static int mtk_mux_parse_channel(struct mtk_mux *mux,
++				 struct device_node *np)
++{
++	phy_interface_t phy_mode;
++	u32 id;
++	int err;
++
++	err = of_property_read_u32(np, "reg", &id);
++	if (err || id >= MTK_MUX_CHANNELS_MAX)
++		return -EINVAL;
++
++	err = of_get_phy_mode(np, &phy_mode);
++	if (err)
++		return err;
++
++	if (mux->channels[id].of_node)
++		return -EEXIST;
++
++	mux->channels[id].of_node = of_node_get(np);
++	mux->channels[id].phy_mode = phy_mode;
++
++	return 0;
++}
++
++static void mtk_release_mux(struct mtk_eth *eth, unsigned int id)
++{
++	struct mtk_mux *mux;
++
++	if (id >= MTK_MAX_DEVS)
++		return;
++
++	mux = eth->mux[id];
++	if (!mux)
++		return;
++
++	WRITE_ONCE(mux->stopping, true);
++	cancel_delayed_work_sync(&mux->poll);
++	mtk_mux_put_channels(mux);
++	gpiod_put(mux->chan_sel_gpio);
++	gpiod_put(mux->mod_def0_gpio);
++	kfree(mux);
++	eth->mux[id] = NULL;
++}
++
++static void mtk_release_all_muxes(struct mtk_eth *eth)
++{
++	int i;
++
++	for (i = 0; i < MTK_MAX_DEVS; i++)
++		mtk_release_mux(eth, i);
++}
++
++static int mtk_add_mux(struct mtk_eth *eth, struct device_node *np)
++{
++	struct device_node *child;
++	struct gpio_desc *gpio;
++	struct mtk_mux *mux;
++	struct mtk_mac *mac;
++	struct phylink *phylink;
++	u32 id;
++	int err;
++
++	err = of_property_read_u32(np, "reg", &id);
++	if (err || id >= MTK_MAX_DEVS)
++		return -EINVAL;
++
++	mac = eth->mac[id];
++	if (!mac || eth->mux[id])
++		return -EINVAL;
++
++	mux = kzalloc_obj(*mux);
++	if (!mux)
++		return -ENOMEM;
++
++	mux->mac = mac;
++	gpio = fwnode_gpiod_get_index(of_fwnode_handle(np), "mod-def0", 0,
++				      GPIOD_IN |
++				       GPIOD_FLAGS_BIT_NONEXCLUSIVE,
++				       dev_name(eth->dev));
++	if (IS_ERR(gpio)) {
++		err = PTR_ERR(gpio);
++		goto free_mux;
++	}
++	mux->mod_def0_gpio = gpio;
++
++	gpio = fwnode_gpiod_get_index(of_fwnode_handle(np), "chan-sel", 0,
++				      GPIOD_OUT_LOW, dev_name(eth->dev));
++	if (IS_ERR(gpio)) {
++		err = PTR_ERR(gpio);
++		goto put_mod_def0;
++	}
++	mux->chan_sel_gpio = gpio;
++
++	err = of_property_read_u32(np, "sfp-present-channel",
++				   &mux->sfp_channel);
++	if (err || mux->sfp_channel >= MTK_MUX_CHANNELS_MAX) {
++		err = -EINVAL;
++		goto put_chan_sel;
++	}
++	mux->rj45_channel = !mux->sfp_channel;
++
++	for_each_available_child_of_node(np, child) {
++		err = mtk_mux_parse_channel(mux, child);
++		if (err) {
++			of_node_put(child);
++			goto put_channels;
++		}
++	}
++
++	if (!mux->channels[mux->sfp_channel].of_node ||
++	    !mux->channels[mux->rj45_channel].of_node) {
++		err = -EINVAL;
++		goto put_channels;
++	}
++
++	phylink = mac->phylink;
++	mac->phylink = NULL;
++	phylink_destroy(phylink);
++	err = mtk_mux_apply_channel(mux, mux->rj45_channel);
++	if (err)
++		goto put_channels;
++
++	mux->active_channel = mux->rj45_channel;
++	mux->desired_channel = mux->rj45_channel;
++	INIT_DELAYED_WORK(&mux->poll, mtk_mux_poll);
++	eth->mux[id] = mux;
++	mod_delayed_work(system_wq, &mux->poll, msecs_to_jiffies(100));
++
++	dev_info(eth->dev,
++		 "Ethernet mux: MAC%u RJ45 channel %u, SFP channel %u\n",
++		 id, mux->rj45_channel, mux->sfp_channel);
++
++	return 0;
++
++put_channels:
++	mtk_mux_put_channels(mux);
++put_chan_sel:
++	gpiod_put(mux->chan_sel_gpio);
++put_mod_def0:
++	gpiod_put(mux->mod_def0_gpio);
++free_mux:
++	kfree(mux);
++	return err;
++}
++
+ static int mtk_fill_available_pcs(struct phylink_config *config,
+ 				  struct phylink_pcs **available_pcs,
+ 				  unsigned int num_available_pcs)
+@@ -5278,6 +5643,7 @@
+ 	mac->id = id;
+ 	mac->hw = eth;
+ 	mac->of_node = np;
++	mac->phylink_node = np;
+ 
+ 	/*
+ 	 * Initialize the DSA user-port queue map to an identity mapping
+@@ -5447,7 +5813,7 @@
+ 	eth->netdev[id]->dev.of_node = np;
+ 
+ 	phylink = phylink_create(&mac->phylink_config,
+-				 of_fwnode_handle(mac->of_node),
++				 of_fwnode_handle(mac->phylink_node),
+ 				 phy_mode, &mtk_phylink_ops);
+ 	if (IS_ERR(phylink)) {
+ 		err = PTR_ERR(phylink);
+@@ -5579,7 +5945,7 @@
+ static int mtk_probe(struct platform_device *pdev)
+ {
+ 	struct resource *res = NULL;
+-	struct device_node *mac_np;
++	struct device_node *mac_np, *mux_np;
+ 	struct mtk_eth *eth;
+ 	int err, i;
+ 
+@@ -5806,6 +6172,28 @@
+ 			goto err_free_dev;
+ 	}
+ 
++	mux_np = of_get_child_by_name(eth->dev->of_node, "mux-bus");
++	if (mux_np) {
++		struct device_node *child;
++
++		for_each_available_child_of_node(mux_np, child) {
++			if (!of_device_is_compatible(child, "mediatek,eth-mux"))
++				continue;
++
++			err = mtk_add_mux(eth, child);
++			if (err) {
++				dev_err(eth->dev,
++					"failed to add Ethernet mux %pOF: %d\n",
++					child, err);
++				of_node_put(child);
++				of_node_put(mux_np);
++				goto err_deinit_ppe;
++			}
++		}
++
++		of_node_put(mux_np);
++	}
++
+ 	if (eth->soc->offload_version) {
+ 		u8 ppe_num = eth->soc->ppe_num;
+ 
+@@ -5865,6 +6253,7 @@
+ 	mtk_unreg_dev(eth);
+ err_deinit_ppe:
+ 	mtk_ppe_deinit(eth);
++	mtk_release_all_muxes(eth);
+ 	mtk_mdio_cleanup(eth);
+ err_free_dev:
+ 	mtk_free_dev(eth);
+@@ -5884,6 +6273,8 @@
+ 	struct mtk_mac *mac;
+ 	int i;
+ 
++	mtk_release_all_muxes(eth);
++
+ 	/* stop all devices to make sure that dma is properly shut down */
+ 	for (i = 0; i < MTK_MAX_DEVS; i++) {
+ 		if (!eth->netdev[i])
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -728,6 +728,7 @@
+ 
+ struct mtk_eth;
+ struct mtk_mac;
++struct mtk_mux;
+ 
+ struct mtk_xdp_stats {
+ 	u64 rx_xdp_redirect;
+@@ -1385,6 +1386,7 @@
+ 	struct net_device		*dummy_dev;
+ 	struct net_device		*netdev[MTK_MAX_DEVS];
+ 	struct mtk_mac			*mac[MTK_MAX_DEVS];
++	struct mtk_mux			*mux[MTK_MAX_DEVS];
+ 	int				irq[MTK_FE_IRQ_NUM];
+ 	u32				msg_enable;
+ 	unsigned long			sysclk;
+@@ -1456,6 +1458,7 @@
+ 	u8				ppe_idx;
+ 	int				speed;
+ 	struct device_node		*of_node;
++	struct device_node		*phylink_node;
+ 	struct phylink			*phylink;
+ 	struct phylink_config		phylink_config;
+ 	struct phylink_pcs		*current_pcs;
+@@ -1470,6 +1473,32 @@
+ 	u8				dsa_port_rank[MTK_DSA_USER_PORT_MAX];
+ };
+ 
++#define MTK_MUX_CHANNELS_MAX	2
++
++struct mtk_mux_channel {
++	struct device_node		*of_node;
++	phy_interface_t			phy_mode;
++};
++
++struct mtk_mux {
++	struct delayed_work		poll;
++	struct gpio_desc		*mod_def0_gpio;
++	struct gpio_desc		*chan_sel_gpio;
++	struct mtk_mux_channel		channels[MTK_MUX_CHANNELS_MAX];
++	struct mtk_mac			*mac;
++	unsigned int			desired_channel;
++	unsigned int			selected_channel;
++	unsigned int			active_channel;
++	unsigned int			sfp_channel;
++	unsigned int			rj45_channel;
++	bool				last_sfp_present;
++	bool				sfp_present_valid;
++	bool				switching;
++	bool				stopping;
++	int				last_error;
++	unsigned int			switch_count;
++};
++
+ /* the struct describing the SoC. these are declared in the soc_xyz.c files */
+ extern const struct of_device_id of_mtk_match[];
+ 

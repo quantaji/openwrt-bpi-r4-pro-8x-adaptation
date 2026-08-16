@@ -1,0 +1,457 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sat, 15 Aug 2026 22:36:49 -0700
+Subject: [PATCH 7/7] net: phy: as21xxx: support firmware 1.9.2 LED control
+
+Replace direct LED-register programming with the firmware 1.9.2 SET_LED transaction. Cache phylib requests until config_init, serialize cache updates with mailbox access and use the vendor default five-LED configuration.
+
+Based on Aeonsemi/MediaTek driver patch 743f5744388b88ba8bc0ae7912d4754438b29078 by Bo-Cun Chen and the OpenWrt adaptation in commit 80f610ddf0075cf896d1e9ccaa47c0f4aa26ef98 by Sean McCully. Reduced to the confirmed firmware 1.9.2 LED ABI and adapted to the typed IPC layer.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/net/phy/as21xxx.c | 235 +++++++++++++++++++++++---------------
+ 1 file changed, 141 insertions(+), 94 deletions(-)
+
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index b53f377..7f9c563 100644
+--- a/drivers/net/phy/as21xxx.c
++++ b/drivers/net/phy/as21xxx.c
+@@ -18,9 +18,6 @@
+ 
+ #define VEND1_GLB_REG_CPU_CTRL		0xe
+ #define   VEND1_GLB_CPU_CTRL_MASK	GENMASK(4, 0)
+-#define   VEND1_GLB_CPU_CTRL_LED_POLARITY_MASK GENMASK(12, 8)
+-#define   VEND1_GLB_CPU_CTRL_LED_POLARITY(_n) FIELD_PREP(VEND1_GLB_CPU_CTRL_LED_POLARITY_MASK, \
+-							 BIT(_n))
+ 
+ #define VEND1_FW_START_ADDR		0x100
+ 
+@@ -32,16 +29,6 @@
+ #define VEND1_PTP_CLK			0x142
+ #define   VEND1_PTP_CLK_EN		BIT(6)
+ 
+-/* 5 LED at step of 0x20
+- * FE: Fast-Ethernet (10/100)
+- * GE: Gigabit-Ethernet (1000)
+- * NG: New-Generation (2500/5000/10000)
+- */
+-#define VEND1_LED_REG(_n)		(0x1800 + ((_n) * 0x10))
+-#define   VEND1_LED_REG_A_EVENT		GENMASK(15, 11)
+-#define VEND1_LED_CONF			0x1881
+-#define   VEND1_LED_CONFG_BLINK		GENMASK(7, 0)
+-
+ #define VEND1_SPEED_STATUS		0x4002
+ #define   VEND1_SPEED_MASK		GENMASK(7, 0)
+ #define   VEND1_SPEED_10000		FIELD_PREP_CONST(VEND1_SPEED_MASK, 0x3)
+@@ -151,7 +138,10 @@
+ #define PHY_ID_AS21210PB1		0x75009492
+ #define PHY_VENDOR_AEONSEMI		0x75009400
+ 
+-#define AEON_MAX_LEDS			5
++#define AS21XXX_MAX_LEDS		5
++#define AS21XXX_LED_CONFIG_WORDS	7
++#define AS21XXX_LED_POLARITY_WORD	5
++#define AS21XXX_LED_BLINK_RATE_3_9063HZ	3
+ #define AEON_IPC_CMD_DELAY_US		10000
+ #define AEON_IPC_POLL_US		10000
+ #define AEON_IPC_TIMEOUT_US		2000000
+@@ -163,101 +153,110 @@
+ #define AEON_CPU_CTRL_FW_LOAD		(BIT(4) | BIT(2) | BIT(1) | BIT(0))
+ #define AEON_CPU_CTRL_FW_START		BIT(0)
+ 
+-enum as21xxx_led_event {
+-	VEND1_LED_REG_A_EVENT_ON_10 = 0x0,
+-	VEND1_LED_REG_A_EVENT_ON_100,
+-	VEND1_LED_REG_A_EVENT_ON_1000,
+-	VEND1_LED_REG_A_EVENT_ON_2500,
+-	VEND1_LED_REG_A_EVENT_ON_5000,
+-	VEND1_LED_REG_A_EVENT_ON_10000,
+-	VEND1_LED_REG_A_EVENT_ON_FE_GE,
+-	VEND1_LED_REG_A_EVENT_ON_NG,
+-	VEND1_LED_REG_A_EVENT_ON_FULL_DUPLEX,
+-	VEND1_LED_REG_A_EVENT_ON_COLLISION,
+-	VEND1_LED_REG_A_EVENT_BLINK_TX,
+-	VEND1_LED_REG_A_EVENT_BLINK_RX,
+-	VEND1_LED_REG_A_EVENT_BLINK_ACT,
+-	VEND1_LED_REG_A_EVENT_ON_LINK,
+-	VEND1_LED_REG_A_EVENT_ON_LINK_BLINK_ACT,
+-	VEND1_LED_REG_A_EVENT_ON_LINK_BLINK_RX,
+-	VEND1_LED_REG_A_EVENT_ON_FE_GE_BLINK_ACT,
+-	VEND1_LED_REG_A_EVENT_ON_NG_BLINK_ACT,
+-	VEND1_LED_REG_A_EVENT_ON_NG_BLINK_FE_GE,
+-	VEND1_LED_REG_A_EVENT_ON_FD_BLINK_COLLISION,
+-	VEND1_LED_REG_A_EVENT_ON,
+-	VEND1_LED_REG_A_EVENT_OFF,
++enum as21xxx_firmware_led_mode {
++	AS21XXX_LED_MODE_OFF = 0,
++	AS21XXX_LED_ON_NG_BLINK_ACT = 1,
++	AS21XXX_LED_ON_FE_GE_BLINK_ACT = 2,
++	AS21XXX_LED_LINK = 3,
++	AS21XXX_LED_ACTIVITY = 4,
++	AS21XXX_LED_LINK_BLINK_ACT = 5,
++	AS21XXX_LED_ON_FE_GE = 7,
++	AS21XXX_LED_ON_NG = 8,
++	AS21XXX_LED_ON_FULL_DUPLEX = 9,
++	AS21XXX_LED_TX_ACTIVITY = 11,
++	AS21XXX_LED_RX_ACTIVITY = 12,
++	AS21XXX_LED_ON_2500 = 13,
++	AS21XXX_LED_ON_1000 = 14,
++	AS21XXX_LED_ON_5000 = 15,
++	AS21XXX_LED_LINK_BLINK_RX = 16,
++	AS21XXX_LED_ON_100 = 17,
++	AS21XXX_LED_ON_10 = 18,
++	AS21XXX_LED_ON_10000 = 19,
++	AS21XXX_LED_MODE_ON = 21,
+ };
+ 
+ struct as21xxx_led_pattern_info {
+ 	unsigned int pattern;
+-	u16 val;
++	u16 mode;
+ };
+ 
+ struct as21xxx_priv {
+ 	bool ipc_parity;
+ 	bool cu_an_top_speed_valid;
++	bool firmware_config_ready;
+ 	u16 cu_an_top_speed;
++	u16 led_config[AS21XXX_LED_CONFIG_WORDS];
+ 	/* Protect concurrent IPC access */
+ 	struct mutex ipc_lock;
+ };
+ 
+-static struct as21xxx_led_pattern_info as21xxx_led_supported_pattern[] = {
++static const u16 as21xxx_led_default_config[AS21XXX_LED_CONFIG_WORDS] = {
++	AS21XXX_LED_ON_NG_BLINK_ACT,
++	AS21XXX_LED_ON_FE_GE_BLINK_ACT,
++	AS21XXX_LED_LINK,
++	AS21XXX_LED_ACTIVITY,
++	AS21XXX_LED_LINK_BLINK_ACT,
++	0,
++	AS21XXX_LED_BLINK_RATE_3_9063HZ,
++};
++
++static const struct as21xxx_led_pattern_info as21xxx_led_supported_pattern[] = {
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_10),
+-		.val = VEND1_LED_REG_A_EVENT_ON_10
++		.mode = AS21XXX_LED_ON_10
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_100),
+-		.val = VEND1_LED_REG_A_EVENT_ON_100
++		.mode = AS21XXX_LED_ON_100
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_1000),
+-		.val = VEND1_LED_REG_A_EVENT_ON_1000
++		.mode = AS21XXX_LED_ON_1000
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_2500),
+-		.val = VEND1_LED_REG_A_EVENT_ON_2500
++		.mode = AS21XXX_LED_ON_2500
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_5000),
+-		.val = VEND1_LED_REG_A_EVENT_ON_5000
++		.mode = AS21XXX_LED_ON_5000
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_10000),
+-		.val = VEND1_LED_REG_A_EVENT_ON_10000
++		.mode = AS21XXX_LED_ON_10000
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK),
+-		.val = VEND1_LED_REG_A_EVENT_ON_LINK
++		.mode = AS21XXX_LED_LINK
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_10) |
+ 			   BIT(TRIGGER_NETDEV_LINK_100) |
+ 			   BIT(TRIGGER_NETDEV_LINK_1000),
+-		.val = VEND1_LED_REG_A_EVENT_ON_FE_GE
++		.mode = AS21XXX_LED_ON_FE_GE
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_2500) |
+ 			   BIT(TRIGGER_NETDEV_LINK_5000) |
+ 			   BIT(TRIGGER_NETDEV_LINK_10000),
+-		.val = VEND1_LED_REG_A_EVENT_ON_NG
++		.mode = AS21XXX_LED_ON_NG
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_FULL_DUPLEX),
+-		.val = VEND1_LED_REG_A_EVENT_ON_FULL_DUPLEX
++		.mode = AS21XXX_LED_ON_FULL_DUPLEX
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_TX),
+-		.val = VEND1_LED_REG_A_EVENT_BLINK_TX
++		.mode = AS21XXX_LED_TX_ACTIVITY
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_RX),
+-		.val = VEND1_LED_REG_A_EVENT_BLINK_RX
++		.mode = AS21XXX_LED_RX_ACTIVITY
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_TX) |
+ 			   BIT(TRIGGER_NETDEV_RX),
+-		.val = VEND1_LED_REG_A_EVENT_BLINK_ACT
++		.mode = AS21XXX_LED_ACTIVITY
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_10) |
+@@ -266,7 +265,7 @@ static struct as21xxx_led_pattern_info as21xxx_led_supported_pattern[] = {
+ 			   BIT(TRIGGER_NETDEV_LINK_2500) |
+ 			   BIT(TRIGGER_NETDEV_LINK_5000) |
+ 			   BIT(TRIGGER_NETDEV_LINK_10000),
+-		.val = VEND1_LED_REG_A_EVENT_ON_LINK
++		.mode = AS21XXX_LED_LINK
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_10) |
+@@ -277,7 +276,7 @@ static struct as21xxx_led_pattern_info as21xxx_led_supported_pattern[] = {
+ 			   BIT(TRIGGER_NETDEV_LINK_10000) |
+ 			   BIT(TRIGGER_NETDEV_TX) |
+ 			   BIT(TRIGGER_NETDEV_RX),
+-		.val = VEND1_LED_REG_A_EVENT_ON_LINK_BLINK_ACT
++		.mode = AS21XXX_LED_LINK_BLINK_ACT
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_10) |
+@@ -287,7 +286,7 @@ static struct as21xxx_led_pattern_info as21xxx_led_supported_pattern[] = {
+ 			   BIT(TRIGGER_NETDEV_LINK_5000) |
+ 			   BIT(TRIGGER_NETDEV_LINK_10000) |
+ 			   BIT(TRIGGER_NETDEV_RX),
+-		.val = VEND1_LED_REG_A_EVENT_ON_LINK_BLINK_RX
++		.mode = AS21XXX_LED_LINK_BLINK_RX
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_10) |
+@@ -295,7 +294,7 @@ static struct as21xxx_led_pattern_info as21xxx_led_supported_pattern[] = {
+ 			   BIT(TRIGGER_NETDEV_LINK_1000) |
+ 			   BIT(TRIGGER_NETDEV_TX) |
+ 			   BIT(TRIGGER_NETDEV_RX),
+-		.val = VEND1_LED_REG_A_EVENT_ON_FE_GE_BLINK_ACT
++		.mode = AS21XXX_LED_ON_FE_GE_BLINK_ACT
+ 	},
+ 	{
+ 		.pattern = BIT(TRIGGER_NETDEV_LINK_2500) |
+@@ -303,7 +302,7 @@ static struct as21xxx_led_pattern_info as21xxx_led_supported_pattern[] = {
+ 			   BIT(TRIGGER_NETDEV_LINK_10000) |
+ 			   BIT(TRIGGER_NETDEV_TX) |
+ 			   BIT(TRIGGER_NETDEV_RX),
+-		.val = VEND1_LED_REG_A_EVENT_ON_NG_BLINK_ACT
++		.mode = AS21XXX_LED_ON_NG_BLINK_ACT
+ 	}
+ };
+ 
+@@ -745,6 +744,21 @@ static int as21xxx_enable_ptp_clock(struct phy_device *phydev)
+ 				VEND1_PTP_CLK_EN);
+ }
+ 
++static int as21xxx_apply_led_config_locked(struct phy_device *phydev)
++{
++	struct as21xxx_priv *priv = phydev->priv;
++
++	lockdep_assert_held(&priv->ipc_lock);
++
++	if (!priv->firmware_config_ready)
++		return 0;
++
++	return as21xxx_ipc_xfer_locked(phydev, IPC_CMD_SET_LED,
++				       priv->led_config,
++				       ARRAY_SIZE(priv->led_config),
++				       NULL, 0, NULL);
++}
++
+ static int as21xxx_config_init(struct phy_device *phydev)
+ {
+ 	struct as21xxx_priv *priv = phydev->priv;
+@@ -756,7 +770,16 @@ static int as21xxx_config_init(struct phy_device *phydev)
+ 	if (ret)
+ 		return ret;
+ 
+-	return as21xxx_dpc_ra_enable(phydev);
++	ret = as21xxx_dpc_ra_enable(phydev);
++	if (ret)
++		return ret;
++
++	mutex_lock(&priv->ipc_lock);
++	priv->firmware_config_ready = true;
++	ret = as21xxx_apply_led_config_locked(phydev);
++	mutex_unlock(&priv->ipc_lock);
++
++	return ret;
+ }
+ 
+ static int as21xxx_adv_to_top_speed(struct phy_device *phydev)
+@@ -1011,6 +1034,9 @@ static int as21xxx_probe(struct phy_device *phydev)
+ 	if (ret)
+ 		return ret;
+ 
++	memcpy(priv->led_config, as21xxx_led_default_config,
++	       sizeof(priv->led_config));
++
+ 	ret = as21xxx_ipc_sync_parity(phydev);
+ 	if (ret)
+ 		return ret;
+@@ -1220,18 +1246,19 @@ static int as21xxx_read_status(struct phy_device *phydev)
+ static int as21xxx_led_brightness_set(struct phy_device *phydev,
+ 				      u8 index, enum led_brightness value)
+ {
+-	u16 val = VEND1_LED_REG_A_EVENT_OFF;
++	struct as21xxx_priv *priv = phydev->priv;
++	int ret;
+ 
+-	if (index > AEON_MAX_LEDS)
++	if (index >= AS21XXX_MAX_LEDS)
+ 		return -EINVAL;
+ 
+-	if (value)
+-		val = VEND1_LED_REG_A_EVENT_ON;
++	mutex_lock(&priv->ipc_lock);
++	priv->led_config[index] = value ? AS21XXX_LED_MODE_ON :
++					   AS21XXX_LED_MODE_OFF;
++	ret = as21xxx_apply_led_config_locked(phydev);
++	mutex_unlock(&priv->ipc_lock);
+ 
+-	return phy_modify_mmd(phydev, MDIO_MMD_VEND1,
+-			      VEND1_LED_REG(index),
+-			      VEND1_LED_REG_A_EVENT,
+-			      FIELD_PREP(VEND1_LED_REG_A_EVENT, val));
++	return ret;
+ }
+ 
+ static int as21xxx_led_hw_is_supported(struct phy_device *phydev, u8 index,
+@@ -1239,9 +1266,12 @@ static int as21xxx_led_hw_is_supported(struct phy_device *phydev, u8 index,
+ {
+ 	int i;
+ 
+-	if (index > AEON_MAX_LEDS)
++	if (index >= AS21XXX_MAX_LEDS)
+ 		return -EINVAL;
+ 
++	if (!rules)
++		return 0;
++
+ 	for (i = 0; i < ARRAY_SIZE(as21xxx_led_supported_pattern); i++)
+ 		if (rules == as21xxx_led_supported_pattern[i].pattern)
+ 			return 0;
+@@ -1252,55 +1282,70 @@ static int as21xxx_led_hw_is_supported(struct phy_device *phydev, u8 index,
+ static int as21xxx_led_hw_control_get(struct phy_device *phydev, u8 index,
+ 				      unsigned long *rules)
+ {
+-	int i, val;
++	struct as21xxx_priv *priv = phydev->priv;
++	u16 mode;
++	int i;
+ 
+-	if (index > AEON_MAX_LEDS)
++	if (index >= AS21XXX_MAX_LEDS)
+ 		return -EINVAL;
+ 
+-	val = phy_read_mmd(phydev, MDIO_MMD_VEND1, VEND1_LED_REG(index));
+-	if (val < 0)
+-		return val;
++	mutex_lock(&priv->ipc_lock);
++	mode = priv->led_config[index];
++	mutex_unlock(&priv->ipc_lock);
++
++	if (mode == AS21XXX_LED_MODE_OFF) {
++		*rules = 0;
++		return 0;
++	}
+ 
+-	val = FIELD_GET(VEND1_LED_REG_A_EVENT, val);
+ 	for (i = 0; i < ARRAY_SIZE(as21xxx_led_supported_pattern); i++)
+-		if (val == as21xxx_led_supported_pattern[i].val) {
++		if (mode == as21xxx_led_supported_pattern[i].mode) {
+ 			*rules = as21xxx_led_supported_pattern[i].pattern;
+ 			return 0;
+ 		}
+ 
+-	/* Should be impossible */
+-	return -EINVAL;
++	return -EOPNOTSUPP;
+ }
+ 
+ static int as21xxx_led_hw_control_set(struct phy_device *phydev, u8 index,
+ 				      unsigned long rules)
+ {
+-	u16 val = 0;
++	struct as21xxx_priv *priv = phydev->priv;
++	u16 mode = AS21XXX_LED_MODE_OFF;
++	int ret;
+ 	int i;
+ 
+-	if (index > AEON_MAX_LEDS)
++	if (index >= AS21XXX_MAX_LEDS)
+ 		return -EINVAL;
+ 
+-	for (i = 0; i < ARRAY_SIZE(as21xxx_led_supported_pattern); i++)
+-		if (rules == as21xxx_led_supported_pattern[i].pattern) {
+-			val = as21xxx_led_supported_pattern[i].val;
+-			break;
+-		}
++	if (rules) {
++		for (i = 0; i < ARRAY_SIZE(as21xxx_led_supported_pattern); i++)
++			if (rules == as21xxx_led_supported_pattern[i].pattern) {
++				mode = as21xxx_led_supported_pattern[i].mode;
++				break;
++			}
++
++		if (i == ARRAY_SIZE(as21xxx_led_supported_pattern))
++			return -EOPNOTSUPP;
++	}
++
++	mutex_lock(&priv->ipc_lock);
++	priv->led_config[index] = mode;
++	ret = as21xxx_apply_led_config_locked(phydev);
++	mutex_unlock(&priv->ipc_lock);
+ 
+-	return phy_modify_mmd(phydev, MDIO_MMD_VEND1,
+-			      VEND1_LED_REG(index),
+-			      VEND1_LED_REG_A_EVENT,
+-			      FIELD_PREP(VEND1_LED_REG_A_EVENT, val));
++	return ret;
+ }
+ 
+ static int as21xxx_led_polarity_set(struct phy_device *phydev, int index,
+ 				    unsigned long modes)
+ {
++	struct as21xxx_priv *priv = phydev->priv;
+ 	bool led_active_low = false;
+-	u16 mask, val = 0;
+ 	u32 mode;
++	int ret;
+ 
+-	if (index > AEON_MAX_LEDS)
++	if (index >= AS21XXX_MAX_LEDS)
+ 		return -EINVAL;
+ 
+ 	for_each_set_bit(mode, &modes, __PHY_LED_MODES_NUM) {
+@@ -1316,13 +1361,15 @@ static int as21xxx_led_polarity_set(struct phy_device *phydev, int index,
+ 		}
+ 	}
+ 
+-	mask = VEND1_GLB_CPU_CTRL_LED_POLARITY(index);
++	mutex_lock(&priv->ipc_lock);
+ 	if (led_active_low)
+-		val = VEND1_GLB_CPU_CTRL_LED_POLARITY(index);
++		priv->led_config[AS21XXX_LED_POLARITY_WORD] |= BIT(index);
++	else
++		priv->led_config[AS21XXX_LED_POLARITY_WORD] &= ~BIT(index);
++	ret = as21xxx_apply_led_config_locked(phydev);
++	mutex_unlock(&priv->ipc_lock);
+ 
+-	return phy_modify_mmd(phydev, MDIO_MMD_VEND1,
+-			      VEND1_GLB_REG_CPU_CTRL,
+-			      mask, val);
++	return ret;
+ }
+ 
+ static int as21xxx_match_phy_device(struct phy_device *phydev,

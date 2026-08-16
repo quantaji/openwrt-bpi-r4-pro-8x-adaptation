@@ -28,19 +28,14 @@ The reprobe work item is dynamically allocated (following the iwlwifi
 pattern) because device_reprobe() triggers remove() which frees the
 devm-managed priv while the work is still executing.
 
-Signed-off-by: Daniel Golle <daniel@makrotopia.org>
----
- drivers/net/dsa/mxl862xx/Makefile        |   2 +-
- drivers/net/dsa/mxl862xx/mxl862xx-cmd.h  |   1 +
- drivers/net/dsa/mxl862xx/mxl862xx-fw.c   | 434 +++++++++++++++++++++++
- drivers/net/dsa/mxl862xx/mxl862xx-fw.h   |  15 +
- drivers/net/dsa/mxl862xx/mxl862xx-host.c |   7 +
- drivers/net/dsa/mxl862xx/mxl862xx.c      |   3 +
- drivers/net/dsa/mxl862xx/mxl862xx.h      |   2 +
- 7 files changed, 463 insertions(+), 1 deletion(-)
- create mode 100644 drivers/net/dsa/mxl862xx/mxl862xx-fw.c
- create mode 100644 drivers/net/dsa/mxl862xx/mxl862xx-fw.h
+Refresh the patch context for the accepted MxL862xx v7.2 series on
+Linux 6.18 without changing the firmware update behavior.
 
+Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/drivers/net/dsa/mxl862xx/Makefile b/drivers/net/dsa/mxl862xx/Makefile
+index a7be0e6..bccac0d 100644
 --- a/drivers/net/dsa/mxl862xx/Makefile
 +++ b/drivers/net/dsa/mxl862xx/Makefile
 @@ -1,3 +1,3 @@
@@ -48,9 +43,11 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
  obj-$(CONFIG_NET_DSA_MXL862) += mxl862xx_dsa.o
 -mxl862xx_dsa-y := mxl862xx.o mxl862xx-host.o mxl862xx-phylink.o
 +mxl862xx_dsa-y := mxl862xx.o mxl862xx-host.o mxl862xx-phylink.o mxl862xx-fw.o
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h b/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h
+index 5ccf140..ae8d7fa 100644
 --- a/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h
 +++ b/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h
-@@ -83,6 +83,7 @@
+@@ -71,6 +71,7 @@
  #define INT_GPHY_READ			(GPY_GPY2XX_MAGIC + 0x1)
  #define INT_GPHY_WRITE			(GPY_GPY2XX_MAGIC + 0x2)
  
@@ -58,6 +55,9 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
  #define SYS_MISC_FW_VERSION		(SYS_MISC_MAGIC + 0x2)
  
  #define MXL862XX_XPCS_PCS_CONFIG	(MXL862XX_XPCS_MAGIC + 0x1)
+diff --git b/drivers/net/dsa/mxl862xx/mxl862xx-fw.c b/drivers/net/dsa/mxl862xx/mxl862xx-fw.c
+new file mode 100644
+index 0000000..7cd4a46
 --- /dev/null
 +++ b/drivers/net/dsa/mxl862xx/mxl862xx-fw.c
 @@ -0,0 +1,434 @@
@@ -495,6 +495,9 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
 +
 +	return ret;
 +}
+diff --git b/drivers/net/dsa/mxl862xx/mxl862xx-fw.h b/drivers/net/dsa/mxl862xx/mxl862xx-fw.h
+new file mode 100644
+index 0000000..a1b60fb
 --- /dev/null
 +++ b/drivers/net/dsa/mxl862xx/mxl862xx-fw.h
 @@ -0,0 +1,15 @@
@@ -513,17 +516,19 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
 +				  struct netlink_ext_ack *extack);
 +
 +#endif /* __MXL862XX_FW_H */
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx-host.c b/drivers/net/dsa/mxl862xx/mxl862xx-host.c
+index 6e582ca..7ba984e 100644
 --- a/drivers/net/dsa/mxl862xx/mxl862xx-host.c
 +++ b/drivers/net/dsa/mxl862xx/mxl862xx-host.c
-@@ -14,6 +14,7 @@
- #include <linux/limits.h>
+@@ -15,6 +15,7 @@
+ #include <linux/unaligned.h>
  #include <net/dsa.h>
  #include "mxl862xx.h"
 +#include "mxl862xx-cmd.h"
  #include "mxl862xx-host.h"
  
  #define CTRL_BUSY_MASK			BIT(15)
-@@ -334,6 +335,12 @@ int mxl862xx_api_wrap(struct mxl862xx_pr
+@@ -336,6 +337,12 @@ int mxl862xx_api_wrap(struct mxl862xx_priv *priv, u16 cmd, void *_data,
  	int ret, cmd_ret;
  	u16 max, crc, i;
  
@@ -536,9 +541,11 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
  	dev_dbg(&priv->mdiodev->dev, "CMD %04x DATA %*ph\n", cmd, size, data);
  
  	mutex_lock_nested(&priv->mdiodev->bus->mdio_lock, MDIO_MUTEX_NESTED);
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx.c b/drivers/net/dsa/mxl862xx/mxl862xx.c
+index 74250fe..a0fefa8 100644
 --- a/drivers/net/dsa/mxl862xx/mxl862xx.c
 +++ b/drivers/net/dsa/mxl862xx/mxl862xx.c
-@@ -23,6 +23,7 @@
+@@ -21,6 +21,7 @@
  #include "mxl862xx.h"
  #include "mxl862xx-api.h"
  #include "mxl862xx-cmd.h"
@@ -546,7 +553,7 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
  #include "mxl862xx-host.h"
  #include "mxl862xx-phylink.h"
  
-@@ -4248,6 +4249,8 @@ static const struct dsa_switch_ops mxl86
+@@ -2108,6 +2109,8 @@ static const struct dsa_switch_ops mxl862xx_switch_ops = {
  	.get_pause_stats = mxl862xx_get_pause_stats,
  	.get_rmon_stats = mxl862xx_get_rmon_stats,
  	.get_stats64 = mxl862xx_get_stats64,
@@ -555,12 +562,14 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
  };
  
  static int mxl862xx_probe(struct mdio_device *mdiodev)
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx.h b/drivers/net/dsa/mxl862xx/mxl862xx.h
+index 432a5f3..a53fc4c 100644
 --- a/drivers/net/dsa/mxl862xx/mxl862xx.h
 +++ b/drivers/net/dsa/mxl862xx/mxl862xx.h
-@@ -394,6 +394,8 @@ struct mxl862xx_priv {
- 	u16 lag_bridge_ports[MXL862XX_MAX_LAG_IDS + 1];
- 	u8 trunk_hash;
- 	int mirror_dest;
+@@ -337,6 +337,8 @@ struct mxl862xx_priv {
+ 	u16 evlan_ingress_size;
+ 	u16 evlan_egress_size;
+ 	u16 vf_block_size;
 +	bool block_host;
 +	bool skip_teardown;
  	struct delayed_work stats_work;

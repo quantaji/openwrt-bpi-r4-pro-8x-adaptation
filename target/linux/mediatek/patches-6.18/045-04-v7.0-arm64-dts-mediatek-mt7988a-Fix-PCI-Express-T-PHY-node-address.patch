@@ -1,0 +1,83 @@
+From e1c9223adf1c2b7d84f29f2e7e6d9a4f749da2c0 Mon Sep 17 00:00:00 2001
+From: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Date: Thu, 15 Jan 2026 14:10:35 +0100
+Subject: [PATCH] arm64: dts: mediatek: mt7988a: Fix PCI-Express T-PHY node
+ address
+
+The PCIe and USB TPHYs are under the soc bus, which provides MMIO,
+and all nodes under that must use the bus, otherwise those would
+clearly be out of place.
+
+Add ranges to both the tphy(s) and assign the address to the main
+node to silence a dtbs_check warning, and fix the children to
+use the MMIO range of t-phy.
+
+Fixes: ("f693e6ba55ae arm64: dts: mediatek: mt7988: Add t-phy for ssusb1")
+Signed-off-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+---
+ arch/arm64/boot/dts/mediatek/mt7988a.dtsi | 28 +++++++++++------------
+ 1 file changed, 14 insertions(+), 14 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a.dtsi b/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
+index bec590d26659..8c9a5aba2579 100644
+--- a/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
+@@ -629,20 +629,20 @@ pcie_intc1: interrupt-controller {
+ 		tphy: t-phy@11c50000 {
+ 			compatible = "mediatek,mt7986-tphy",
+ 				     "mediatek,generic-tphy-v2";
+-			#address-cells = <2>;
+-			#size-cells = <2>;
+-			ranges;
++			#address-cells = <1>;
++			#size-cells = <1>;
++			ranges = <0 0 0x11c50000 0x1000>;
+ 			status = "disabled";
+ 
+-			tphyu2port0: usb-phy@11c50000 {
+-				reg = <0 0x11c50000 0 0x700>;
++			tphyu2port0: usb-phy@0 {
++				reg = <0 0x700>;
+ 				clocks = <&infracfg CLK_INFRA_USB_UTMI_CK_P1>;
+ 				clock-names = "ref";
+ 				#phy-cells = <1>;
+ 			};
+ 
+-			tphyu3port0: usb-phy@11c50700 {
+-				reg = <0 0x11c50700 0 0x900>;
++			tphyu3port0: usb-phy@700 {
++				reg = <0x700 0x900>;
+ 				clocks = <&infracfg CLK_INFRA_USB_PIPE_CK_P1>;
+ 				clock-names = "ref";
+ 				#phy-cells = <1>;
+@@ -659,20 +659,20 @@ topmisc: system-controller@11d10084 {
+ 		xsphy: xs-phy@11e10000 {
+ 			compatible = "mediatek,mt7988-xsphy",
+ 				     "mediatek,xsphy";
+-			#address-cells = <2>;
+-			#size-cells = <2>;
+-			ranges;
++			#address-cells = <1>;
++			#size-cells = <1>;
++			ranges = <0 0 0x11e10000 0x3900>;
+ 			status = "disabled";
+ 
+-			xphyu2port0: usb-phy@11e10000 {
+-				reg = <0 0x11e10000 0 0x400>;
++			xphyu2port0: usb-phy@0 {
++				reg = <0 0x400>;
+ 				clocks = <&infracfg CLK_INFRA_USB_UTMI>;
+ 				clock-names = "ref";
+ 				#phy-cells = <1>;
+ 			};
+ 
+-			xphyu3port0: usb-phy@11e13000 {
+-				reg = <0 0x11e13400 0 0x500>;
++			xphyu3port0: usb-phy@3400 {
++				reg = <0x3400 0x500>;
+ 				clocks = <&infracfg CLK_INFRA_USB_PIPE>;
+ 				clock-names = "ref";
+ 				#phy-cells = <1>;
+-- 
+2.53.0
+

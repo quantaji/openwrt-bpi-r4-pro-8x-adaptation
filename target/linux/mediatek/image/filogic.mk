@@ -798,7 +798,8 @@ define Device/bananapi_bpi-r4-pro-common
 			mt7988a-bananapi-bpi-r4-pro-cn15 mt7988a-bananapi-bpi-r4-pro-cn18
   DEVICE_DTC_FLAGS := --pad 4096
   DEVICE_PACKAGES := kmod-eeprom-at24 kmod-gpio-pca953x \
-		     kmod-i2c-mux-pca954x kmod-rtc-pcf8563
+		     kmod-i2c-mux-pca954x kmod-rtc-pcf8563 \
+		     kmod-dsa-mxl862xx
   IMAGES := sysupgrade.itb
   KERNEL_LOADADDR := 0x48a00000
   KERNEL_INITRAMFS_SUFFIX := -recovery.itb
@@ -839,7 +840,8 @@ define Device/bananapi_bpi-r4-pro-8x
   DEVICE_DTS_CONFIG := config-mt7988a-bananapi-bpi-r4-pro-8x
   DEVICE_BL2 := comb-4bg
   $(call Device/bananapi_bpi-r4-pro-common)
-  DEVICE_PACKAGES += e2fsprogs f2fsck mkf2fs
+  DEVICE_PACKAGES += e2fsprogs f2fsck mkf2fs \
+		     kmod-phy-aeonsemi-as21xxx
 endef
 TARGET_DEVICES += bananapi_bpi-r4-pro-8x
 

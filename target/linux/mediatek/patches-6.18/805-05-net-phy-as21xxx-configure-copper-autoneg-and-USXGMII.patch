@@ -1,0 +1,329 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sat, 15 Aug 2026 22:36:49 -0700
+Subject: [PATCH 5/7] net: phy: as21xxx: configure copper autonegotiation and
+ USXGMII
+
+Mirror the advertised copper top speed to firmware, program mapped 1000BASE-T advertisement and restart both phylib and firmware autonegotiation when configuration changes.
+
+Move the existing unconditional PTP-clock and DPC-RA setup into config_init so it remains active for the board USXGMII path without adding SFP or 10GBASE-R policy.
+
+Based on the tested local migration by Guangda Ji in commit ceab4fe4af329eb191d54598feffa4af2e4abf93 and adapted to Linux 6.18.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/net/phy/as21xxx.c | 203 ++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 196 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index 1d93d14..f2005ab 100644
+--- a/drivers/net/phy/as21xxx.c
++++ b/drivers/net/phy/as21xxx.c
+@@ -97,6 +97,8 @@
+ 
+ /* Sub command of CMD_CFG_PARAM */
+ #define IPC_CFG_PARAM_DIRECT		0x4
++#define IPC_CMD_CFG_CU_AN_RESTART	0xa
++#define IPC_CMD_CFG_CU_AN_TOP_SPD	0xc
+ 
+ /* CFG DIRECT sub command */
+ #define IPC_CFG_PARAM_DIRECT_NG_PHYCTRL	0x1
+@@ -117,6 +119,12 @@
+ 
+ #define AS21XXX_MDIO_AN_C22		0xffe0
+ 
++#define AS21XXX_MDI_CFG_SPD_T100	0x4
++#define AS21XXX_MDI_CFG_SPD_T1G		0x8
++#define AS21XXX_MDI_CFG_SPD_T2P5G	0x10
++#define AS21XXX_MDI_CFG_SPD_T5G		0x20
++#define AS21XXX_MDI_CFG_SPD_T10G	0x40
++
+ #define PHY_ID_AS21XXX			0x75009410
+ /* AS21xxx ID Legend
+  * AS21x1xxB1
+@@ -185,6 +193,8 @@ struct as21xxx_led_pattern_info {
+ 
+ struct as21xxx_priv {
+ 	bool ipc_parity;
++	bool cu_an_top_speed_valid;
++	u16 cu_an_top_speed;
+ 	/* Protect concurrent IPC access */
+ 	struct mutex ipc_lock;
+ };
+@@ -688,6 +698,171 @@ static int as21xxx_dpc_ra_enable(struct phy_device *phydev)
+ 				NULL, 0, NULL);
+ }
+ 
++static int as21xxx_cu_an_set_top_speed_changed(struct phy_device *phydev,
++					       u16 top_speed)
++{
++	struct as21xxx_priv *priv = phydev->priv;
++	u16 tx[] = {
++		IPC_CFG_PARAM_DIRECT,
++		IPC_CFG_PARAM_DIRECT_CU_AN,
++		IPC_CMD_CFG_CU_AN_TOP_SPD,
++		top_speed,
++	};
++	int ret;
++
++	if (priv->cu_an_top_speed_valid &&
++	    priv->cu_an_top_speed == top_speed)
++		return 0;
++
++	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
++			       NULL, 0, NULL);
++	if (ret)
++		return ret;
++
++	priv->cu_an_top_speed = top_speed;
++	priv->cu_an_top_speed_valid = true;
++
++	return 1;
++}
++
++static int as21xxx_cu_an_restart(struct phy_device *phydev)
++{
++	u16 tx[] = {
++		IPC_CFG_PARAM_DIRECT,
++		IPC_CFG_PARAM_DIRECT_CU_AN,
++		IPC_CMD_CFG_CU_AN_RESTART,
++	};
++
++	return as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
++				NULL, 0, NULL);
++}
++
++static int as21xxx_enable_ptp_clock(struct phy_device *phydev)
++{
++	return phy_set_bits_mmd(phydev, MDIO_MMD_VEND1, VEND1_PTP_CLK,
++				VEND1_PTP_CLK_EN);
++}
++
++static int as21xxx_config_init(struct phy_device *phydev)
++{
++	struct as21xxx_priv *priv = phydev->priv;
++	int ret;
++
++	priv->cu_an_top_speed_valid = false;
++
++	ret = as21xxx_enable_ptp_clock(phydev);
++	if (ret)
++		return ret;
++
++	return as21xxx_dpc_ra_enable(phydev);
++}
++
++static int as21xxx_adv_to_top_speed(struct phy_device *phydev)
++{
++	if (linkmode_test_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
++			      phydev->advertising))
++		return AS21XXX_MDI_CFG_SPD_T10G;
++
++	if (linkmode_test_bit(ETHTOOL_LINK_MODE_5000baseT_Full_BIT,
++			      phydev->advertising))
++		return AS21XXX_MDI_CFG_SPD_T5G;
++
++	if (linkmode_test_bit(ETHTOOL_LINK_MODE_2500baseT_Full_BIT,
++			      phydev->advertising))
++		return AS21XXX_MDI_CFG_SPD_T2P5G;
++
++	if (linkmode_test_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
++			      phydev->advertising) ||
++	    linkmode_test_bit(ETHTOOL_LINK_MODE_1000baseT_Half_BIT,
++			      phydev->advertising))
++		return AS21XXX_MDI_CFG_SPD_T1G;
++
++	if (linkmode_test_bit(ETHTOOL_LINK_MODE_100baseT_Full_BIT,
++			      phydev->advertising) ||
++	    linkmode_test_bit(ETHTOOL_LINK_MODE_100baseT_Half_BIT,
++			      phydev->advertising))
++		return AS21XXX_MDI_CFG_SPD_T100;
++
++	return -EINVAL;
++}
++
++static int as21xxx_config_1000baset_aneg(struct phy_device *phydev)
++{
++	u32 adv;
++
++	adv = linkmode_adv_to_mii_ctrl1000_t(phydev->advertising);
++
++	return phy_modify_mmd_changed(phydev, MDIO_MMD_AN,
++				      AS21XXX_MDIO_AN_C22 + MII_CTRL1000,
++				      ADVERTISE_1000FULL |
++				      ADVERTISE_1000HALF,
++				      adv);
++}
++
++static int as21xxx_check_and_restart_aneg(struct phy_device *phydev,
++					  bool restart)
++{
++	int ret;
++
++	if (!restart) {
++		ret = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1);
++		if (ret < 0)
++			return ret;
++
++		if (!(ret & MDIO_AN_CTRL1_ENABLE))
++			restart = true;
++	}
++
++	if (!restart)
++		return 0;
++
++	ret = genphy_c45_restart_aneg(phydev);
++	if (ret)
++		return ret;
++
++	ret = as21xxx_cu_an_restart(phydev);
++	if (ret)
++		return ret;
++
++	phydev->autoneg_complete = 0;
++
++	return 0;
++}
++
++static int as21xxx_config_aneg(struct phy_device *phydev)
++{
++	bool changed = false;
++	int top_speed;
++	int ret;
++
++	if (phydev->autoneg == AUTONEG_DISABLE)
++		return genphy_c45_pma_setup_forced(phydev);
++
++	ret = genphy_c45_an_config_aneg(phydev);
++	if (ret < 0)
++		return ret;
++	if (ret > 0)
++		changed = true;
++
++	ret = as21xxx_config_1000baset_aneg(phydev);
++	if (ret < 0)
++		return ret;
++	if (ret > 0)
++		changed = true;
++
++	top_speed = as21xxx_adv_to_top_speed(phydev);
++	if (top_speed < 0)
++		return top_speed;
++
++	ret = as21xxx_cu_an_set_top_speed_changed(phydev, top_speed);
++	if (ret < 0)
++		return ret;
++	if (ret > 0)
++		changed = true;
++
++	return as21xxx_check_and_restart_aneg(phydev, changed);
++}
++
+ static int as21xxx_probe(struct phy_device *phydev)
+ {
+ 	char fw_version[AEON_IPC_DATA_MAX + 1];
+@@ -716,13 +891,7 @@ static int as21xxx_probe(struct phy_device *phydev)
+ 
+ 	phydev_info(phydev, "Firmware Version: %s\n", fw_version);
+ 
+-	/* Enable PTP clk if not already Enabled */
+-	ret = phy_set_bits_mmd(phydev, MDIO_MMD_VEND1, VEND1_PTP_CLK,
+-			       VEND1_PTP_CLK_EN);
+-	if (ret)
+-		return ret;
+-
+-	return as21xxx_dpc_ra_enable(phydev);
++	return 0;
+ }
+ 
+ static int as21xxx_get_features(struct phy_device *phydev)
+@@ -1120,6 +1289,8 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		PHY_ID_MATCH_EXACT(PHY_ID_AS21011JB1),
+ 		.name		= "Aeonsemi AS21011JB1",
+ 		.probe		= as21xxx_probe,
++		.config_init	= as21xxx_config_init,
++		.config_aneg	= as21xxx_config_aneg,
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+@@ -1135,6 +1306,8 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		PHY_ID_MATCH_EXACT(PHY_ID_AS21011PB1),
+ 		.name		= "Aeonsemi AS21011PB1",
+ 		.probe		= as21xxx_probe,
++		.config_init	= as21xxx_config_init,
++		.config_aneg	= as21xxx_config_aneg,
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+@@ -1150,6 +1323,8 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		PHY_ID_MATCH_EXACT(PHY_ID_AS21010PB1),
+ 		.name		= "Aeonsemi AS21010PB1",
+ 		.probe		= as21xxx_probe,
++		.config_init	= as21xxx_config_init,
++		.config_aneg	= as21xxx_config_aneg,
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+@@ -1165,6 +1340,8 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		PHY_ID_MATCH_EXACT(PHY_ID_AS21010JB1),
+ 		.name		= "Aeonsemi AS21010JB1",
+ 		.probe		= as21xxx_probe,
++		.config_init	= as21xxx_config_init,
++		.config_aneg	= as21xxx_config_aneg,
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+@@ -1180,6 +1357,8 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		PHY_ID_MATCH_EXACT(PHY_ID_AS21210PB1),
+ 		.name		= "Aeonsemi AS21210PB1",
+ 		.probe		= as21xxx_probe,
++		.config_init	= as21xxx_config_init,
++		.config_aneg	= as21xxx_config_aneg,
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+@@ -1195,6 +1374,8 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		PHY_ID_MATCH_EXACT(PHY_ID_AS21510JB1),
+ 		.name		= "Aeonsemi AS21510JB1",
+ 		.probe		= as21xxx_probe,
++		.config_init	= as21xxx_config_init,
++		.config_aneg	= as21xxx_config_aneg,
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+@@ -1210,6 +1391,8 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		PHY_ID_MATCH_EXACT(PHY_ID_AS21510PB1),
+ 		.name		= "Aeonsemi AS21510PB1",
+ 		.probe		= as21xxx_probe,
++		.config_init	= as21xxx_config_init,
++		.config_aneg	= as21xxx_config_aneg,
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+@@ -1225,6 +1408,8 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		PHY_ID_MATCH_EXACT(PHY_ID_AS21511JB1),
+ 		.name		= "Aeonsemi AS21511JB1",
+ 		.probe		= as21xxx_probe,
++		.config_init	= as21xxx_config_init,
++		.config_aneg	= as21xxx_config_aneg,
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+@@ -1240,6 +1425,8 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		PHY_ID_MATCH_EXACT(PHY_ID_AS21210JB1),
+ 		.name		= "Aeonsemi AS21210JB1",
+ 		.probe		= as21xxx_probe,
++		.config_init	= as21xxx_config_init,
++		.config_aneg	= as21xxx_config_aneg,
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
+@@ -1255,6 +1442,8 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		PHY_ID_MATCH_EXACT(PHY_ID_AS21511PB1),
+ 		.name		= "Aeonsemi AS21511PB1",
+ 		.probe		= as21xxx_probe,
++		.config_init	= as21xxx_config_init,
++		.config_aneg	= as21xxx_config_aneg,
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,

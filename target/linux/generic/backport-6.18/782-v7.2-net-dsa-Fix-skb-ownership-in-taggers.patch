@@ -1,0 +1,1084 @@
+From d4be5f6f9094c7c7e96b2fef6d030e23ce9211f3 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Thu, 25 Jun 2026 09:47:01 +0200
+Subject: [PATCH] net: dsa: Fix skb ownership in taggers
+
+[ Upstream commit d4be5f6f9094c7c7e96b2fef6d030e23ce9211f3 ]
+
+The tag_8021q.c tagger calls vlan_insert_tag() in dsa_8021q_xmit().
+vlan_insert_tag() will consume the skb with kfree_skb() on failure
+and return NULL.
+
+When NULL is returned as error code to ->xmit() in dsa_user_xmit()
+it will free the same skb again leading to a double-free.
+
+The idea of dsa_user_xmit() and dsa_switch_rcv() dropping the skb
+they held before the call to ->xmit() and ->rcv() is conceptually
+wrong: the pattern elsewhere in the networking code is that consumers
+drop their skb:s on failure.
+
+Modify the ->xmit() and ->rcv() call sites to not drop the SKB if
+the taggers return NULL from any of these calls. Move those drops into
+the taggers so every callback error path that retains ownership consumes
+the skb before returning NULL.
+
+Keep the existing helper ownership rules: VLAN insertion helpers already
+free on failure (this is the case in tag_8021q.c), while deferred
+transmit paths either transfer the skb reference to worker context or
+hold a worker reference with skb_get() and drop the caller's reference.
+
+For SJA1105 meta RX, transfer the buffered stampable skb under the meta
+lock and return NULL while the skb is waiting for its meta frame: the
+skb is not dropped in this case.
+
+NOTICE: Backporting patches to taggers (e.g. for stable kernels) after
+this point cannot be mechanical or they will introduce double
+kfree_skb().
+
+The Linux 6.18 backport carries every change for taggers present in
+Linux 6.18. tag_mxl-gsw1xx.c, tag_netc.c and tag_yt921x.c were added
+after Linux 6.18 and therefore have no 6.18 file to modify.
+
+Reported-by: Sashiko AI Review <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/r/20260610153952.1685895-1-kuba@kernel.org/
+Suggested-by: Jakub Kicinski <kuba@kernel.org>
+Acked-by: David Yang <mmyangfl@gmail.com> # yt921x
+Acked-by: Kurt Kanzenbach <kurt@linutronix.de> # hellcreek
+Reviewed-by: Wei Fang <wei.fang@nxp.com> # netc
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+Link: https://patch.msgid.link/20260625-dsa-fix-free-skb-v5-1-b5931e4cbdb0@kernel.org
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/net/dsa/tag.c b/net/dsa/tag.c
+index 79ad105..991732d 100644
+--- a/net/dsa/tag.c
++++ b/net/dsa/tag.c
+@@ -79,15 +79,16 @@ static int dsa_switch_rcv(struct sk_buff *skb, struct net_device *dev,
+ 		if (likely(skb->dev)) {
+ 			dsa_default_offload_fwd_mark(skb);
+ 			nskb = skb;
++		} else {
++			/* Just drop the skb if we can't find the user */
++			kfree_skb(skb);
+ 		}
+ 	} else {
+ 		nskb = cpu_dp->rcv(skb, dev);
+ 	}
+ 
+-	if (!nskb) {
+-		kfree_skb(skb);
++	if (!nskb)
+ 		return 0;
+-	}
+ 
+ 	skb = nskb;
+ 	skb_push(skb, ETH_HLEN);
+@@ -107,11 +108,10 @@ static int dsa_switch_rcv(struct sk_buff *skb, struct net_device *dev,
+ 
+ 	if (unlikely(cpu_dp->ds->untag_bridge_pvid ||
+ 		     cpu_dp->ds->untag_vlan_aware_bridge_pvid)) {
++		/* dsa_software_vlan_untag() drops skb on failure */
+ 		nskb = dsa_software_vlan_untag(skb);
+-		if (!nskb) {
+-			kfree_skb(skb);
++		if (!nskb)
+ 			return 0;
+-		}
+ 		skb = nskb;
+ 	}
+ 
+diff --git a/net/dsa/tag_ar9331.c b/net/dsa/tag_ar9331.c
+index cbb588c..2e23881 100644
+--- a/net/dsa/tag_ar9331.c
++++ b/net/dsa/tag_ar9331.c
+@@ -51,8 +51,10 @@ static struct sk_buff *ar9331_tag_rcv(struct sk_buff *skb,
+ 	u8 ver, port;
+ 	u16 hdr;
+ 
+-	if (unlikely(!pskb_may_pull(skb, AR9331_HDR_LEN)))
++	if (unlikely(!pskb_may_pull(skb, AR9331_HDR_LEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	hdr = le16_to_cpu(*(__le16 *)skb_mac_header(skb));
+ 
+@@ -60,12 +62,14 @@ static struct sk_buff *ar9331_tag_rcv(struct sk_buff *skb,
+ 	if (unlikely(ver != AR9331_HDR_VERSION)) {
+ 		netdev_warn_once(ndev, "%s:%i wrong header version 0x%2x\n",
+ 				 __func__, __LINE__, hdr);
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+ 	if (unlikely(hdr & AR9331_HDR_FROM_CPU)) {
+ 		netdev_warn_once(ndev, "%s:%i packet should not be from cpu 0x%2x\n",
+ 				 __func__, __LINE__, hdr);
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+@@ -75,8 +79,10 @@ static struct sk_buff *ar9331_tag_rcv(struct sk_buff *skb,
+ 	port = FIELD_GET(AR9331_HDR_PORT_NUM_MASK, hdr);
+ 
+ 	skb->dev = dsa_conduit_find_user(ndev, 0, port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	return skb;
+ }
+diff --git a/net/dsa/tag_brcm.c b/net/dsa/tag_brcm.c
+index eadb358..e0dd4b5 100644
+--- a/net/dsa/tag_brcm.c
++++ b/net/dsa/tag_brcm.c
+@@ -101,9 +101,9 @@ static struct sk_buff *brcm_tag_xmit_ll(struct sk_buff *skb,
+ 	 * (including FCS and tag) because the length verification is done after
+ 	 * the Broadcom tag is stripped off the ingress packet.
+ 	 *
+-	 * Let dsa_user_xmit() free the SKB
++	 * Free the SKB on error.
+ 	 */
+-	if (__skb_put_padto(skb, ETH_ZLEN + BRCM_TAG_LEN, false))
++	if (skb_put_padto(skb, ETH_ZLEN + BRCM_TAG_LEN))
+ 		return NULL;
+ 
+ 	skb_push(skb, BRCM_TAG_LEN);
+@@ -151,27 +151,35 @@ static struct sk_buff *brcm_tag_rcv_ll(struct sk_buff *skb,
+ 	int source_port;
+ 	u8 *brcm_tag;
+ 
+-	if (unlikely(!pskb_may_pull(skb, BRCM_TAG_LEN)))
++	if (unlikely(!pskb_may_pull(skb, BRCM_TAG_LEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	brcm_tag = skb->data - offset;
+ 
+ 	/* The opcode should never be different than 0b000 */
+-	if (unlikely((brcm_tag[0] >> BRCM_OPCODE_SHIFT) & BRCM_OPCODE_MASK))
++	if (unlikely((brcm_tag[0] >> BRCM_OPCODE_SHIFT) & BRCM_OPCODE_MASK)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* We should never see a reserved reason code without knowing how to
+ 	 * handle it
+ 	 */
+-	if (unlikely(brcm_tag[2] & BRCM_EG_RC_RSVD))
++	if (unlikely(brcm_tag[2] & BRCM_EG_RC_RSVD)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Locate which port this is coming from */
+ 	source_port = brcm_tag[3] & BRCM_EG_PID_MASK;
+ 
+ 	skb->dev = dsa_conduit_find_user(dev, 0, source_port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Remove Broadcom tag and update checksum */
+ 	skb_pull_rcsum(skb, BRCM_TAG_LEN);
+@@ -228,8 +236,10 @@ static struct sk_buff *brcm_leg_tag_rcv(struct sk_buff *skb,
+ 	__be16 *proto;
+ 	u8 *brcm_tag;
+ 
+-	if (unlikely(!pskb_may_pull(skb, BRCM_LEG_TAG_LEN + VLAN_HLEN)))
++	if (unlikely(!pskb_may_pull(skb, BRCM_LEG_TAG_LEN + VLAN_HLEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	brcm_tag = dsa_etype_header_pos_rx(skb);
+ 	proto = (__be16 *)(brcm_tag + BRCM_LEG_TAG_LEN);
+@@ -237,8 +247,10 @@ static struct sk_buff *brcm_leg_tag_rcv(struct sk_buff *skb,
+ 	source_port = brcm_tag[5] & BRCM_LEG_PORT_ID;
+ 
+ 	skb->dev = dsa_conduit_find_user(dev, 0, source_port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* The internal switch in BCM63XX SoCs always tags on egress on the CPU
+ 	 * port. We use VID 0 internally for untagged traffic, so strip the tag
+@@ -273,10 +285,8 @@ static struct sk_buff *brcm_leg_tag_xmit(struct sk_buff *skb,
+ 	 * need to make sure that packets are at least 70 bytes
+ 	 * (including FCS and tag) because the length verification is done after
+ 	 * the Broadcom tag is stripped off the ingress packet.
+-	 *
+-	 * Let dsa_user_xmit() free the SKB
+ 	 */
+-	if (__skb_put_padto(skb, ETH_ZLEN + BRCM_LEG_TAG_LEN, false))
++	if (skb_put_padto(skb, ETH_ZLEN + BRCM_LEG_TAG_LEN))
+ 		return NULL;
+ 
+ 	skb_push(skb, BRCM_LEG_TAG_LEN);
+@@ -325,10 +335,8 @@ static struct sk_buff *brcm_leg_fcs_tag_xmit(struct sk_buff *skb,
+ 	 * need to make sure that packets are at least 70 bytes (including FCS
+ 	 * and tag) because the length verification is done after the Broadcom
+ 	 * tag is stripped off the ingress packet.
+-	 *
+-	 * Let dsa_user_xmit() free the SKB.
+ 	 */
+-	if (__skb_put_padto(skb, ETH_ZLEN + BRCM_LEG_TAG_LEN, false))
++	if (skb_put_padto(skb, ETH_ZLEN + BRCM_LEG_TAG_LEN))
+ 		return NULL;
+ 
+ 	fcs_len = skb->len;
+@@ -351,8 +359,9 @@ static struct sk_buff *brcm_leg_fcs_tag_xmit(struct sk_buff *skb,
+ 	brcm_tag[5] = dp->index & BRCM_LEG_PORT_ID;
+ 
+ 	/* Original FCS value */
+-	if (__skb_pad(skb, ETH_FCS_LEN, false))
++	if (skb_pad(skb, ETH_FCS_LEN))
+ 		return NULL;
++
+ 	skb_put_data(skb, &fcs_val, ETH_FCS_LEN);
+ 
+ 	return skb;
+diff --git a/net/dsa/tag_dsa.c b/net/dsa/tag_dsa.c
+index 2a2c4fb..d5ffee3 100644
+--- a/net/dsa/tag_dsa.c
++++ b/net/dsa/tag_dsa.c
+@@ -224,6 +224,7 @@ static struct sk_buff *dsa_rcv_ll(struct sk_buff *skb, struct net_device *dev,
+ 			/* Remote management is not implemented yet,
+ 			 * drop.
+ 			 */
++			kfree_skb(skb);
+ 			return NULL;
+ 		case DSA_CODE_ARP_MIRROR:
+ 		case DSA_CODE_POLICY_MIRROR:
+@@ -244,12 +245,14 @@ static struct sk_buff *dsa_rcv_ll(struct sk_buff *skb, struct net_device *dev,
+ 			/* Reserved code, this could be anything. Drop
+ 			 * seems like the safest option.
+ 			 */
++			kfree_skb(skb);
+ 			return NULL;
+ 		}
+ 
+ 		break;
+ 
+ 	default:
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+@@ -271,8 +274,10 @@ static struct sk_buff *dsa_rcv_ll(struct sk_buff *skb, struct net_device *dev,
+ 						 source_port);
+ 	}
+ 
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* When using LAG offload, skb->dev is not a DSA user interface,
+ 	 * so we cannot call dsa_default_offload_fwd_mark and we need to
+@@ -335,8 +340,10 @@ static struct sk_buff *dsa_xmit(struct sk_buff *skb, struct net_device *dev)
+ 
+ static struct sk_buff *dsa_rcv(struct sk_buff *skb, struct net_device *dev)
+ {
+-	if (unlikely(!pskb_may_pull(skb, DSA_HLEN)))
++	if (unlikely(!pskb_may_pull(skb, DSA_HLEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	return dsa_rcv_ll(skb, dev, 0);
+ }
+@@ -375,8 +382,10 @@ static struct sk_buff *edsa_xmit(struct sk_buff *skb, struct net_device *dev)
+ 
+ static struct sk_buff *edsa_rcv(struct sk_buff *skb, struct net_device *dev)
+ {
+-	if (unlikely(!pskb_may_pull(skb, EDSA_HLEN)))
++	if (unlikely(!pskb_may_pull(skb, EDSA_HLEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	skb_pull_rcsum(skb, EDSA_HLEN - DSA_HLEN);
+ 
+diff --git a/net/dsa/tag_gswip.c b/net/dsa/tag_gswip.c
+index 51a1f46..3e71cdc 100644
+--- a/net/dsa/tag_gswip.c
++++ b/net/dsa/tag_gswip.c
+@@ -82,16 +82,20 @@ static struct sk_buff *gswip_tag_rcv(struct sk_buff *skb,
+ 	int port;
+ 	u8 *gswip_tag;
+ 
+-	if (unlikely(!pskb_may_pull(skb, GSWIP_RX_HEADER_LEN)))
++	if (unlikely(!pskb_may_pull(skb, GSWIP_RX_HEADER_LEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	gswip_tag = skb->data - ETH_HLEN;
+ 
+ 	/* Get source port information */
+ 	port = (gswip_tag[7] & GSWIP_RX_SPPID_MASK) >> GSWIP_RX_SPPID_SHIFT;
+ 	skb->dev = dsa_conduit_find_user(dev, 0, port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* remove GSWIP tag */
+ 	skb_pull_rcsum(skb, GSWIP_RX_HEADER_LEN);
+diff --git a/net/dsa/tag_hellcreek.c b/net/dsa/tag_hellcreek.c
+index 663b257..265e939 100644
+--- a/net/dsa/tag_hellcreek.c
++++ b/net/dsa/tag_hellcreek.c
+@@ -28,8 +28,10 @@ static struct sk_buff *hellcreek_xmit(struct sk_buff *skb,
+ 	 * checksums after the switch strips the tag.
+ 	 */
+ 	if (skb->ip_summed == CHECKSUM_PARTIAL &&
+-	    skb_checksum_help(skb))
++	    skb_checksum_help(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Tag encoding */
+ 	tag  = skb_put(skb, HELLCREEK_TAG_LEN);
+@@ -48,11 +50,14 @@ static struct sk_buff *hellcreek_rcv(struct sk_buff *skb,
+ 	skb->dev = dsa_conduit_find_user(dev, 0, port);
+ 	if (!skb->dev) {
+ 		netdev_warn_once(dev, "Failed to get source port: %d\n", port);
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+-	if (pskb_trim_rcsum(skb, skb->len - HELLCREEK_TAG_LEN))
++	if (pskb_trim_rcsum(skb, skb->len - HELLCREEK_TAG_LEN)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	dsa_default_offload_fwd_mark(skb);
+ 
+diff --git a/net/dsa/tag_ksz.c b/net/dsa/tag_ksz.c
+index 0b7564b..c93cc1a 100644
+--- a/net/dsa/tag_ksz.c
++++ b/net/dsa/tag_ksz.c
+@@ -88,11 +88,15 @@ static struct sk_buff *ksz_common_rcv(struct sk_buff *skb,
+ 				      unsigned int port, unsigned int len)
+ {
+ 	skb->dev = dsa_conduit_find_user(dev, 0, port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+-	if (pskb_trim_rcsum(skb, skb->len - len))
++	if (pskb_trim_rcsum(skb, skb->len - len)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	dsa_default_offload_fwd_mark(skb);
+ 
+@@ -124,8 +128,10 @@ static struct sk_buff *ksz8795_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	struct ethhdr *hdr;
+ 	u8 *tag;
+ 
+-	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb))
++	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Tag encoding */
+ 	tag = skb_put(skb, KSZ_INGRESS_TAG_LEN);
+@@ -142,8 +148,10 @@ static struct sk_buff *ksz8795_rcv(struct sk_buff *skb, struct net_device *dev)
+ {
+ 	u8 *tag;
+ 
+-	if (skb_linearize(skb))
++	if (skb_linearize(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	tag = skb_tail_pointer(skb) - KSZ_EGRESS_TAG_LEN;
+ 
+@@ -256,22 +264,24 @@ static struct sk_buff *ksz_defer_xmit(struct dsa_port *dp, struct sk_buff *skb)
+ 	xmit_work_fn = tagger_data->xmit_work_fn;
+ 	xmit_worker = priv->xmit_worker;
+ 
+-	if (!xmit_work_fn || !xmit_worker)
++	if (!xmit_work_fn || !xmit_worker) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	xmit_work = kzalloc(sizeof(*xmit_work), GFP_ATOMIC);
+-	if (!xmit_work)
++	if (!xmit_work) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	kthread_init_work(&xmit_work->work, xmit_work_fn);
+-	/* Increase refcount so the kfree_skb in dsa_user_xmit
+-	 * won't really free the packet.
+-	 */
+ 	xmit_work->dp = dp;
+ 	xmit_work->skb = skb_get(skb);
+ 
+ 	kthread_queue_work(xmit_worker, &xmit_work->work);
+ 
++	kfree_skb(skb);
+ 	return NULL;
+ }
+ 
+@@ -285,8 +295,10 @@ static struct sk_buff *ksz9477_xmit(struct sk_buff *skb,
+ 	__be16 *tag;
+ 	u16 val;
+ 
+-	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb))
++	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Tag encoding */
+ 	ksz_xmit_timestamp(dp, skb);
+@@ -320,8 +332,10 @@ static struct sk_buff *ksz9477_rcv(struct sk_buff *skb, struct net_device *dev)
+ 	unsigned int port;
+ 	u8 *tag;
+ 
+-	if (skb_linearize(skb))
++	if (skb_linearize(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Tag decoding */
+ 	tag = skb_tail_pointer(skb) - KSZ_EGRESS_TAG_LEN;
+@@ -362,8 +376,10 @@ static struct sk_buff *ksz9893_xmit(struct sk_buff *skb,
+ 	struct ethhdr *hdr;
+ 	u8 *tag;
+ 
+-	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb))
++	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Tag encoding */
+ 	ksz_xmit_timestamp(dp, skb);
+@@ -429,8 +445,10 @@ static struct sk_buff *lan937x_xmit(struct sk_buff *skb,
+ 	__be16 *tag;
+ 	u16 val;
+ 
+-	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb))
++	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	ksz_xmit_timestamp(dp, skb);
+ 
+diff --git a/net/dsa/tag_lan9303.c b/net/dsa/tag_lan9303.c
+index 258e5d7..d119469 100644
+--- a/net/dsa/tag_lan9303.c
++++ b/net/dsa/tag_lan9303.c
+@@ -85,6 +85,7 @@ static struct sk_buff *lan9303_rcv(struct sk_buff *skb, struct net_device *dev)
+ 	if (unlikely(!pskb_may_pull(skb, LAN9303_TAG_LEN))) {
+ 		dev_warn_ratelimited(&dev->dev,
+ 				     "Dropping packet, cannot pull\n");
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+@@ -102,6 +103,7 @@ static struct sk_buff *lan9303_rcv(struct sk_buff *skb, struct net_device *dev)
+ 	skb->dev = dsa_conduit_find_user(dev, 0, source_port);
+ 	if (!skb->dev) {
+ 		dev_warn_ratelimited(&dev->dev, "Dropping packet due to invalid source port\n");
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+diff --git a/net/dsa/tag_mtk.c b/net/dsa/tag_mtk.c
+index b670e3c..7693b46 100644
+--- a/net/dsa/tag_mtk.c
++++ b/net/dsa/tag_mtk.c
+@@ -71,8 +71,10 @@ static struct sk_buff *mtk_tag_rcv(struct sk_buff *skb, struct net_device *dev)
+ 	int port;
+ 	__be16 *phdr;
+ 
+-	if (unlikely(!pskb_may_pull(skb, MTK_HDR_LEN)))
++	if (unlikely(!pskb_may_pull(skb, MTK_HDR_LEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	phdr = dsa_etype_header_pos_rx(skb);
+ 	hdr = ntohs(*phdr);
+@@ -86,8 +88,10 @@ static struct sk_buff *mtk_tag_rcv(struct sk_buff *skb, struct net_device *dev)
+ 	port = (hdr & MTK_HDR_RECV_SOURCE_PORT_MASK);
+ 
+ 	skb->dev = dsa_conduit_find_user(dev, 0, port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	dsa_default_offload_fwd_mark(skb);
+ 
+diff --git a/net/dsa/tag_mxl862xx.c b/net/dsa/tag_mxl862xx.c
+index 8daefeb..87b80dd 100644
+--- a/net/dsa/tag_mxl862xx.c
++++ b/net/dsa/tag_mxl862xx.c
+@@ -64,6 +64,7 @@ static struct sk_buff *mxl862_tag_rcv(struct sk_buff *skb,
+ 
+ 	if (unlikely(!pskb_may_pull(skb, MXL862_HEADER_LEN))) {
+ 		dev_warn_ratelimited(&dev->dev, "Cannot pull SKB, packet dropped\n");
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+@@ -73,6 +74,7 @@ static struct sk_buff *mxl862_tag_rcv(struct sk_buff *skb,
+ 		dev_warn_ratelimited(&dev->dev,
+ 				     "Invalid special tag marker, packet dropped, tag: %8ph\n",
+ 				     mxl862_tag);
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+@@ -83,6 +85,7 @@ static struct sk_buff *mxl862_tag_rcv(struct sk_buff *skb,
+ 		dev_warn_ratelimited(&dev->dev,
+ 				     "Invalid source port, packet dropped, tag: %8ph\n",
+ 				     mxl862_tag);
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+diff --git a/net/dsa/tag_ocelot.c b/net/dsa/tag_ocelot.c
+index bf6608f..8d1964c 100644
+--- a/net/dsa/tag_ocelot.c
++++ b/net/dsa/tag_ocelot.c
+@@ -109,14 +109,16 @@ static struct sk_buff *ocelot_rcv(struct sk_buff *skb,
+ 	ocelot_xfh_get_rew_val(extraction, &rew_val);
+ 
+ 	skb->dev = dsa_conduit_find_user(netdev, 0, src_port);
+-	if (!skb->dev)
++	if (!skb->dev) {
+ 		/* The switch will reflect back some frames sent through
+ 		 * sockets opened on the bare DSA conduit. These will come back
+ 		 * with src_port equal to the index of the CPU port, for which
+ 		 * there is no user registered. So don't print any error
+ 		 * message here (ignore and drop those frames).
+ 		 */
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	dsa_default_offload_fwd_mark(skb);
+ 	skb->priority = qos_class;
+diff --git a/net/dsa/tag_ocelot_8021q.c b/net/dsa/tag_ocelot_8021q.c
+index 3929584..69359c9 100644
+--- a/net/dsa/tag_ocelot_8021q.c
++++ b/net/dsa/tag_ocelot_8021q.c
+@@ -33,30 +33,34 @@ static struct sk_buff *ocelot_defer_xmit(struct dsa_port *dp,
+ 	xmit_work_fn = data->xmit_work_fn;
+ 	xmit_worker = priv->xmit_worker;
+ 
+-	if (!xmit_work_fn || !xmit_worker)
++	if (!xmit_work_fn || !xmit_worker) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* PTP over IP packets need UDP checksumming. We may have inherited
+ 	 * NETIF_F_HW_CSUM from the DSA conduit, but these packets are not sent
+ 	 * through the DSA conduit, so calculate the checksum here.
+ 	 */
+-	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb))
++	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	xmit_work = kzalloc(sizeof(*xmit_work), GFP_ATOMIC);
+-	if (!xmit_work)
++	if (!xmit_work) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Calls felix_port_deferred_xmit in felix.c */
+ 	kthread_init_work(&xmit_work->work, xmit_work_fn);
+-	/* Increase refcount so the kfree_skb in dsa_user_xmit
+-	 * won't really free the packet.
+-	 */
+ 	xmit_work->dp = dp;
+ 	xmit_work->skb = skb_get(skb);
+ 
+ 	kthread_queue_work(xmit_worker, &xmit_work->work);
+ 
++	kfree_skb(skb);
+ 	return NULL;
+ }
+ 
+@@ -84,8 +88,10 @@ static struct sk_buff *ocelot_rcv(struct sk_buff *skb,
+ 	dsa_8021q_rcv(skb, &src_port, &switch_id, NULL, NULL);
+ 
+ 	skb->dev = dsa_conduit_find_user(netdev, switch_id, src_port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	dsa_default_offload_fwd_mark(skb);
+ 
+diff --git a/net/dsa/tag_qca.c b/net/dsa/tag_qca.c
+index 0cf6128..f191970 100644
+--- a/net/dsa/tag_qca.c
++++ b/net/dsa/tag_qca.c
+@@ -47,16 +47,20 @@ static struct sk_buff *qca_tag_rcv(struct sk_buff *skb, struct net_device *dev)
+ 
+ 	tagger_data = ds->tagger_data;
+ 
+-	if (unlikely(!pskb_may_pull(skb, QCA_HDR_LEN)))
++	if (unlikely(!pskb_may_pull(skb, QCA_HDR_LEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	phdr = dsa_etype_header_pos_rx(skb);
+ 	hdr = ntohs(*phdr);
+ 
+ 	/* Make sure the version is correct */
+ 	ver = FIELD_GET(QCA_HDR_RECV_VERSION, hdr);
+-	if (unlikely(ver != QCA_HDR_VERSION))
++	if (unlikely(ver != QCA_HDR_VERSION)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Get pk type */
+ 	pk_type = FIELD_GET(QCA_HDR_RECV_TYPE, hdr);
+@@ -65,6 +69,7 @@ static struct sk_buff *qca_tag_rcv(struct sk_buff *skb, struct net_device *dev)
+ 	if (pk_type == QCA_HDR_RECV_TYPE_RW_REG_ACK) {
+ 		if (likely(tagger_data->rw_reg_ack_handler))
+ 			tagger_data->rw_reg_ack_handler(ds, skb);
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+@@ -72,6 +77,7 @@ static struct sk_buff *qca_tag_rcv(struct sk_buff *skb, struct net_device *dev)
+ 	if (pk_type == QCA_HDR_RECV_TYPE_MIB) {
+ 		if (likely(tagger_data->mib_autocast_handler))
+ 			tagger_data->mib_autocast_handler(ds, skb);
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+@@ -79,8 +85,10 @@ static struct sk_buff *qca_tag_rcv(struct sk_buff *skb, struct net_device *dev)
+ 	port = FIELD_GET(QCA_HDR_RECV_SOURCE_PORT, hdr);
+ 
+ 	skb->dev = dsa_conduit_find_user(dev, 0, port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Remove QCA tag and recalculate checksum */
+ 	skb_pull_rcsum(skb, QCA_HDR_LEN);
+diff --git a/net/dsa/tag_rtl4_a.c b/net/dsa/tag_rtl4_a.c
+index feaefa0..d596b9e 100644
+--- a/net/dsa/tag_rtl4_a.c
++++ b/net/dsa/tag_rtl4_a.c
+@@ -41,7 +41,7 @@ static struct sk_buff *rtl4a_tag_xmit(struct sk_buff *skb,
+ 	u16 out;
+ 
+ 	/* Pad out to at least 60 bytes */
+-	if (unlikely(__skb_put_padto(skb, ETH_ZLEN, false)))
++	if (unlikely(eth_skb_pad(skb)))
+ 		return NULL;
+ 
+ 	netdev_dbg(dev, "add realtek tag to package to port %d\n",
+@@ -75,8 +75,10 @@ static struct sk_buff *rtl4a_tag_rcv(struct sk_buff *skb,
+ 	u8 prot;
+ 	u8 port;
+ 
+-	if (unlikely(!pskb_may_pull(skb, RTL4_A_HDR_LEN)))
++	if (unlikely(!pskb_may_pull(skb, RTL4_A_HDR_LEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	tag = dsa_etype_header_pos_rx(skb);
+ 	p = (__be16 *)tag;
+@@ -92,6 +94,7 @@ static struct sk_buff *rtl4a_tag_rcv(struct sk_buff *skb,
+ 	prot = (protport >> RTL4_A_PROTOCOL_SHIFT) & 0x0f;
+ 	if (prot != RTL4_A_PROTOCOL_RTL8366RB) {
+ 		netdev_err(dev, "unknown realtek protocol 0x%01x\n", prot);
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 	port = protport & 0xff;
+@@ -99,6 +102,7 @@ static struct sk_buff *rtl4a_tag_rcv(struct sk_buff *skb,
+ 	skb->dev = dsa_conduit_find_user(dev, 0, port);
+ 	if (!skb->dev) {
+ 		netdev_dbg(dev, "could not find user for port %d\n", port);
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+diff --git a/net/dsa/tag_rtl8_4.c b/net/dsa/tag_rtl8_4.c
+index 15c2bae..5ec57c1 100644
+--- a/net/dsa/tag_rtl8_4.c
++++ b/net/dsa/tag_rtl8_4.c
+@@ -139,8 +139,10 @@ static struct sk_buff *rtl8_4t_tag_xmit(struct sk_buff *skb,
+ 	/* Calculate the checksum here if not done yet as trailing tags will
+ 	 * break either software or hardware based checksum
+ 	 */
+-	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb))
++	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	rtl8_4_write_tag(skb, dev, skb_put(skb, RTL8_4_TAG_LEN));
+ 
+@@ -197,11 +199,15 @@ static int rtl8_4_read_tag(struct sk_buff *skb, struct net_device *dev,
+ static struct sk_buff *rtl8_4_tag_rcv(struct sk_buff *skb,
+ 				      struct net_device *dev)
+ {
+-	if (unlikely(!pskb_may_pull(skb, RTL8_4_TAG_LEN)))
++	if (unlikely(!pskb_may_pull(skb, RTL8_4_TAG_LEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+-	if (unlikely(rtl8_4_read_tag(skb, dev, dsa_etype_header_pos_rx(skb))))
++	if (unlikely(rtl8_4_read_tag(skb, dev, dsa_etype_header_pos_rx(skb)))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Remove tag and recalculate checksum */
+ 	skb_pull_rcsum(skb, RTL8_4_TAG_LEN);
+@@ -214,14 +220,20 @@ static struct sk_buff *rtl8_4_tag_rcv(struct sk_buff *skb,
+ static struct sk_buff *rtl8_4t_tag_rcv(struct sk_buff *skb,
+ 				       struct net_device *dev)
+ {
+-	if (skb_linearize(skb))
++	if (skb_linearize(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+-	if (unlikely(rtl8_4_read_tag(skb, dev, skb_tail_pointer(skb) - RTL8_4_TAG_LEN)))
++	if (unlikely(rtl8_4_read_tag(skb, dev, skb_tail_pointer(skb) - RTL8_4_TAG_LEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+-	if (pskb_trim_rcsum(skb, skb->len - RTL8_4_TAG_LEN))
++	if (pskb_trim_rcsum(skb, skb->len - RTL8_4_TAG_LEN)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	return skb;
+ }
+diff --git a/net/dsa/tag_rzn1_a5psw.c b/net/dsa/tag_rzn1_a5psw.c
+index 69d5122..a393dd6 100644
+--- a/net/dsa/tag_rzn1_a5psw.c
++++ b/net/dsa/tag_rzn1_a5psw.c
+@@ -49,7 +49,7 @@ static struct sk_buff *a5psw_tag_xmit(struct sk_buff *skb, struct net_device *de
+ 	 * least 60 bytes otherwise they will be discarded when they enter the
+ 	 * switch port logic.
+ 	 */
+-	if (__skb_put_padto(skb, ETH_ZLEN, false))
++	if (eth_skb_pad(skb))
+ 		return NULL;
+ 
+ 	/* provide 'A5PSW_TAG_LEN' bytes additional space */
+@@ -78,6 +78,7 @@ static struct sk_buff *a5psw_tag_rcv(struct sk_buff *skb,
+ 	if (unlikely(!pskb_may_pull(skb, A5PSW_TAG_LEN))) {
+ 		dev_warn_ratelimited(&dev->dev,
+ 				     "Dropping packet, cannot pull\n");
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+@@ -85,14 +86,17 @@ static struct sk_buff *a5psw_tag_rcv(struct sk_buff *skb,
+ 
+ 	if (tag->ctrl_tag != htons(ETH_P_DSA_A5PSW)) {
+ 		dev_warn_ratelimited(&dev->dev, "Dropping packet due to invalid TAG marker\n");
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+ 	port = FIELD_GET(A5PSW_CTRL_DATA_PORT, ntohs(tag->ctrl_data));
+ 
+ 	skb->dev = dsa_conduit_find_user(dev, 0, port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	skb_pull_rcsum(skb, A5PSW_TAG_LEN);
+ 	dsa_strip_etype_header(skb, A5PSW_TAG_LEN);
+diff --git a/net/dsa/tag_sja1105.c b/net/dsa/tag_sja1105.c
+index 02adec6..2dc0564 100644
+--- a/net/dsa/tag_sja1105.c
++++ b/net/dsa/tag_sja1105.c
+@@ -149,19 +149,20 @@ static struct sk_buff *sja1105_defer_xmit(struct dsa_port *dp,
+ 	xmit_work_fn = tagger_data->xmit_work_fn;
+ 	xmit_worker = priv->xmit_worker;
+ 
+-	if (!xmit_work_fn || !xmit_worker)
++	if (!xmit_work_fn || !xmit_worker) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	xmit_work = kzalloc(sizeof(*xmit_work), GFP_ATOMIC);
+-	if (!xmit_work)
++	if (!xmit_work) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	kthread_init_work(&xmit_work->work, xmit_work_fn);
+-	/* Increase refcount so the kfree_skb in dsa_user_xmit
+-	 * won't really free the packet.
+-	 */
+ 	xmit_work->dp = dp;
+-	xmit_work->skb = skb_get(skb);
++	xmit_work->skb = skb;
+ 
+ 	kthread_queue_work(xmit_worker, &xmit_work->work);
+ 
+@@ -401,10 +402,7 @@ static struct sk_buff
+ 			kfree_skb(priv->stampable_skb);
+ 		}
+ 
+-		/* Hold a reference to avoid dsa_switch_rcv
+-		 * from freeing the skb.
+-		 */
+-		priv->stampable_skb = skb_get(skb);
++		priv->stampable_skb = skb;
+ 		spin_unlock(&priv->meta_lock);
+ 
+ 		/* Tell DSA we got nothing */
+@@ -436,6 +434,7 @@ static struct sk_buff
+ 			dev_err_ratelimited(ds->dev,
+ 					    "Unexpected meta frame\n");
+ 			spin_unlock(&priv->meta_lock);
++			kfree_skb(skb);
+ 			return NULL;
+ 		}
+ 
+@@ -443,6 +442,7 @@ static struct sk_buff
+ 			dev_err_ratelimited(ds->dev,
+ 					    "Meta frame on wrong port\n");
+ 			spin_unlock(&priv->meta_lock);
++			kfree_skb(skb);
+ 			return NULL;
+ 		}
+ 
+@@ -501,18 +501,21 @@ static struct sk_buff *sja1105_rcv(struct sk_buff *skb,
+ 	/* Normal data plane traffic and link-local frames are tagged with
+ 	 * a tag_8021q VLAN which we have to strip
+ 	 */
+-	if (sja1105_skb_has_tag_8021q(skb))
++	if (sja1105_skb_has_tag_8021q(skb)) {
+ 		dsa_8021q_rcv(skb, &source_port, &switch_id, &vbid, &vid);
+-	else if (source_port == -1 && switch_id == -1)
++	} else if (source_port == -1 && switch_id == -1) {
+ 		/* Packets with no source information have no chance of
+ 		 * getting accepted, drop them straight away.
+ 		 */
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	skb->dev = dsa_tag_8021q_find_user(netdev, source_port, switch_id,
+ 					   vid, vbid);
+ 	if (!skb->dev) {
+ 		netdev_warn(netdev, "Couldn't decode source port\n");
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+@@ -539,12 +542,15 @@ static struct sk_buff *sja1110_rcv_meta(struct sk_buff *skb, u16 rx_header)
+ 	if (!ds) {
+ 		net_err_ratelimited("%s: cannot find switch id %d\n",
+ 				    conduit->name, switch_id);
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+ 	tagger_data = sja1105_tagger_data(ds);
+-	if (!tagger_data->meta_tstamp_handler)
++	if (!tagger_data->meta_tstamp_handler) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	for (i = 0; i <= n_ts; i++) {
+ 		u8 ts_id, source_port, dir;
+@@ -562,6 +568,7 @@ static struct sk_buff *sja1110_rcv_meta(struct sk_buff *skb, u16 rx_header)
+ 	}
+ 
+ 	/* Discard the meta frame, we've consumed the timestamps it contained */
++	kfree_skb(skb);
+ 	return NULL;
+ }
+ 
+@@ -572,8 +579,10 @@ static struct sk_buff *sja1110_rcv_inband_control_extension(struct sk_buff *skb,
+ {
+ 	u16 rx_header;
+ 
+-	if (unlikely(!pskb_may_pull(skb, SJA1110_HEADER_LEN)))
++	if (unlikely(!pskb_may_pull(skb, SJA1110_HEADER_LEN))) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* skb->data points to skb_mac_header(skb) + ETH_HLEN, which is exactly
+ 	 * what we need because the caller has checked the EtherType (which is
+@@ -609,8 +618,10 @@ static struct sk_buff *sja1110_rcv_inband_control_extension(struct sk_buff *skb,
+ 		 * padding and trailer we need to account for the fact that
+ 		 * skb->data points to skb_mac_header(skb) + ETH_HLEN.
+ 		 */
+-		if (pskb_trim_rcsum(skb, start_of_padding - ETH_HLEN))
++		if (pskb_trim_rcsum(skb, start_of_padding - ETH_HLEN)) {
++			kfree_skb(skb);
+ 			return NULL;
++		}
+ 	/* Trap-to-host frame, no timestamp trailer */
+ 	} else {
+ 		*source_port = SJA1110_RX_HEADER_SRC_PORT(rx_header);
+@@ -653,6 +664,7 @@ static struct sk_buff *sja1110_rcv(struct sk_buff *skb,
+ 
+ 	if (!skb->dev) {
+ 		netdev_warn(netdev, "Couldn't decode source port\n");
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+diff --git a/net/dsa/tag_trailer.c b/net/dsa/tag_trailer.c
+index 22742a5..62cc18a 100644
+--- a/net/dsa/tag_trailer.c
++++ b/net/dsa/tag_trailer.c
+@@ -31,22 +31,30 @@ static struct sk_buff *trailer_rcv(struct sk_buff *skb, struct net_device *dev)
+ 	u8 *trailer;
+ 	int source_port;
+ 
+-	if (skb_linearize(skb))
++	if (skb_linearize(skb)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	trailer = skb_tail_pointer(skb) - 4;
+ 	if (trailer[0] != 0x80 || (trailer[1] & 0xf8) != 0x00 ||
+-	    (trailer[2] & 0xef) != 0x00 || trailer[3] != 0x00)
++	    (trailer[2] & 0xef) != 0x00 || trailer[3] != 0x00) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	source_port = trailer[1] & 7;
+ 
+ 	skb->dev = dsa_conduit_find_user(dev, 0, source_port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+-	if (pskb_trim_rcsum(skb, skb->len - 4))
++	if (pskb_trim_rcsum(skb, skb->len - 4)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	return skb;
+ }
+diff --git a/net/dsa/tag_vsc73xx_8021q.c b/net/dsa/tag_vsc73xx_8021q.c
+index af121a9..f4736a1 100644
+--- a/net/dsa/tag_vsc73xx_8021q.c
++++ b/net/dsa/tag_vsc73xx_8021q.c
+@@ -44,6 +44,7 @@ vsc73xx_rcv(struct sk_buff *skb, struct net_device *netdev)
+ 	if (!skb->dev) {
+ 		dev_warn_ratelimited(&netdev->dev,
+ 				     "Couldn't decode source port\n");
++		kfree_skb(skb);
+ 		return NULL;
+ 	}
+ 
+diff --git a/net/dsa/tag_xrs700x.c b/net/dsa/tag_xrs700x.c
+index 68d4633..627ea58 100644
+--- a/net/dsa/tag_xrs700x.c
++++ b/net/dsa/tag_xrs700x.c
+@@ -36,15 +36,21 @@ static struct sk_buff *xrs700x_rcv(struct sk_buff *skb, struct net_device *dev)
+ 
+ 	source_port = ffs((int)trailer[0]) - 1;
+ 
+-	if (source_port < 0)
++	if (source_port < 0) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	skb->dev = dsa_conduit_find_user(dev, 0, source_port);
+-	if (!skb->dev)
++	if (!skb->dev) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+-	if (pskb_trim_rcsum(skb, skb->len - 1))
++	if (pskb_trim_rcsum(skb, skb->len - 1)) {
++		kfree_skb(skb);
+ 		return NULL;
++	}
+ 
+ 	/* Frame is forwarded by hardware, don't forward in software. */
+ 	dsa_default_offload_fwd_mark(skb);
+diff --git a/net/dsa/user.c b/net/dsa/user.c
+index f59d66f..82a6581 100644
+--- a/net/dsa/user.c
++++ b/net/dsa/user.c
+@@ -935,13 +935,12 @@ static netdev_tx_t dsa_user_xmit(struct sk_buff *skb, struct net_device *dev)
+ 		eth_skb_pad(skb);
+ 
+ 	/* Transmit function may have to reallocate the original SKB,
+-	 * in which case it must have freed it. Only free it here on error.
++	 * in which case it must have freed it. Taggers will drop the
++	 * passed skb on error.
+ 	 */
+ 	nskb = p->xmit(skb, dev);
+-	if (!nskb) {
+-		kfree_skb(skb);
++	if (!nskb)
+ 		return NETDEV_TX_OK;
+-	}
+ 
+ 	return dsa_enqueue_skb(nskb, dev);
+ }
