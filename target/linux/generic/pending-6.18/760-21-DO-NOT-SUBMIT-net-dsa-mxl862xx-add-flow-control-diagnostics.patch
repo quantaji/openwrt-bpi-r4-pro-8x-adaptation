@@ -1,0 +1,918 @@
+From: Codex <codex@openai.com>
+Date: Sun, 16 Aug 2026 00:00:00 -0700
+Subject: [PATCH] DO NOT SUBMIT: net: dsa: mxl862xx: add flow-control diagnostics
+
+Add an opt-in debugfs interface for reading the MxL862xx packet-buffer
+flow-control state and for controlled experiments on ingress port 13
+thresholds and, when available, the mapped CPU-port queue reserves.
+
+The probe-time threshold is retained only as timing evidence. Writes are
+disabled until userspace explicitly snapshots the stable link's live
+values.
+That snapshot becomes the range limit and rollback target. Every write is
+range checked and read back, and an explicit restore operation is provided.
+It is inactive unless the board diagnostic DT sets
+maxlinear,flow-control-diagnostic.
+
+The command numbers and host ABI layouts are based on MediaTek
+mtk-openwrt-feeds revision e06a5a87f0ea1600ec620492d71a1c34817725cc,
+authored by developer <developer@mediatek.com>, specifically the MaxLinear
+switch host API. The diagnostic implementation is new code written by
+Codex.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/drivers/net/dsa/mxl862xx/Makefile b/drivers/net/dsa/mxl862xx/Makefile
+index a7cb1ab..2a2e5f4 100644
+--- a/drivers/net/dsa/mxl862xx/Makefile
++++ b/drivers/net/dsa/mxl862xx/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0
+ obj-$(CONFIG_NET_DSA_MXL862) += mxl862xx_dsa.o
+-mxl862xx_dsa-y := mxl862xx.o mxl862xx-host.o mxl862xx-phylink.o mxl862xx-fw.o mxl862xx-mux.o
++mxl862xx_dsa-y := mxl862xx.o mxl862xx-host.o mxl862xx-phylink.o \
++		  mxl862xx-fw.o mxl862xx-mux.o mxl862xx-diag.o
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx-api.h b/drivers/net/dsa/mxl862xx/mxl862xx-api.h
+index ecaafa4..75bfdaf 100644
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-api.h
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-api.h
+@@ -348,6 +348,70 @@ struct mxl862xx_qos_meter_cfg {
+ 	__le16 local_overhd_val;
+ } __packed;
+ 
++/**
++ * struct mxl862xx_qos_flow_ctrl_cfg - Global packet-buffer flow control
++ * @nonconform_min: Non-conforming traffic release threshold, in segments
++ * @nonconform_max: Non-conforming traffic pause threshold, in segments
++ * @conform_min: Conforming traffic release threshold, in segments
++ * @conform_max: Conforming traffic pause threshold, in segments
++ */
++struct mxl862xx_qos_flow_ctrl_cfg {
++	__le16 nonconform_min;
++	__le16 nonconform_max;
++	__le16 conform_min;
++	__le16 conform_max;
++} __packed;
++
++/**
++ * struct mxl862xx_qos_flow_ctrl_port_cfg - Ingress-port flow control
++ * @port_id: Ethernet port number
++ * @min: Occupied-buffer release threshold, in segments
++ * @max: Occupied-buffer pause threshold, in segments
++ */
++struct mxl862xx_qos_flow_ctrl_port_cfg {
++	__le16 port_id;
++	__le16 min;
++	__le16 max;
++} __packed;
++
++/**
++ * struct mxl862xx_qos_queue_port - Traffic-class to egress-queue mapping
++ * @port_id: Ethernet port number
++ * @extraction_enable: CPU extraction before external QoS queueing
++ * @reserved0: Natural-layout padding used by the firmware ABI
++ * @queue_map_mode: Fixed-queue or sub-interface-offset mapping mode
++ * @traffic_class_id: Traffic class to query
++ * @queue_id: Queue selected by the firmware
++ * @redirection_bypass: Queue redirection bypass state
++ * @redirect_port_id: Redirected traffic destination
++ * @ingress_pce_bypass: Select the ingress-PCE-bypass mapping
++ * @reserved_port_mode: Firmware-internal port-mode state
++ * @reserved1: Natural-layout tail padding used by the firmware ABI
++ */
++struct mxl862xx_qos_queue_port {
++	__le16 port_id;
++	u8 extraction_enable;
++	u8 reserved0;
++	__le32 queue_map_mode;
++	u8 traffic_class_id;
++	u8 queue_id;
++	u8 redirection_bypass;
++	u8 redirect_port_id;
++	u8 ingress_pce_bypass;
++	u8 reserved_port_mode;
++	u8 reserved1[2];
++} __packed;
++
++/**
++ * struct mxl862xx_qos_queue_buffer_reserve_cfg - Queue buffer reservation
++ * @queue_id: QoS queue number
++ * @reserved: Reserved egress buffer segments
++ */
++struct mxl862xx_qos_queue_buffer_reserve_cfg {
++	__le16 queue_id;
++	__le16 reserved;
++} __packed;
++
+ /**
+  * enum mxl862xx_bridge_forward_mode - Bridge forwarding type of packet
+  * @MXL862XX_BRIDGE_FORWARD_FLOOD: Packet is flooded to port members of
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h b/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h
+index 83d0220..dc16229 100644
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-cmd.h
+@@ -55,6 +55,15 @@
+ #define MXL862XX_CTP_PORTCONFIGSET	(MXL862XX_CTP_MAGIC + 0x5)
+ 
+ #define MXL862XX_QOS_METERCFGSET	(MXL862XX_QOS_MAGIC + 0x2)
++#define MXL862XX_QOS_QUEUEPORTGET	(MXL862XX_QOS_MAGIC + 0xe)
++#define MXL862XX_QOS_FLOWCTRLCFGGET	(MXL862XX_QOS_MAGIC + 0x1f)
++#define MXL862XX_QOS_FLOWCTRLCFGSET	(MXL862XX_QOS_MAGIC + 0x20)
++#define MXL862XX_QOS_FLOWCTRLPORTCFGGET	(MXL862XX_QOS_MAGIC + 0x21)
++#define MXL862XX_QOS_FLOWCTRLPORTCFGSET	(MXL862XX_QOS_MAGIC + 0x22)
++#define MXL862XX_QOS_QUEUEBUFFERRESERVECFGGET \
++					(MXL862XX_QOS_MAGIC + 0x23)
++#define MXL862XX_QOS_QUEUEBUFFERRESERVECFGSET \
++					(MXL862XX_QOS_MAGIC + 0x24)
+ #define MXL862XX_QOS_METERALLOC		(MXL862XX_QOS_MAGIC + 0x2a)
+ #define MXL862XX_QOS_PMAPPERTABLESET	(MXL862XX_QOS_MAGIC + 0x2e)
+ 
+diff --git a/b/drivers/net/dsa/mxl862xx/mxl862xx-diag.c b/drivers/net/dsa/mxl862xx/mxl862xx-diag.c
+new file mode 100644
+index 0000000..e9b87f4
+--- /dev/null
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-diag.c
+@@ -0,0 +1,688 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <linux/build_bug.h>
++#include <linux/debugfs.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/fs.h>
++#include <linux/limits.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/seq_file.h>
++#include <linux/uaccess.h>
++
++#include "mxl862xx.h"
++#include "mxl862xx-api.h"
++#include "mxl862xx-cmd.h"
++#include "mxl862xx-diag.h"
++#include "mxl862xx-host.h"
++
++#define MXL862XX_DIAG_PROPERTY		"maxlinear,flow-control-diagnostic"
++#define MXL862XX_DIAG_INGRESS_PORT	13
++#define MXL862XX_DIAG_INPUT_SIZE		64
++
++static_assert(sizeof(struct mxl862xx_qos_flow_ctrl_cfg) == 8);
++static_assert(sizeof(struct mxl862xx_qos_flow_ctrl_port_cfg) == 6);
++static_assert(sizeof(struct mxl862xx_qos_queue_port) == 16);
++static_assert(sizeof(struct mxl862xx_qos_queue_buffer_reserve_cfg) == 4);
++
++static int mxl862xx_diag_port_get(struct mxl862xx_priv *priv, u16 *min,
++				  u16 *max)
++{
++	struct mxl862xx_qos_flow_ctrl_port_cfg cfg = {
++		.port_id = cpu_to_le16(priv->diag.ingress_port),
++	};
++	int ret;
++
++	ret = MXL862XX_API_READ(priv, MXL862XX_QOS_FLOWCTRLPORTCFGGET, cfg);
++	if (ret)
++		return ret;
++
++	*min = le16_to_cpu(cfg.min);
++	*max = le16_to_cpu(cfg.max);
++
++	return 0;
++}
++
++static int mxl862xx_diag_port_set(struct mxl862xx_priv *priv, u16 min,
++				  u16 max)
++{
++	struct mxl862xx_qos_flow_ctrl_port_cfg cfg = {
++		.port_id = cpu_to_le16(priv->diag.ingress_port),
++		.min = cpu_to_le16(min),
++		.max = cpu_to_le16(max),
++	};
++	u16 read_min, read_max;
++	int ret;
++
++	ret = MXL862XX_API_WRITE(priv, MXL862XX_QOS_FLOWCTRLPORTCFGSET, cfg);
++	if (ret)
++		return ret;
++
++	ret = mxl862xx_diag_port_get(priv, &read_min, &read_max);
++	if (ret)
++		return ret;
++
++	if (read_min != min || read_max != max)
++		return -EIO;
++
++	return 0;
++}
++
++static int mxl862xx_diag_queue_get(struct mxl862xx_priv *priv, u16 queue_id,
++				   u16 *reserved)
++{
++	struct mxl862xx_qos_queue_buffer_reserve_cfg cfg = {
++		.queue_id = cpu_to_le16(queue_id),
++	};
++	int ret;
++
++	ret = MXL862XX_API_READ(priv,
++				MXL862XX_QOS_QUEUEBUFFERRESERVECFGGET, cfg);
++	if (ret)
++		return ret;
++
++	*reserved = le16_to_cpu(cfg.reserved);
++
++	return 0;
++}
++
++static int mxl862xx_diag_queue_set(struct mxl862xx_priv *priv, u16 queue_id,
++				   u16 reserved)
++{
++	struct mxl862xx_qos_queue_buffer_reserve_cfg cfg = {
++		.queue_id = cpu_to_le16(queue_id),
++		.reserved = cpu_to_le16(reserved),
++	};
++	u16 read_reserved;
++	int ret;
++
++	ret = MXL862XX_API_WRITE(priv,
++				 MXL862XX_QOS_QUEUEBUFFERRESERVECFGSET, cfg);
++	if (ret)
++		return ret;
++
++	ret = mxl862xx_diag_queue_get(priv, queue_id, &read_reserved);
++	if (ret)
++		return ret;
++
++	if (read_reserved != reserved)
++		return -EIO;
++
++	return 0;
++}
++
++static struct mxl862xx_diag_queue *
++mxl862xx_diag_find_queue(struct mxl862xx_diag *diag, u16 queue_id)
++{
++	unsigned int i;
++
++	for (i = 0; i < diag->num_queues; i++)
++		if (diag->queues[i].id == queue_id)
++			return &diag->queues[i];
++
++	return NULL;
++}
++
++static int mxl862xx_diag_queue_mapping_get(struct mxl862xx_priv *priv,
++					   u8 traffic_class,
++					   struct mxl862xx_qos_queue_port *map)
++{
++	memset(map, 0, sizeof(*map));
++	map->port_id = cpu_to_le16(priv->diag.cpu_port);
++	map->traffic_class_id = traffic_class;
++
++	return MXL862XX_API_READ(priv, MXL862XX_QOS_QUEUEPORTGET, *map);
++}
++
++static int mxl862xx_diag_snapshot_queues(struct mxl862xx_priv *priv)
++{
++	struct mxl862xx_diag *diag = &priv->diag;
++	struct mxl862xx_diag_queue *queue;
++	struct mxl862xx_qos_queue_port map;
++	u16 reserved;
++	int ret;
++	u8 tc;
++
++	diag->num_queues = 0;
++
++	for (tc = 0; tc < MXL862XX_DIAG_TRAFFIC_CLASSES; tc++) {
++		ret = mxl862xx_diag_queue_mapping_get(priv, tc, &map);
++		if (ret)
++			goto fail;
++
++		if (le32_to_cpu(map.queue_map_mode) != 0) {
++			ret = -EOPNOTSUPP;
++			goto fail;
++		}
++
++		queue = mxl862xx_diag_find_queue(diag, map.queue_id);
++		if (queue)
++			continue;
++
++		if (diag->num_queues >= ARRAY_SIZE(diag->queues)) {
++			ret = -E2BIG;
++			goto fail;
++		}
++
++		ret = mxl862xx_diag_queue_get(priv, map.queue_id, &reserved);
++		if (ret)
++			goto fail;
++
++		queue = &diag->queues[diag->num_queues++];
++		queue->id = map.queue_id;
++		queue->original_reserve = reserved;
++		queue->modified = false;
++	}
++
++	return 0;
++
++fail:
++	diag->num_queues = 0;
++	return ret;
++}
++
++static void mxl862xx_diag_show_global(struct seq_file *seq,
++				      struct mxl862xx_priv *priv)
++{
++	struct mxl862xx_qos_flow_ctrl_cfg cfg = {};
++	int ret;
++
++	ret = MXL862XX_API_READ(priv, MXL862XX_QOS_FLOWCTRLCFGGET, cfg);
++	if (ret) {
++		seq_printf(seq, "global: error=%d\n", ret);
++		return;
++	}
++
++	seq_printf(seq, "global: nonconform_min=%u nonconform_max=%u ",
++		   le16_to_cpu(cfg.nonconform_min),
++		   le16_to_cpu(cfg.nonconform_max));
++	seq_printf(seq, "conform_min=%u conform_max=%u\n",
++		   le16_to_cpu(cfg.conform_min), le16_to_cpu(cfg.conform_max));
++}
++
++static void mxl862xx_diag_show_port(struct seq_file *seq,
++				    struct mxl862xx_priv *priv)
++{
++	struct mxl862xx_diag *diag = &priv->diag;
++	struct mxl862xx_port_cfg port_cfg = {
++		.port_id = cpu_to_le16(diag->ingress_port),
++	};
++	u16 min, max;
++	int ret;
++
++	ret = mxl862xx_diag_port_get(priv, &min, &max);
++	if (ret) {
++		seq_printf(seq, "port%d_thresholds: error=%d\n",
++			   diag->ingress_port, ret);
++	} else {
++		seq_printf(seq, "port%d_thresholds: min=%u max=%u ",
++			   diag->ingress_port, min, max);
++		seq_printf(seq, "probe_min=%u probe_max=%u ",
++			   diag->probe_port_min, diag->probe_port_max);
++		seq_printf(seq, "baseline_min=%u baseline_max=%u armed=%u modified=%u\n",
++			   diag->original_port_min, diag->original_port_max,
++			   diag->armed, diag->port_modified);
++	}
++
++	ret = MXL862XX_API_READ(priv, MXL862XX_COMMON_PORTCFGGET, port_cfg);
++	if (ret)
++		seq_printf(seq, "port%d_policy: error=%d\n",
++			   diag->ingress_port, ret);
++	else
++		seq_printf(seq, "port%d_policy: flow_ctrl=%u\n",
++			   diag->ingress_port, le32_to_cpu(port_cfg.flow_ctrl));
++}
++
++static void mxl862xx_diag_show_queues(struct seq_file *seq,
++				      struct mxl862xx_priv *priv)
++{
++	struct mxl862xx_diag_queue *saved;
++	struct mxl862xx_qos_queue_port map;
++	u16 reserved;
++	int ret;
++	u8 tc;
++
++	if (!priv->diag.armed) {
++		seq_puts(seq, "queue_mapping: not_snapshotted\n");
++		return;
++	}
++
++	if (priv->diag.queue_snapshot_result) {
++		seq_printf(seq, "queue_mapping: unavailable error=%d\n",
++			   priv->diag.queue_snapshot_result);
++		return;
++	}
++
++	for (tc = 0; tc < MXL862XX_DIAG_TRAFFIC_CLASSES; tc++) {
++		ret = mxl862xx_diag_queue_mapping_get(priv, tc, &map);
++		if (ret) {
++			seq_printf(seq, "cpu_port%d_tc%u: error=%d\n",
++				   priv->diag.cpu_port, tc, ret);
++			continue;
++		}
++
++		seq_printf(seq, "cpu_port%d_tc%u: queue=%u mode=%u ",
++			   priv->diag.cpu_port, tc, map.queue_id,
++			   le32_to_cpu(map.queue_map_mode));
++		seq_printf(seq, "extraction=%u ingress_bypass=%u\n",
++			   map.extraction_enable, map.ingress_pce_bypass);
++	}
++
++	for (tc = 0; tc < priv->diag.num_queues; tc++) {
++		saved = &priv->diag.queues[tc];
++		ret = mxl862xx_diag_queue_get(priv, saved->id, &reserved);
++		if (ret)
++			seq_printf(seq, "queue%u: error=%d\n", saved->id, ret);
++		else
++			seq_printf(seq,
++				   "queue%u: reserve=%u original=%u modified=%u\n",
++				   saved->id, reserved, saved->original_reserve,
++				   saved->modified);
++	}
++}
++
++static int mxl862xx_diag_status_show(struct seq_file *seq, void *unused)
++{
++	struct mxl862xx_priv *priv = seq->private;
++
++	mutex_lock(&priv->diag.lock);
++	seq_printf(seq, "ingress_port=%d cpu_port=%d armed=%u last_result=%d\n",
++		   priv->diag.ingress_port, priv->diag.cpu_port,
++		   priv->diag.armed, priv->diag.last_result);
++	mxl862xx_diag_show_global(seq, priv);
++	mxl862xx_diag_show_port(seq, priv);
++	mxl862xx_diag_show_queues(seq, priv);
++	mutex_unlock(&priv->diag.lock);
++
++	return 0;
++}
++
++static int mxl862xx_diag_status_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, mxl862xx_diag_status_show, inode->i_private);
++}
++
++static int mxl862xx_diag_copy_input(const char __user *user_buf, size_t count,
++				    char *buf, size_t size)
++{
++	if (!count || count >= size)
++		return -EINVAL;
++
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++
++	buf[count] = '\0';
++
++	return 0;
++}
++
++static ssize_t mxl862xx_diag_snapshot_write(struct file *file,
++					    const char __user *user_buf,
++					    size_t count, loff_t *ppos)
++{
++	struct mxl862xx_priv *priv = file->private_data;
++	struct mxl862xx_diag *diag = &priv->diag;
++	char buf[MXL862XX_DIAG_INPUT_SIZE];
++	unsigned int snapshot;
++	unsigned int i;
++	u16 min, max;
++	int ret;
++
++	ret = mxl862xx_diag_copy_input(user_buf, count, buf, sizeof(buf));
++	if (ret)
++		return ret;
++
++	if (kstrtouint(buf, 0, &snapshot) || snapshot != 1)
++		return -EINVAL;
++
++	mutex_lock(&diag->lock);
++	if (diag->port_modified) {
++		ret = -EBUSY;
++		goto out;
++	}
++
++	for (i = 0; i < diag->num_queues; i++) {
++		if (diag->queues[i].modified) {
++			ret = -EBUSY;
++			goto out;
++		}
++	}
++
++	diag->armed = false;
++	diag->num_queues = 0;
++	diag->queue_snapshot_result = -EAGAIN;
++	ret = mxl862xx_diag_port_get(priv, &min, &max);
++	if (ret)
++		goto out;
++
++	diag->original_port_min = min;
++	diag->original_port_max = max;
++	diag->queue_snapshot_result = mxl862xx_diag_snapshot_queues(priv);
++	if (diag->queue_snapshot_result)
++		dev_info(priv->ds->dev,
++			 "CPU port %d queue reserve diagnostics unavailable: %d\n",
++			 diag->cpu_port, diag->queue_snapshot_result);
++	diag->armed = true;
++	ret = 0;
++
++out:
++	diag->last_result = ret;
++	mutex_unlock(&diag->lock);
++
++	return ret ? ret : count;
++}
++
++static ssize_t mxl862xx_diag_port_write(struct file *file,
++					const char __user *user_buf,
++					size_t count, loff_t *ppos)
++{
++	struct mxl862xx_priv *priv = file->private_data;
++	struct mxl862xx_diag *diag = &priv->diag;
++	char buf[MXL862XX_DIAG_INPUT_SIZE];
++	unsigned int min, max;
++	char extra;
++	int restore_ret;
++	int ret;
++
++	ret = mxl862xx_diag_copy_input(user_buf, count, buf, sizeof(buf));
++	if (ret)
++		return ret;
++
++	if (sscanf(buf, "%u %u %c", &min, &max, &extra) != 2)
++		return -EINVAL;
++
++	if (!min || min >= max || max > U16_MAX)
++		return -ERANGE;
++
++	mutex_lock(&diag->lock);
++	if (!diag->armed) {
++		ret = -EACCES;
++		goto out;
++	}
++	if (min > diag->original_port_min || max > diag->original_port_max) {
++		ret = -ERANGE;
++		goto out;
++	}
++
++	ret = mxl862xx_diag_port_set(priv, min, max);
++	if (ret) {
++		restore_ret = mxl862xx_diag_port_set(priv,
++						     diag->original_port_min,
++						     diag->original_port_max);
++		if (restore_ret) {
++			dev_err(priv->ds->dev,
++				"port %d flow-control rollback failed: set=%d restore=%d\n",
++				diag->ingress_port, ret, restore_ret);
++			ret = restore_ret;
++			diag->port_modified = true;
++		} else {
++			diag->port_modified = false;
++		}
++	} else {
++		diag->port_modified = min != diag->original_port_min ||
++				      max != diag->original_port_max;
++	}
++
++out:
++	diag->last_result = ret;
++	mutex_unlock(&diag->lock);
++
++	return ret ? ret : count;
++}
++
++static ssize_t mxl862xx_diag_queue_write(struct file *file,
++					 const char __user *user_buf,
++					 size_t count, loff_t *ppos)
++{
++	struct mxl862xx_priv *priv = file->private_data;
++	struct mxl862xx_diag *diag = &priv->diag;
++	struct mxl862xx_diag_queue *queue;
++	char buf[MXL862XX_DIAG_INPUT_SIZE];
++	unsigned int queue_id, reserved, limit;
++	char extra;
++	int restore_ret;
++	int ret;
++
++	ret = mxl862xx_diag_copy_input(user_buf, count, buf, sizeof(buf));
++	if (ret)
++		return ret;
++
++	if (sscanf(buf, "%u %u %c", &queue_id, &reserved, &extra) != 2 ||
++	    queue_id > U16_MAX || reserved > U16_MAX)
++		return -EINVAL;
++
++	mutex_lock(&diag->lock);
++	if (!diag->armed) {
++		ret = -EACCES;
++		goto out;
++	}
++	if (diag->queue_snapshot_result) {
++		ret = -EOPNOTSUPP;
++		goto out;
++	}
++	queue = mxl862xx_diag_find_queue(diag, queue_id);
++	if (!queue || !queue->original_reserve) {
++		ret = -EPERM;
++		goto out;
++	}
++
++	limit = min_t(unsigned int, U16_MAX,
++		      (unsigned int)queue->original_reserve * 2);
++	if (reserved < queue->original_reserve || reserved > limit) {
++		ret = -ERANGE;
++		goto out;
++	}
++
++	ret = mxl862xx_diag_queue_set(priv, queue_id, reserved);
++	if (ret) {
++		restore_ret = mxl862xx_diag_queue_set(priv, queue_id,
++						      queue->original_reserve);
++		if (restore_ret) {
++			dev_err(priv->ds->dev,
++				"queue %u reserve rollback failed: set=%d restore=%d\n",
++				queue_id, ret, restore_ret);
++			ret = restore_ret;
++			queue->modified = true;
++		} else {
++			queue->modified = false;
++		}
++	} else {
++		queue->modified = reserved != queue->original_reserve;
++	}
++
++out:
++	diag->last_result = ret;
++	mutex_unlock(&diag->lock);
++
++	return ret ? ret : count;
++}
++
++static int mxl862xx_diag_restore_locked(struct mxl862xx_priv *priv)
++{
++	struct mxl862xx_diag *diag = &priv->diag;
++	struct mxl862xx_diag_queue *queue;
++	int first_ret = 0;
++	int ret;
++	unsigned int i;
++
++	if (diag->port_modified) {
++		ret = mxl862xx_diag_port_set(priv, diag->original_port_min,
++					     diag->original_port_max);
++		if (ret) {
++			first_ret = ret;
++			dev_err(priv->ds->dev,
++				"port %d flow-control restore failed: %d\n",
++				diag->ingress_port, ret);
++		} else {
++			diag->port_modified = false;
++		}
++	}
++
++	for (i = 0; i < diag->num_queues; i++) {
++		queue = &diag->queues[i];
++		if (!queue->modified)
++			continue;
++
++		ret = mxl862xx_diag_queue_set(priv, queue->id,
++					      queue->original_reserve);
++		if (ret) {
++			if (!first_ret)
++				first_ret = ret;
++			dev_err(priv->ds->dev,
++				"queue %u reserve restore failed: %d\n",
++				queue->id, ret);
++		} else {
++			queue->modified = false;
++		}
++	}
++
++	return first_ret;
++}
++
++static ssize_t mxl862xx_diag_restore_write(struct file *file,
++					   const char __user *user_buf,
++					   size_t count, loff_t *ppos)
++{
++	struct mxl862xx_priv *priv = file->private_data;
++	char buf[MXL862XX_DIAG_INPUT_SIZE];
++	unsigned int restore;
++	int ret;
++
++	ret = mxl862xx_diag_copy_input(user_buf, count, buf, sizeof(buf));
++	if (ret)
++		return ret;
++
++	if (kstrtouint(buf, 0, &restore) || restore != 1)
++		return -EINVAL;
++
++	mutex_lock(&priv->diag.lock);
++	if (!priv->diag.armed)
++		ret = -EACCES;
++	else
++		ret = mxl862xx_diag_restore_locked(priv);
++	priv->diag.last_result = ret;
++	mutex_unlock(&priv->diag.lock);
++
++	return ret ? ret : count;
++}
++
++static const struct file_operations mxl862xx_diag_status_fops = {
++	.owner = THIS_MODULE,
++	.open = mxl862xx_diag_status_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
++static const struct file_operations mxl862xx_diag_port_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = mxl862xx_diag_port_write,
++};
++
++static const struct file_operations mxl862xx_diag_snapshot_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = mxl862xx_diag_snapshot_write,
++};
++
++static const struct file_operations mxl862xx_diag_queue_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = mxl862xx_diag_queue_write,
++};
++
++static const struct file_operations mxl862xx_diag_restore_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = mxl862xx_diag_restore_write,
++};
++
++void mxl862xx_diag_init(struct mxl862xx_priv *priv)
++{
++	struct mxl862xx_diag *diag = &priv->diag;
++	struct dsa_port *dp;
++	struct dentry *entry;
++	int ret;
++
++	if (!of_property_read_bool(priv->mdiodev->dev.of_node,
++				   MXL862XX_DIAG_PROPERTY))
++		return;
++
++	mutex_init(&diag->lock);
++	diag->ingress_port = MXL862XX_DIAG_INGRESS_PORT;
++
++	if (!dsa_is_user_port(priv->ds, diag->ingress_port)) {
++		dev_warn(priv->ds->dev,
++			 "flow-control diagnostic port %d is not a user port\n",
++			 diag->ingress_port);
++		return;
++	}
++
++	dp = dsa_to_port(priv->ds, diag->ingress_port);
++	if (!dp->cpu_dp) {
++		dev_warn(priv->ds->dev,
++			 "flow-control diagnostic port %d has no CPU port\n",
++			 diag->ingress_port);
++		return;
++	}
++	diag->cpu_port = dp->cpu_dp->index;
++
++	ret = mxl862xx_diag_port_get(priv, &diag->probe_port_min,
++				     &diag->probe_port_max);
++	if (ret) {
++		dev_warn(priv->ds->dev,
++			 "cannot read port %d flow-control thresholds: %d\n",
++			 diag->ingress_port, ret);
++		return;
++	}
++	diag->queue_snapshot_result = -EAGAIN;
++	diag->last_result = 0;
++
++	diag->root = debugfs_create_dir("mxl862xx-flow-control", NULL);
++	if (IS_ERR(diag->root)) {
++		dev_warn(priv->ds->dev,
++			 "cannot create flow-control debugfs directory: %ld\n",
++			 PTR_ERR(diag->root));
++		diag->root = NULL;
++		return;
++	}
++
++	entry = debugfs_create_file("status", 0400, diag->root, priv,
++				    &mxl862xx_diag_status_fops);
++	if (IS_ERR(entry))
++		goto fail_debugfs;
++	entry = debugfs_create_file("snapshot", 0200, diag->root, priv,
++				    &mxl862xx_diag_snapshot_fops);
++	if (IS_ERR(entry))
++		goto fail_debugfs;
++	entry = debugfs_create_file("port13_thresholds", 0200, diag->root,
++				    priv, &mxl862xx_diag_port_fops);
++	if (IS_ERR(entry))
++		goto fail_debugfs;
++	entry = debugfs_create_file("queue_reserve", 0200, diag->root, priv,
++				    &mxl862xx_diag_queue_fops);
++	if (IS_ERR(entry))
++		goto fail_debugfs;
++	entry = debugfs_create_file("restore", 0200, diag->root, priv,
++				    &mxl862xx_diag_restore_fops);
++	if (IS_ERR(entry))
++		goto fail_debugfs;
++
++	dev_info(priv->ds->dev,
++		 "flow-control diagnostics enabled for ingress port %d, CPU port %d\n",
++		 diag->ingress_port, diag->cpu_port);
++	return;
++
++fail_debugfs:
++	dev_warn(priv->ds->dev, "cannot create flow-control debugfs files\n");
++	debugfs_remove_recursive(diag->root);
++	diag->root = NULL;
++}
++
++void mxl862xx_diag_teardown(struct mxl862xx_priv *priv)
++{
++	debugfs_remove_recursive(priv->diag.root);
++	priv->diag.root = NULL;
++}
+diff --git a/b/drivers/net/dsa/mxl862xx/mxl862xx-diag.h b/drivers/net/dsa/mxl862xx/mxl862xx-diag.h
+new file mode 100644
+index 0000000..41bce70
+--- /dev/null
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-diag.h
+@@ -0,0 +1,40 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++
++#ifndef __MXL862XX_DIAG_H
++#define __MXL862XX_DIAG_H
++
++#include <linux/mutex.h>
++
++struct dentry;
++struct mxl862xx_priv;
++
++#define MXL862XX_DIAG_TRAFFIC_CLASSES	16
++
++struct mxl862xx_diag_queue {
++	u16 id;
++	u16 original_reserve;
++	bool modified;
++};
++
++struct mxl862xx_diag {
++	struct dentry *root;
++	/* Serializes each firmware read/write/verify diagnostic transaction. */
++	struct mutex lock;
++	int ingress_port;
++	int cpu_port;
++	u16 probe_port_min;
++	u16 probe_port_max;
++	u16 original_port_min;
++	u16 original_port_max;
++	bool armed;
++	bool port_modified;
++	struct mxl862xx_diag_queue queues[MXL862XX_DIAG_TRAFFIC_CLASSES];
++	unsigned int num_queues;
++	int queue_snapshot_result;
++	int last_result;
++};
++
++void mxl862xx_diag_init(struct mxl862xx_priv *priv);
++void mxl862xx_diag_teardown(struct mxl862xx_priv *priv);
++
++#endif /* __MXL862XX_DIAG_H */
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx.c b/drivers/net/dsa/mxl862xx/mxl862xx.c
+index 0ae5bea..4f149ba 100644
+--- a/drivers/net/dsa/mxl862xx/mxl862xx.c
++++ b/drivers/net/dsa/mxl862xx/mxl862xx.c
+@@ -24,6 +24,7 @@
+ #include "mxl862xx.h"
+ #include "mxl862xx-api.h"
+ #include "mxl862xx-cmd.h"
++#include "mxl862xx-diag.h"
+ #include "mxl862xx-fw.h"
+ #include "mxl862xx-host.h"
+ #include "mxl862xx-mux.h"
+@@ -4467,6 +4468,7 @@ static int mxl862xx_probe(struct mdio_device *mdiodev)
+ 			cancel_work_sync(&priv->ports[i].host_flood_work);
+ 	} else {
+ 		mxl862xx_muxes_init(priv);
++		mxl862xx_diag_init(priv);
+ 	}
+ 
+ 	return err;
+@@ -4485,6 +4487,7 @@ static void mxl862xx_remove(struct mdio_device *mdiodev)
+ 
+ 	set_bit(MXL862XX_FLAG_WORK_STOPPED, &priv->flags);
+ 	cancel_delayed_work_sync(&priv->stats_work);
++	mxl862xx_diag_teardown(priv);
+ 	mxl862xx_muxes_teardown(priv);
+ 
+ 	/* Tear down tag_8021q under RTNL before dsa_unregister_switch().
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx.h b/drivers/net/dsa/mxl862xx/mxl862xx.h
+index 805724c..27c45e0 100644
+--- a/drivers/net/dsa/mxl862xx/mxl862xx.h
++++ b/drivers/net/dsa/mxl862xx/mxl862xx.h
+@@ -8,6 +8,8 @@
+ #include <linux/workqueue.h>
+ #include <net/dsa.h>
+ 
++#include "mxl862xx-diag.h"
++
+ struct mxl862xx_priv;
+ struct mxl862xx_mux;
+ 
+@@ -426,6 +428,7 @@ struct mxl862xx_priv {
+ 	u8 trunk_hash;
+ 	int mirror_dest;
+ 	struct delayed_work stats_work;
++	struct mxl862xx_diag diag;
+ };
+ 
+ #endif /* __MXL862XX_H */

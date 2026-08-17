@@ -1,0 +1,1017 @@
+From: Codex <codex@openai.com>
+Date: Sun, 16 Aug 2026 00:00:00 -0700
+Subject: [PATCH] net: phy: as21xxx: add verified firmware diagnostics
+
+Expose the firmware 1.9.2 NGPHY, copper AN and DPC counters, the live
+DPC PCS state, and the current rate-adaptation state through PHY ethtool
+statistics. Add debugfs controls for clearing all three counter groups
+and changing DPC rate adaptation with readback and rollback.
+
+For explicitly marked diagnostic PHYs, derive the DPC PCS encoding and
+SerDes rate from phy-mode. Read and record the previous state, program
+the firmware, read it back, and expose the requested, previous, final,
+error, and verification values. A failed diagnostic PCS write is
+reported but does not abort PHY initialization, so a diagnostic mistake
+cannot make the board unreachable.
+
+Keep every DBGCMD/WBUF/POLL/RBUF sequence under the existing IPC mutex
+and transmit the exact byte length, including one-byte payloads. Limit
+the counter-clear file and startup PCS write to a DT opt-in property;
+the ordinary AS21 device behavior remains unchanged.
+
+The firmware DBGCMD ABI, DPC PCS layout, rate-adaptation commands,
+counter layout and counter-clear order were verified against vendor
+commit 56e0e77adad ("BPI-R4PRO Initial Version"), authored by wei.zuo
+<wei.zuo@radisys.com>, and OpenWrt PR 24569 commit 80f610ddf007
+("mediatek: filogic: add AeonSemi AS21xxx support"), authored by Sean
+McCully <sean_mccully@yahoo.com>.
+
+The DT opt-in policy, verified PCS integration, failure handling,
+statistics layout, and debugfs controls are new work.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/drivers/net/phy/as21xxx.c b/drivers/net/phy/as21xxx.c
+index 7f9c563856..d4dfe7873f 100644
+--- a/drivers/net/phy/as21xxx.c
++++ b/drivers/net/phy/as21xxx.c
+@@ -6,12 +6,15 @@
+  */
+ 
+ #include <linux/bitfield.h>
++#include <linux/debugfs.h>
+ #include <linux/firmware.h>
+ #include <linux/hwmon.h>
+ #include <linux/math64.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/phy.h>
++#include <linux/rtnetlink.h>
++#include <linux/unaligned.h>
+ 
+ #define VEND1_GLB_REG_CPU_RESET_ADDR_LO_BASEADDR 0x3
+ #define VEND1_GLB_REG_CPU_RESET_ADDR_HI_BASEADDR 0x4
+@@ -52,6 +55,10 @@
+ #define IPC_CMD_NG_TESTMODE		0x1b /* Set NG test mode and tone */
+ #define IPC_CMD_TEMP_MON		0x15 /* Temperature monitoring function */
+ #define IPC_CMD_SET_LED			0x23 /* Set led */
++#define IPC_CMD_DBGCMD			0x16 /* Start firmware debug command */
++#define IPC_CMD_DBGPOLL			0x17 /* Poll firmware debug command */
++#define IPC_CMD_DBGWBUF			0x18 /* Write firmware debug buffer */
++#define IPC_CMD_DBGRBUF			0x19 /* Read firmware debug buffer */
+ 
+ #define VEND1_IPC_STS			0x5802
+ #define   AEON_IPC_STS_PARITY		BIT(15)
+@@ -147,6 +154,35 @@
+ #define AEON_IPC_TIMEOUT_US		2000000
+ #define AEON_IPC_DATA_NUM_REGISTERS	8
+ #define AEON_IPC_DATA_MAX		(AEON_IPC_DATA_NUM_REGISTERS * sizeof(u16))
++#define AS21XXX_DBGCMD_POLL_MAX		100
++
++#define AS21XXX_DBGCMD_NGPHY		0x80
++#define AS21XXX_DBGCMD_DPC		0x8b
++#define AS21XXX_DBGCMD_NGPHY_CNT_DUMP	4
++#define AS21XXX_DBGCMD_NGPHY_CNT_CLEAR	5
++#define AS21XXX_DBGCMD_DPC_PCS_SET	0
++#define AS21XXX_DBGCMD_DPC_PCS_GET	1
++#define AS21XXX_DBGCMD_DPC_RA_SET	2
++#define AS21XXX_DBGCMD_DPC_RA_GET	7
++#define AS21XXX_DBGCMD_DPC_CNT_DUMP	13
++#define AS21XXX_DBGCMD_DPC_CNT_CLEAR	14
++#define AS21XXX_DBGCMD_CU_AN		0xa0
++#define AS21XXX_DBGCMD_CU_AN_CNT_GET	10
++#define AS21XXX_DBGCMD_CU_AN_CNT_CLEAR	11
++
++#define AS21XXX_DIAG_PCS_PROPERTY	"aeonsemi,dpc-pcs-diagnostic"
++
++#define AS21XXX_NGPHY_STATS		5
++#define AS21XXX_CU_AN_STATS		1
++#define AS21XXX_DPC_STATS		3
++#define AS21XXX_FW_COUNTERS		(AS21XXX_NGPHY_STATS + \
++					 AS21XXX_CU_AN_STATS + \
++					 AS21XXX_DPC_STATS)
++
++#define AS21XXX_DIAG_COUNTERS_VALID	BIT(0)
++#define AS21XXX_DIAG_PCS_VALID		BIT(1)
++#define AS21XXX_DIAG_RA_VALID		BIT(2)
++#define AS21XXX_DIAG_PCS_CONFIG_VALID	BIT(3)
+ 
+ #define AEON_BOOT_ADDR			0x1000
+ #define AEON_CPU_BOOT_ADDR		0x2000
+@@ -184,7 +220,21 @@ struct as21xxx_priv {
+ 	bool ipc_parity;
+ 	bool cu_an_top_speed_valid;
+ 	bool firmware_config_ready;
++	bool diag_pcs_attempted;
++	bool diag_pcs_before_valid;
++	bool diag_pcs_after_valid;
++	bool diag_pcs_verified;
+ 	u16 cu_an_top_speed;
++	u16 diag_pcs_request_speed;
++	u16 diag_pcs_before_speed;
++	u16 diag_pcs_after_speed;
++	u8 diag_pcs_request_encoding;
++	u8 diag_pcs_request_op_mode;
++	u8 diag_pcs_before_encoding;
++	u8 diag_pcs_before_op_mode;
++	u8 diag_pcs_after_encoding;
++	u8 diag_pcs_after_op_mode;
++	int diag_pcs_result;
+ 	u16 led_config[AS21XXX_LED_CONFIG_WORDS];
+ 	/* Protect concurrent IPC access */
+ 	struct mutex ipc_lock;
+@@ -486,7 +536,7 @@ static int as21xxx_ipc_wait_ready(struct phy_device *phydev, bool parity)
+ 
+ static int as21xxx_ipc_send_cmd_locked(struct phy_device *phydev,
+ 				       struct as21xxx_priv *priv,
+-				       u16 opcode, unsigned int tx_words,
++				       u16 opcode, unsigned int tx_bytes,
+ 				       bool wait_status, u16 *sts)
+ {
+ 	bool parity;
+@@ -499,7 +549,7 @@ static int as21xxx_ipc_send_cmd_locked(struct phy_device *phydev,
+ 	 * to keep firmware and driver packet order in sync.
+ 	 */
+ 	parity = priv->ipc_parity;
+-	cmd = FIELD_PREP(AEON_IPC_CMD_SIZE, tx_words * sizeof(u16)) |
++	cmd = FIELD_PREP(AEON_IPC_CMD_SIZE, tx_bytes) |
+ 	      FIELD_PREP(AEON_IPC_CMD_OPCODE, opcode);
+ 
+ 	if (parity)
+@@ -522,11 +572,12 @@ static int as21xxx_ipc_send_cmd_locked(struct phy_device *phydev,
+ }
+ 
+ static int as21xxx_ipc_xfer_locked(struct phy_device *phydev, u16 opcode,
+-				   const u16 *tx, unsigned int tx_words,
+-				   u16 *rx, unsigned int rx_words,
++				   const u16 *tx, unsigned int tx_bytes,
++				   u16 *rx, unsigned int rx_capacity_bytes,
+ 				   unsigned int *rx_bytes)
+ {
+ 	struct as21xxx_priv *priv = phydev->priv;
++	unsigned int tx_words = DIV_ROUND_UP(tx_bytes, sizeof(u16));
+ 	unsigned int ret_bytes;
+ 	u16 sts;
+ 	int ret;
+@@ -535,10 +586,10 @@ static int as21xxx_ipc_xfer_locked(struct phy_device *phydev, u16 opcode,
+ 	lockdep_assert_held(&priv->ipc_lock);
+ 
+ 	/* IPC uses eight 16-bit data registers. */
+-	if (tx_words > AEON_IPC_DATA_NUM_REGISTERS ||
+-	    rx_words > AEON_IPC_DATA_NUM_REGISTERS)
++	if (tx_bytes > AEON_IPC_DATA_MAX ||
++	    rx_capacity_bytes > AEON_IPC_DATA_MAX)
+ 		return -EMSGSIZE;
+-	if ((tx_words && !tx) || (rx_words && !rx))
++	if ((tx_bytes && !tx) || (rx_capacity_bytes && !rx))
+ 		return -EINVAL;
+ 
+ 	for (i = 0; i < tx_words; i++) {
+@@ -549,7 +600,7 @@ static int as21xxx_ipc_xfer_locked(struct phy_device *phydev, u16 opcode,
+ 	}
+ 
+ 	ret = as21xxx_ipc_send_cmd_locked(phydev, priv, opcode,
+-					  tx_words, true, &sts);
++					  tx_bytes, true, &sts);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -569,7 +620,7 @@ static int as21xxx_ipc_xfer_locked(struct phy_device *phydev, u16 opcode,
+ 		return 0;
+ 	}
+ 
+-	if (ret_bytes > rx_words * sizeof(u16))
++	if (ret_bytes > rx_capacity_bytes)
+ 		return -EMSGSIZE;
+ 
+ 	/* Read returned bytes from IPC data registers. */
+@@ -588,16 +639,102 @@ static int as21xxx_ipc_xfer_locked(struct phy_device *phydev, u16 opcode,
+ }
+ 
+ static int as21xxx_ipc_xfer(struct phy_device *phydev, u16 opcode,
+-			    const u16 *tx, unsigned int tx_words,
+-			    u16 *rx, unsigned int rx_words,
++			    const u16 *tx, unsigned int tx_bytes,
++			    u16 *rx, unsigned int rx_capacity_bytes,
+ 			    unsigned int *rx_bytes)
+ {
+ 	struct as21xxx_priv *priv = phydev->priv;
+ 	int ret;
+ 
+ 	mutex_lock(&priv->ipc_lock);
+-	ret = as21xxx_ipc_xfer_locked(phydev, opcode, tx, tx_words,
+-				      rx, rx_words, rx_bytes);
++	ret = as21xxx_ipc_xfer_locked(phydev, opcode, tx, tx_bytes,
++				      rx, rx_capacity_bytes, rx_bytes);
++	mutex_unlock(&priv->ipc_lock);
++
++	return ret;
++}
++
++/* Run one firmware DBGCMD transaction without allowing another mailbox user
++ * to interleave WBUF, POLL or RBUF commands.
++ */
++static int as21xxx_ipc_debug_xfer(struct phy_device *phydev, u16 section,
++				  u16 command, const u8 *tx_data,
++				  unsigned int tx_len, u8 *rx_data,
++				  unsigned int rx_len)
++{
++	struct as21xxx_priv *priv = phydev->priv;
++	u16 frame[] = { (section << 8) | command, tx_len, 0 };
++	u16 payload[AEON_IPC_DATA_NUM_REGISTERS] = {};
++	unsigned int offset = 0;
++	unsigned int reply_len;
++	u16 done = 0;
++	int ret = 0;
++	int i;
++
++	if (tx_len > AEON_IPC_DATA_MAX || (tx_len && !tx_data) ||
++	    (rx_len && !rx_data))
++		return -EINVAL;
++
++	mutex_lock(&priv->ipc_lock);
++
++	ret = as21xxx_ipc_xfer_locked(phydev, IPC_CMD_DBGCMD, frame,
++				      sizeof(frame), NULL, 0, NULL);
++	if (ret)
++		goto out;
++
++	if (tx_len) {
++		for (i = 0; i < tx_len; i++)
++			payload[i / 2] |= tx_data[i] << (8 * (i % 2));
++
++		ret = as21xxx_ipc_xfer_locked(phydev, IPC_CMD_DBGWBUF,
++					      payload, tx_len, NULL, 0, NULL);
++		if (ret)
++			goto out;
++	}
++
++	for (i = 0; i < AS21XXX_DBGCMD_POLL_MAX; i++) {
++		memset(payload, 0, sizeof(payload));
++		ret = as21xxx_ipc_xfer_locked(phydev, IPC_CMD_DBGPOLL,
++					      NULL, 0, payload,
++					      sizeof(payload), &reply_len);
++		if (ret)
++			goto out;
++		if (reply_len < sizeof(done)) {
++			ret = -EPROTO;
++			goto out;
++		}
++		done = payload[0];
++		if (done)
++			break;
++	}
++
++	if (!done) {
++		ret = -ETIMEDOUT;
++		goto out;
++	}
++
++	while (offset < rx_len) {
++		unsigned int chunk = min_t(unsigned int, rx_len - offset,
++					   AEON_IPC_DATA_MAX);
++
++		memset(payload, 0, sizeof(payload));
++		ret = as21xxx_ipc_xfer_locked(phydev, IPC_CMD_DBGRBUF,
++					      NULL, 0, payload,
++					      sizeof(payload), &reply_len);
++		if (ret)
++			goto out;
++		if (reply_len < chunk) {
++			ret = -EPROTO;
++			goto out;
++		}
++
++		for (i = 0; i < chunk; i++)
++			rx_data[offset + i] =
++				payload[i / 2] >> (8 * (i % 2));
++		offset += chunk;
++	}
++
++out:
+ 	mutex_unlock(&priv->ipc_lock);
+ 
+ 	return ret;
+@@ -675,8 +812,8 @@ static int as21xxx_ipc_read_fw_version(struct phy_device *phydev,
+ 	if (!len)
+ 		return -EINVAL;
+ 
+-	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_INFO, tx, ARRAY_SIZE(tx),
+-			       rx, ARRAY_SIZE(rx), &rx_bytes);
++	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_INFO, tx, sizeof(tx),
++			       rx, sizeof(rx), &rx_bytes);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -688,6 +825,198 @@ static int as21xxx_ipc_read_fw_version(struct phy_device *phydev,
+ 	return 0;
+ }
+ 
++static int as21xxx_read_counter_block(struct phy_device *phydev, u16 section,
++				      u16 command, u32 *counters,
++				      unsigned int count)
++{
++	u8 raw[AS21XXX_NGPHY_STATS * sizeof(u32)] = {};
++	unsigned int i;
++	int ret;
++
++	if (!counters || count > AS21XXX_NGPHY_STATS)
++		return -EINVAL;
++
++	ret = as21xxx_ipc_debug_xfer(phydev, section, command, NULL, 0,
++				     raw, count * sizeof(u32));
++	if (ret)
++		return ret;
++
++	for (i = 0; i < count; i++)
++		counters[i] = get_unaligned_le32(raw + i * sizeof(u32));
++
++	return 0;
++}
++
++static int as21xxx_read_fw_counters(struct phy_device *phydev, u32 *counters)
++{
++	int ret;
++
++	ret = as21xxx_read_counter_block(phydev, AS21XXX_DBGCMD_NGPHY,
++					 AS21XXX_DBGCMD_NGPHY_CNT_DUMP,
++					 counters, AS21XXX_NGPHY_STATS);
++	if (ret)
++		return ret;
++
++	ret = as21xxx_read_counter_block(phydev, AS21XXX_DBGCMD_CU_AN,
++					 AS21XXX_DBGCMD_CU_AN_CNT_GET,
++					 counters + AS21XXX_NGPHY_STATS,
++					 AS21XXX_CU_AN_STATS);
++	if (ret)
++		return ret;
++
++	return as21xxx_read_counter_block(phydev, AS21XXX_DBGCMD_DPC,
++					  AS21XXX_DBGCMD_DPC_CNT_DUMP,
++					  counters + AS21XXX_NGPHY_STATS +
++					  AS21XXX_CU_AN_STATS,
++					  AS21XXX_DPC_STATS);
++}
++
++static int as21xxx_dpc_pcs_get(struct phy_device *phydev, u8 *pcs_encoding,
++			       u16 *speed, u8 *op_mode)
++{
++	u8 config[3] = {};
++	int ret;
++
++	ret = as21xxx_ipc_debug_xfer(phydev, AS21XXX_DBGCMD_DPC,
++				     AS21XXX_DBGCMD_DPC_PCS_GET,
++				     NULL, 0, config, sizeof(config));
++	if (ret)
++		return ret;
++
++	if (config[0] > 1)
++		return -EPROTO;
++
++	switch (config[1]) {
++	case 0:
++		*speed = SPEED_1000;
++		break;
++	case 1:
++		*speed = SPEED_2500;
++		break;
++	case 2:
++		*speed = SPEED_5000;
++		break;
++	case 3:
++		*speed = SPEED_10000;
++		break;
++	default:
++		return -EPROTO;
++	}
++
++	*pcs_encoding = config[0];
++	*op_mode = config[2];
++
++	return 0;
++}
++
++static int as21xxx_dpc_pcs_set(struct phy_device *phydev, u8 pcs_encoding,
++			       u8 speed, u8 op_mode)
++{
++	u8 config[] = { pcs_encoding, speed, op_mode };
++
++	return as21xxx_ipc_debug_xfer(phydev, AS21XXX_DBGCMD_DPC,
++				      AS21XXX_DBGCMD_DPC_PCS_SET,
++				      config, sizeof(config), NULL, 0);
++}
++
++static int as21xxx_configure_dpc_pcs(struct phy_device *phydev)
++{
++	struct as21xxx_priv *priv = phydev->priv;
++	u8 speed;
++	int ret;
++
++	if (!of_property_read_bool(phydev->mdio.dev.of_node,
++				   AS21XXX_DIAG_PCS_PROPERTY))
++		return 0;
++
++	priv->diag_pcs_attempted = true;
++	priv->diag_pcs_request_op_mode = 0;
++
++	switch (phydev->interface) {
++	case PHY_INTERFACE_MODE_USXGMII:
++	case PHY_INTERFACE_MODE_10GBASER:
++		priv->diag_pcs_request_encoding = 1;
++		priv->diag_pcs_request_speed = SPEED_10000;
++		speed = 3;
++		break;
++	case PHY_INTERFACE_MODE_5GBASER:
++		priv->diag_pcs_request_encoding = 1;
++		priv->diag_pcs_request_speed = SPEED_5000;
++		speed = 2;
++		break;
++	case PHY_INTERFACE_MODE_2500BASEX:
++		priv->diag_pcs_request_encoding = 0;
++		priv->diag_pcs_request_speed = SPEED_2500;
++		speed = 1;
++		break;
++	case PHY_INTERFACE_MODE_SGMII:
++		priv->diag_pcs_request_encoding = 0;
++		priv->diag_pcs_request_speed = SPEED_1000;
++		speed = 0;
++		break;
++	default:
++		priv->diag_pcs_result = -EOPNOTSUPP;
++		return priv->diag_pcs_result;
++	}
++
++	ret = as21xxx_dpc_pcs_get(phydev, &priv->diag_pcs_before_encoding,
++				  &priv->diag_pcs_before_speed,
++				  &priv->diag_pcs_before_op_mode);
++	if (!ret)
++		priv->diag_pcs_before_valid = true;
++
++	ret = as21xxx_dpc_pcs_set(phydev, priv->diag_pcs_request_encoding,
++				  speed, priv->diag_pcs_request_op_mode);
++	if (ret)
++		goto out;
++
++	ret = as21xxx_dpc_pcs_get(phydev, &priv->diag_pcs_after_encoding,
++				  &priv->diag_pcs_after_speed,
++				  &priv->diag_pcs_after_op_mode);
++	if (ret)
++		goto out;
++
++	priv->diag_pcs_after_valid = true;
++	if (priv->diag_pcs_after_encoding !=
++	    priv->diag_pcs_request_encoding ||
++	    priv->diag_pcs_after_speed != priv->diag_pcs_request_speed ||
++	    priv->diag_pcs_after_op_mode != priv->diag_pcs_request_op_mode)
++		ret = -EIO;
++	else
++		priv->diag_pcs_verified = true;
++
++out:
++	priv->diag_pcs_result = ret;
++	return ret;
++}
++
++static int as21xxx_dpc_ra_get(struct phy_device *phydev, bool *enabled)
++{
++	u8 value = 0;
++	int ret;
++
++	ret = as21xxx_ipc_debug_xfer(phydev, AS21XXX_DBGCMD_DPC,
++				     AS21XXX_DBGCMD_DPC_RA_GET,
++				     NULL, 0, &value, sizeof(value));
++	if (ret)
++		return ret;
++	if (value > 1)
++		return -EPROTO;
++
++	*enabled = value;
++
++	return 0;
++}
++
++static int as21xxx_dpc_ra_set(struct phy_device *phydev, bool enabled)
++{
++	u8 value = enabled;
++
++	return as21xxx_ipc_debug_xfer(phydev, AS21XXX_DBGCMD_DPC,
++				      AS21XXX_DBGCMD_DPC_RA_SET,
++				      &value, sizeof(value), NULL, 0);
++}
++
+ static int as21xxx_dpc_ra_enable(struct phy_device *phydev)
+ {
+ 	u16 tx[] = {
+@@ -695,10 +1024,348 @@ static int as21xxx_dpc_ra_enable(struct phy_device *phydev)
+ 		IPC_CFG_PARAM_DIRECT_DPC_RA,
+ 	};
+ 
+-	return as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
++	return as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, sizeof(tx),
+ 				NULL, 0, NULL);
+ }
+ 
++static int as21xxx_configure_dpc_ra(struct phy_device *phydev)
++{
++	bool expected;
++	bool enabled;
++	int ret;
++
++	switch (phydev->interface) {
++	case PHY_INTERFACE_MODE_10GBASER:
++	case PHY_INTERFACE_MODE_5GBASER:
++	case PHY_INTERFACE_MODE_2500BASEX:
++	case PHY_INTERFACE_MODE_SGMII:
++		expected = false;
++		ret = as21xxx_dpc_ra_set(phydev, expected);
++		break;
++	case PHY_INTERFACE_MODE_USXGMII:
++		expected = true;
++		ret = as21xxx_dpc_ra_enable(phydev);
++		break;
++	default:
++		return as21xxx_dpc_ra_enable(phydev);
++	}
++	if (ret)
++		return ret;
++
++	ret = as21xxx_dpc_ra_get(phydev, &enabled);
++	if (ret)
++		return ret;
++
++	if (enabled != expected) {
++		phydev_err(phydev, "DPC RA readback mismatch: expected %u, got %u\n",
++			   expected, enabled);
++		return -EIO;
++	}
++
++	return 0;
++}
++
++enum as21xxx_diag_stat {
++	AS21XXX_STAT_ERR_BLK,
++	AS21XXX_STAT_BER_CNT,
++	AS21XXX_STAT_HI_BER,
++	AS21XXX_STAT_CFR_CNT,
++	AS21XXX_STAT_LDPC_ERR,
++	AS21XXX_STAT_CU_AN_CNT,
++	AS21XXX_STAT_ETH_CRC_ERR,
++	AS21XXX_STAT_SDS_CRC_ERR,
++	AS21XXX_STAT_DPC_CNT2,
++	AS21XXX_STAT_PCS_64B66B,
++	AS21XXX_STAT_SERDES_SPEED,
++	AS21XXX_STAT_PCS_OP_MODE,
++	AS21XXX_STAT_DPC_RA_MODE,
++	AS21XXX_STAT_PCS_CFG_ATTEMPTED,
++	AS21XXX_STAT_PCS_REQ_64B66B,
++	AS21XXX_STAT_PCS_REQ_SPEED,
++	AS21XXX_STAT_PCS_REQ_OP_MODE,
++	AS21XXX_STAT_PCS_BEFORE_VALID,
++	AS21XXX_STAT_PCS_BEFORE_64B66B,
++	AS21XXX_STAT_PCS_BEFORE_SPEED,
++	AS21XXX_STAT_PCS_BEFORE_OP_MODE,
++	AS21XXX_STAT_PCS_AFTER_VALID,
++	AS21XXX_STAT_PCS_AFTER_64B66B,
++	AS21XXX_STAT_PCS_AFTER_SPEED,
++	AS21XXX_STAT_PCS_AFTER_OP_MODE,
++	AS21XXX_STAT_PCS_CFG_ERRNO,
++	AS21XXX_STAT_PCS_CFG_VERIFIED,
++	AS21XXX_STAT_VALID_MASK,
++	AS21XXX_STAT_COUNT,
++};
++
++static const char as21xxx_diag_stat_names[][ETH_GSTRING_LEN] = {
++	[AS21XXX_STAT_ERR_BLK] = "fw_err_blk",
++	[AS21XXX_STAT_BER_CNT] = "fw_ber_cnt",
++	[AS21XXX_STAT_HI_BER] = "fw_hi_ber",
++	[AS21XXX_STAT_CFR_CNT] = "fw_cfr_cnt",
++	[AS21XXX_STAT_LDPC_ERR] = "fw_ldpc_err",
++	[AS21XXX_STAT_CU_AN_CNT] = "fw_cu_an_cnt",
++	[AS21XXX_STAT_ETH_CRC_ERR] = "fw_eth_crc_err",
++	[AS21XXX_STAT_SDS_CRC_ERR] = "fw_sds_crc_err",
++	[AS21XXX_STAT_DPC_CNT2] = "fw_dpc_cnt2",
++	[AS21XXX_STAT_PCS_64B66B] = "fw_pcs_64b66b",
++	[AS21XXX_STAT_SERDES_SPEED] = "fw_serdes_speed_mbps",
++	[AS21XXX_STAT_PCS_OP_MODE] = "fw_pcs_op_mode",
++	[AS21XXX_STAT_DPC_RA_MODE] = "fw_dpc_ra_mode",
++	[AS21XXX_STAT_PCS_CFG_ATTEMPTED] = "fw_pcs_cfg_attempted",
++	[AS21XXX_STAT_PCS_REQ_64B66B] = "fw_pcs_req_64b66b",
++	[AS21XXX_STAT_PCS_REQ_SPEED] = "fw_pcs_req_speed_mbps",
++	[AS21XXX_STAT_PCS_REQ_OP_MODE] = "fw_pcs_req_op_mode",
++	[AS21XXX_STAT_PCS_BEFORE_VALID] = "fw_pcs_before_valid",
++	[AS21XXX_STAT_PCS_BEFORE_64B66B] = "fw_pcs_before_64b66b",
++	[AS21XXX_STAT_PCS_BEFORE_SPEED] = "fw_pcs_before_speed_mbps",
++	[AS21XXX_STAT_PCS_BEFORE_OP_MODE] = "fw_pcs_before_op_mode",
++	[AS21XXX_STAT_PCS_AFTER_VALID] = "fw_pcs_after_valid",
++	[AS21XXX_STAT_PCS_AFTER_64B66B] = "fw_pcs_after_64b66b",
++	[AS21XXX_STAT_PCS_AFTER_SPEED] = "fw_pcs_after_speed_mbps",
++	[AS21XXX_STAT_PCS_AFTER_OP_MODE] = "fw_pcs_after_op_mode",
++	[AS21XXX_STAT_PCS_CFG_ERRNO] = "fw_pcs_cfg_errno",
++	[AS21XXX_STAT_PCS_CFG_VERIFIED] = "fw_pcs_cfg_verified",
++	[AS21XXX_STAT_VALID_MASK] = "fw_diag_valid_mask",
++};
++
++static_assert(ARRAY_SIZE(as21xxx_diag_stat_names) == AS21XXX_STAT_COUNT);
++
++static int as21xxx_get_sset_count(struct phy_device *phydev)
++{
++	return AS21XXX_STAT_COUNT;
++}
++
++static void as21xxx_get_strings(struct phy_device *phydev, u8 *data)
++{
++	int i;
++
++	for (i = 0; i < AS21XXX_STAT_COUNT; i++)
++		ethtool_puts(&data, as21xxx_diag_stat_names[i]);
++}
++
++static void as21xxx_get_stats(struct phy_device *phydev,
++			      struct ethtool_stats *stats, u64 *data)
++{
++	struct as21xxx_priv *priv = phydev->priv;
++	u32 counters[AS21XXX_FW_COUNTERS];
++	u32 valid = 0;
++	u16 speed;
++	bool ra_enabled;
++	u8 pcs_encoding;
++	u8 op_mode;
++	int ret;
++	int i;
++
++	for (i = 0; i < AS21XXX_STAT_COUNT; i++)
++		data[i] = U64_MAX;
++
++	ret = as21xxx_read_fw_counters(phydev, counters);
++	if (!ret) {
++		for (i = 0; i < AS21XXX_FW_COUNTERS; i++)
++			data[i] = counters[i];
++		valid |= AS21XXX_DIAG_COUNTERS_VALID;
++	} else {
++		phydev_dbg(phydev, "failed to read firmware counters: %pe\n",
++			   ERR_PTR(ret));
++	}
++
++	ret = as21xxx_dpc_pcs_get(phydev, &pcs_encoding, &speed, &op_mode);
++	if (!ret) {
++		data[AS21XXX_STAT_PCS_64B66B] = pcs_encoding;
++		data[AS21XXX_STAT_SERDES_SPEED] = speed;
++		data[AS21XXX_STAT_PCS_OP_MODE] = op_mode;
++		valid |= AS21XXX_DIAG_PCS_VALID;
++	} else {
++		phydev_dbg(phydev, "failed to read firmware PCS state: %pe\n",
++			   ERR_PTR(ret));
++	}
++
++	ret = as21xxx_dpc_ra_get(phydev, &ra_enabled);
++	if (!ret) {
++		data[AS21XXX_STAT_DPC_RA_MODE] = ra_enabled;
++		valid |= AS21XXX_DIAG_RA_VALID;
++	} else {
++		phydev_dbg(phydev, "failed to read firmware DPC RA state: %pe\n",
++			   ERR_PTR(ret));
++	}
++
++	data[AS21XXX_STAT_PCS_CFG_ATTEMPTED] = priv->diag_pcs_attempted;
++	if (priv->diag_pcs_attempted) {
++		data[AS21XXX_STAT_PCS_REQ_64B66B] =
++			priv->diag_pcs_request_encoding;
++		data[AS21XXX_STAT_PCS_REQ_SPEED] =
++			priv->diag_pcs_request_speed;
++		data[AS21XXX_STAT_PCS_REQ_OP_MODE] =
++			priv->diag_pcs_request_op_mode;
++		data[AS21XXX_STAT_PCS_BEFORE_VALID] =
++			priv->diag_pcs_before_valid;
++		if (priv->diag_pcs_before_valid) {
++			data[AS21XXX_STAT_PCS_BEFORE_64B66B] =
++				priv->diag_pcs_before_encoding;
++			data[AS21XXX_STAT_PCS_BEFORE_SPEED] =
++				priv->diag_pcs_before_speed;
++			data[AS21XXX_STAT_PCS_BEFORE_OP_MODE] =
++				priv->diag_pcs_before_op_mode;
++		}
++		data[AS21XXX_STAT_PCS_AFTER_VALID] =
++			priv->diag_pcs_after_valid;
++		if (priv->diag_pcs_after_valid) {
++			data[AS21XXX_STAT_PCS_AFTER_64B66B] =
++				priv->diag_pcs_after_encoding;
++			data[AS21XXX_STAT_PCS_AFTER_SPEED] =
++				priv->diag_pcs_after_speed;
++			data[AS21XXX_STAT_PCS_AFTER_OP_MODE] =
++				priv->diag_pcs_after_op_mode;
++			valid |= AS21XXX_DIAG_PCS_CONFIG_VALID;
++		}
++		data[AS21XXX_STAT_PCS_CFG_ERRNO] =
++			priv->diag_pcs_result < 0 ? -priv->diag_pcs_result : 0;
++		data[AS21XXX_STAT_PCS_CFG_VERIFIED] =
++			priv->diag_pcs_verified;
++	}
++
++	data[AS21XXX_STAT_VALID_MASK] = valid;
++}
++
++static int as21xxx_debugfs_dpc_ra_get(void *data, u64 *value)
++{
++	struct phy_device *phydev = data;
++	bool enabled;
++	int ret;
++
++	ret = as21xxx_dpc_ra_get(phydev, &enabled);
++	if (!ret)
++		*value = enabled;
++
++	return ret;
++}
++
++static int as21xxx_debugfs_dpc_ra_set(void *data, u64 value)
++{
++	struct phy_device *phydev = data;
++	bool requested = value;
++	bool old_value;
++	bool readback;
++	int restore_ret;
++	int ret;
++
++	if (value > 1)
++		return -EINVAL;
++
++	rtnl_lock();
++	if (phydev->attached_dev && netif_running(phydev->attached_dev)) {
++		ret = -EBUSY;
++		goto out;
++	}
++
++	ret = as21xxx_dpc_ra_get(phydev, &old_value);
++	if (ret || old_value == requested)
++		goto out;
++
++	ret = as21xxx_dpc_ra_set(phydev, requested);
++	if (ret)
++		goto out;
++
++	ret = as21xxx_dpc_ra_get(phydev, &readback);
++	if (!ret && readback == requested)
++		goto out;
++
++	restore_ret = as21xxx_dpc_ra_set(phydev, old_value);
++	if (restore_ret)
++		phydev_err(phydev, "failed to restore DPC RA mode: %pe\n",
++			   ERR_PTR(restore_ret));
++	if (!ret)
++		ret = -EIO;
++
++out:
++	rtnl_unlock();
++
++	return ret;
++}
++
++DEFINE_DEBUGFS_ATTRIBUTE(as21xxx_debugfs_dpc_ra_fops,
++			 as21xxx_debugfs_dpc_ra_get,
++			 as21xxx_debugfs_dpc_ra_set, "%llu\n");
++
++static int as21xxx_debugfs_counter_clear_get(void *data, u64 *value)
++{
++	*value = 0;
++	return 0;
++}
++
++static int as21xxx_debugfs_counter_clear_set(void *data, u64 value)
++{
++	struct phy_device *phydev = data;
++	int ret;
++
++	if (value != 1)
++		return -EINVAL;
++
++	ret = as21xxx_ipc_debug_xfer(phydev, AS21XXX_DBGCMD_CU_AN,
++				     AS21XXX_DBGCMD_CU_AN_CNT_CLEAR,
++				     NULL, 0, NULL, 0);
++	if (ret)
++		return ret;
++
++	ret = as21xxx_ipc_debug_xfer(phydev, AS21XXX_DBGCMD_NGPHY,
++				     AS21XXX_DBGCMD_NGPHY_CNT_CLEAR,
++				     NULL, 0, NULL, 0);
++	if (ret)
++		return ret;
++
++	return as21xxx_ipc_debug_xfer(phydev, AS21XXX_DBGCMD_DPC,
++				      AS21XXX_DBGCMD_DPC_CNT_CLEAR,
++				      NULL, 0, NULL, 0);
++}
++
++DEFINE_DEBUGFS_ATTRIBUTE(as21xxx_debugfs_counter_clear_fops,
++			 as21xxx_debugfs_counter_clear_get,
++			 as21xxx_debugfs_counter_clear_set, "%llu\n");
++
++static void as21xxx_debugfs_remove(void *data)
++{
++	debugfs_remove(data);
++}
++
++static void as21xxx_debugfs_register(struct phy_device *phydev)
++{
++	struct device *dev = &phydev->mdio.dev;
++	struct dentry *root;
++	struct dentry *file;
++	char *name;
++	int ret;
++
++	name = devm_kasprintf(dev, GFP_KERNEL, "as21xxx-%s", dev_name(dev));
++	if (!name)
++		return;
++
++	root = debugfs_create_dir(name, NULL);
++	if (IS_ERR_OR_NULL(root))
++		return;
++
++	file = debugfs_create_file("dpc_ra_mode", 0600, root, phydev,
++				   &as21xxx_debugfs_dpc_ra_fops);
++	if (IS_ERR_OR_NULL(file)) {
++		debugfs_remove(root);
++		return;
++	}
++
++	if (of_property_read_bool(phydev->mdio.dev.of_node,
++				  AS21XXX_DIAG_PCS_PROPERTY)) {
++		file = debugfs_create_file("fw_counter_clear", 0600, root,
++					   phydev,
++					   &as21xxx_debugfs_counter_clear_fops);
++		if (IS_ERR_OR_NULL(file))
++			phydev_warn(phydev,
++				    "failed to create counter-clear debugfs file\n");
++	}
++
++	ret = devm_add_action_or_reset(dev, as21xxx_debugfs_remove, root);
++	if (ret)
++		phydev_warn(phydev, "failed to register debugfs cleanup: %pe\n",
++			    ERR_PTR(ret));
++}
++
+ static int as21xxx_cu_an_set_top_speed_changed(struct phy_device *phydev,
+ 					       u16 top_speed)
+ {
+@@ -715,7 +1382,7 @@ static int as21xxx_cu_an_set_top_speed_changed(struct phy_device *phydev,
+ 	    priv->cu_an_top_speed == top_speed)
+ 		return 0;
+ 
+-	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
++	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, sizeof(tx),
+ 			       NULL, 0, NULL);
+ 	if (ret)
+ 		return ret;
+@@ -734,7 +1401,7 @@ static int as21xxx_cu_an_restart(struct phy_device *phydev)
+ 		IPC_CMD_CFG_CU_AN_RESTART,
+ 	};
+ 
+-	return as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
++	return as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, sizeof(tx),
+ 				NULL, 0, NULL);
+ }
+ 
+@@ -755,7 +1422,7 @@ static int as21xxx_apply_led_config_locked(struct phy_device *phydev)
+ 
+ 	return as21xxx_ipc_xfer_locked(phydev, IPC_CMD_SET_LED,
+ 				       priv->led_config,
+-				       ARRAY_SIZE(priv->led_config),
++				       sizeof(priv->led_config),
+ 				       NULL, 0, NULL);
+ }
+ 
+@@ -770,7 +1437,13 @@ static int as21xxx_config_init(struct phy_device *phydev)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = as21xxx_dpc_ra_enable(phydev);
++	ret = as21xxx_configure_dpc_pcs(phydev);
++	if (ret)
++		phydev_warn(phydev,
++			    "DPC PCS diagnostic configuration failed: %pe\n",
++			    ERR_PTR(ret));
++
++	ret = as21xxx_configure_dpc_ra(phydev);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -910,9 +1583,9 @@ static int as21xxx_temp_monitor(struct phy_device *phydev, u16 sub_cmd,
+ 	unsigned int rx_bytes;
+ 	int ret;
+ 
+-	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, ARRAY_SIZE(tx),
++	ret = as21xxx_ipc_xfer(phydev, IPC_CMD_CFG_PARAM, tx, sizeof(tx),
+ 			       ret_data ? rx : NULL,
+-			       ret_data ? ARRAY_SIZE(rx) : 0,
++			       ret_data ? sizeof(rx) : 0,
+ 			       ret_data ? &rx_bytes : NULL);
+ 	if (ret)
+ 		return ret;
+@@ -1053,6 +1726,8 @@ static int as21xxx_probe(struct phy_device *phydev)
+ 		phydev_warn(phydev, "failed to register hwmon device: %pe\n",
+ 			    ERR_PTR(ret));
+ 
++	as21xxx_debugfs_register(phydev);
++
+ 	return 0;
+ }
+ 
+@@ -1477,6 +2152,9 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
++		.get_sset_count = as21xxx_get_sset_count,
++		.get_strings	= as21xxx_get_strings,
++		.get_stats	= as21xxx_get_stats,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+ 		.led_hw_is_supported = as21xxx_led_hw_is_supported,
+@@ -1494,6 +2172,9 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
++		.get_sset_count = as21xxx_get_sset_count,
++		.get_strings	= as21xxx_get_strings,
++		.get_stats	= as21xxx_get_stats,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+ 		.led_hw_is_supported = as21xxx_led_hw_is_supported,
+@@ -1511,6 +2192,9 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
++		.get_sset_count = as21xxx_get_sset_count,
++		.get_strings	= as21xxx_get_strings,
++		.get_stats	= as21xxx_get_stats,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+ 		.led_hw_is_supported = as21xxx_led_hw_is_supported,
+@@ -1528,6 +2212,9 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
++		.get_sset_count = as21xxx_get_sset_count,
++		.get_strings	= as21xxx_get_strings,
++		.get_stats	= as21xxx_get_stats,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+ 		.led_hw_is_supported = as21xxx_led_hw_is_supported,
+@@ -1545,6 +2232,9 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
++		.get_sset_count = as21xxx_get_sset_count,
++		.get_strings	= as21xxx_get_strings,
++		.get_stats	= as21xxx_get_stats,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+ 		.led_hw_is_supported = as21xxx_led_hw_is_supported,
+@@ -1562,6 +2252,9 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
++		.get_sset_count = as21xxx_get_sset_count,
++		.get_strings	= as21xxx_get_strings,
++		.get_stats	= as21xxx_get_stats,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+ 		.led_hw_is_supported = as21xxx_led_hw_is_supported,
+@@ -1579,6 +2272,9 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
++		.get_sset_count = as21xxx_get_sset_count,
++		.get_strings	= as21xxx_get_strings,
++		.get_stats	= as21xxx_get_stats,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+ 		.led_hw_is_supported = as21xxx_led_hw_is_supported,
+@@ -1596,6 +2292,9 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
++		.get_sset_count = as21xxx_get_sset_count,
++		.get_strings	= as21xxx_get_strings,
++		.get_stats	= as21xxx_get_stats,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+ 		.led_hw_is_supported = as21xxx_led_hw_is_supported,
+@@ -1613,6 +2312,9 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
++		.get_sset_count = as21xxx_get_sset_count,
++		.get_strings	= as21xxx_get_strings,
++		.get_stats	= as21xxx_get_stats,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+ 		.led_hw_is_supported = as21xxx_led_hw_is_supported,
+@@ -1630,6 +2332,9 @@ static struct phy_driver as21xxx_drivers[] = {
+ 		.match_phy_device = as21xxx_match_phy_device,
+ 		.get_features	= as21xxx_get_features,
+ 		.read_status	= as21xxx_read_status,
++		.get_sset_count = as21xxx_get_sset_count,
++		.get_strings	= as21xxx_get_strings,
++		.get_stats	= as21xxx_get_stats,
+ 		.read_mmd	= as21xxx_read_mmd,
+ 		.led_brightness_set = as21xxx_led_brightness_set,
+ 		.led_hw_is_supported = as21xxx_led_hw_is_supported,

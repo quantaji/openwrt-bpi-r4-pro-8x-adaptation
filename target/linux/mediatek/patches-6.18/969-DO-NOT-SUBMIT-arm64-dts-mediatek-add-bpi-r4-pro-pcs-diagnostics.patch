@@ -1,0 +1,179 @@
+From: Codex <codex@openai.com>
+Date: Sun, 16 Aug 2026 00:00:00 -0700
+Subject: [PATCH] DO NOT SUBMIT: arm64: dts: mediatek: add BPI-R4 Pro PCS diagnostics
+
+Add four diagnostic wrappers for the BPI-R4 Pro 8X description. Each
+wrapper changes only the MxL-facing AS21 at MDIO address 0x18 and MxL
+port 13/channel 1. The combo-WAN PHY at address 0x1c and both SFP paths
+continue to use the base board description unchanged.
+
+The wrappers select USXGMII, 10GBase-R, 5GBase-R, or 2500Base-X and
+opt the target AS21 into the verified firmware PCS diagnostics. The
+USXGMII and 10GBase-R wrappers also enable the MxL flow-control
+diagnostics used for their strict comparison. Fixed Base-R/Base-X modes
+remove in-band management; USXGMII keeps it.
+
+These temporary diagnostic descriptions were written by Codex.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-usxgmii.dts b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-usxgmii.dts
+new file mode 100644
+index 0000000000..75017163fd
+--- /dev/null
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-usxgmii.dts
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: (GPL-2.0 OR MIT)
++
++/dts-v1/;
++
++#include "mt7988a-bananapi-bpi-r4-pro-8x.dts"
++
++/ {
++	model = "Bananapi BPI-R4 Pro 8X (AS21/MxL USXGMII diagnostic)";
++};
++
++&phy18 {
++	aeonsemi,dpc-pcs-diagnostic;
++};
++
++&switch16 {
++	maxlinear,flow-control-diagnostic;
++
++	ports {
++		port@13 {
++			phy-mode = "usxgmii";
++			phy-connection-type = "usxgmii";
++			managed = "in-band-status";
++		};
++	};
++
++	mux-bus {
++		ds-mux@13 {
++			channel@1 {
++				phy-mode = "usxgmii";
++				phy-connection-type = "usxgmii";
++				managed = "in-band-status";
++			};
++		};
++	};
++};
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-10gbase-r.dts b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-10gbase-r.dts
+new file mode 100644
+index 0000000000..8e320ed73a
+--- /dev/null
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-10gbase-r.dts
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: (GPL-2.0 OR MIT)
++
++/dts-v1/;
++
++#include "mt7988a-bananapi-bpi-r4-pro-8x.dts"
++
++/ {
++	model = "Bananapi BPI-R4 Pro 8X (AS21/MxL 10GBASE-R diagnostic)";
++};
++
++&phy18 {
++	aeonsemi,dpc-pcs-diagnostic;
++};
++
++&switch16 {
++	maxlinear,flow-control-diagnostic;
++
++	ports {
++		port@13 {
++			phy-mode = "10gbase-r";
++			phy-connection-type = "10gbase-r";
++			/delete-property/ managed;
++		};
++	};
++
++	mux-bus {
++		ds-mux@13 {
++			channel@1 {
++				phy-mode = "10gbase-r";
++				phy-connection-type = "10gbase-r";
++				/delete-property/ managed;
++			};
++		};
++	};
++};
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-5gbase-r.dts b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-5gbase-r.dts
+new file mode 100644
+index 0000000000..96351a2ccc
+--- /dev/null
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-5gbase-r.dts
+@@ -0,0 +1,33 @@
++// SPDX-License-Identifier: (GPL-2.0 OR MIT)
++
++/dts-v1/;
++
++#include "mt7988a-bananapi-bpi-r4-pro-8x.dts"
++
++/ {
++	model = "Bananapi BPI-R4 Pro 8X (AS21/MxL 5GBASE-R diagnostic)";
++};
++
++&phy18 {
++	aeonsemi,dpc-pcs-diagnostic;
++};
++
++&switch16 {
++	ports {
++		port@13 {
++			phy-mode = "5gbase-r";
++			phy-connection-type = "5gbase-r";
++			/delete-property/ managed;
++		};
++	};
++
++	mux-bus {
++		ds-mux@13 {
++			channel@1 {
++				phy-mode = "5gbase-r";
++				phy-connection-type = "5gbase-r";
++				/delete-property/ managed;
++			};
++		};
++	};
++};
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-2500base-x.dts b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-2500base-x.dts
+new file mode 100644
+index 0000000000..55bbc7e322
+--- /dev/null
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x-diag-2500base-x.dts
+@@ -0,0 +1,33 @@
++// SPDX-License-Identifier: (GPL-2.0 OR MIT)
++
++/dts-v1/;
++
++#include "mt7988a-bananapi-bpi-r4-pro-8x.dts"
++
++/ {
++	model = "Bananapi BPI-R4 Pro 8X (AS21/MxL 2500BASE-X diagnostic)";
++};
++
++&phy18 {
++	aeonsemi,dpc-pcs-diagnostic;
++};
++
++&switch16 {
++	ports {
++		port@13 {
++			phy-mode = "2500base-x";
++			phy-connection-type = "2500base-x";
++			/delete-property/ managed;
++		};
++	};
++
++	mux-bus {
++		ds-mux@13 {
++			channel@1 {
++				phy-mode = "2500base-x";
++				phy-connection-type = "2500base-x";
++				/delete-property/ managed;
++			};
++		};
++	};
++};

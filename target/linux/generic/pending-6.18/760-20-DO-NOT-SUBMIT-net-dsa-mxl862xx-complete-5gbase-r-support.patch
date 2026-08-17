@@ -1,0 +1,75 @@
+From: Codex <codex@openai.com>
+Date: Sun, 16 Aug 2026 00:00:00 -0700
+Subject: [PATCH] DO NOT SUBMIT: net: dsa: mxl862xx: complete 5GBase-R support
+
+The MaxLinear driver already carries the firmware 5GBase-R XPCS
+interface value, but does not expose PHY_INTERFACE_MODE_5GBASER or map
+that mode through its phylink and XPCS operations.
+
+Complete the path for firmware 1.0.84 and later on the high-speed
+SerDes ports: advertise the interface, map it to the firmware value,
+report fixed 5 Gbit/s full-duplex state, reject in-band negotiation,
+and register it in each slot-zero PCS interface bitmap.
+
+This is diagnostic integration written by Codex for the firmware
+1.0.85 AS21-to-MxL rate-matched test. It does not alter existing
+USXGMII or 10GBase-R behavior.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c b/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
+index 488ac7815a..baff97c1e9 100644
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
+@@ -41,6 +41,9 @@ void mxl862xx_phylink_get_caps(struct dsa_switch *ds, int port,
+ 		__set_bit(PHY_INTERFACE_MODE_SGMII, config->supported_interfaces);
+ 		__set_bit(PHY_INTERFACE_MODE_1000BASEX, config->supported_interfaces);
+ 		__set_bit(PHY_INTERFACE_MODE_2500BASEX, config->supported_interfaces);
++		if (MXL862XX_FW_VER_MIN(priv, 1, 0, 84))
++			__set_bit(PHY_INTERFACE_MODE_5GBASER,
++				  config->supported_interfaces);
+ 		__set_bit(PHY_INTERFACE_MODE_10GBASER, config->supported_interfaces);
+ 		__set_bit(PHY_INTERFACE_MODE_10GKR, config->supported_interfaces);
+ 		__set_bit(PHY_INTERFACE_MODE_USXGMII, config->supported_interfaces);
+@@ -224,6 +227,8 @@ static int mxl862xx_xpcs_if_mode(phy_interface_t interface)
+ 		return MXL862XX_XPCS_IF_1000BASEX;
+ 	case PHY_INTERFACE_MODE_2500BASEX:
+ 		return MXL862XX_XPCS_IF_2500BASEX;
++	case PHY_INTERFACE_MODE_5GBASER:
++		return MXL862XX_XPCS_IF_5GBASER;
+ 	case PHY_INTERFACE_MODE_USXGMII:
+ 	case PHY_INTERFACE_MODE_10G_QXGMII:
+ 		return MXL862XX_XPCS_IF_USXGMII;
+@@ -438,6 +443,13 @@ static void mxl862xx_pcs_get_state(struct phylink_pcs *pcs,
+ 		}
+ 		break;
+ 
++	case PHY_INTERFACE_MODE_5GBASER:
++		if (state->link) {
++			state->speed = SPEED_5000;
++			state->duplex = DUPLEX_FULL;
++		}
++		break;
++
+ 	default:
+ 		state->link = false;
+ 		break;
+@@ -532,6 +544,7 @@ static unsigned int mxl862xx_pcs_inband_caps(struct phylink_pcs *pcs,
+ 	case PHY_INTERFACE_MODE_10GKR:
+ 		return LINK_INBAND_ENABLE;
+ 	case PHY_INTERFACE_MODE_10GBASER:
++	case PHY_INTERFACE_MODE_5GBASER:
+ 		return LINK_INBAND_DISABLE;
+ 	default:
+ 		return 0;
+@@ -567,6 +580,9 @@ void mxl862xx_setup_pcs(struct mxl862xx_priv *priv, struct mxl862xx_pcs *pcs,
+ 	if (pcs->slot != 0)
+ 		return;
+ 
++	if (MXL862XX_FW_VER_MIN(priv, 1, 0, 84))
++		__set_bit(PHY_INTERFACE_MODE_5GBASER,
++			  pcs->pcs.supported_interfaces);
+ 	__set_bit(PHY_INTERFACE_MODE_SGMII, pcs->pcs.supported_interfaces);
+ 	__set_bit(PHY_INTERFACE_MODE_1000BASEX, pcs->pcs.supported_interfaces);
+ 	__set_bit(PHY_INTERFACE_MODE_2500BASEX, pcs->pcs.supported_interfaces);
+

@@ -1,0 +1,394 @@
+From: Codex <codex@openai.com>
+Date: Sun, 16 Aug 2026 00:00:00 -0700
+Subject: [PATCH] DO NOT SUBMIT: net: dsa: mxl862xx: expose XPCS state
+
+Reuse the driver's existing XPCS_GET_STATE request and append its live
+firmware result to the ethtool SerDes statistics for ports 9 and 13.
+Also record the completed XPCS PCS_CONFIG and PCS_LINK_UP calls, including
+the firmware interface, negotiation mode, pause policy, resolved speed,
+duplex, and returned error.  This shows whether 10GBase-R configuration and
+the external PHY's resolved copper speed reached the MxL firmware.
+
+Keep the existing EQ fields and firmware-version gate unchanged.  Count and
+validity fields distinguish calls that have not happened and unavailable
+XPCS reads from real zero-valued results.  Apart from a rate-limited warning
+when PCS_LINK_UP fails, the diagnostic does not alter command decisions.
+
+The XPCS APIs were introduced by Daniel Golle's upstream MxL862xx driver
+work.  This diagnostic exposure and command recording are temporary test
+code written by Codex.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c b/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
+index 0bccef8..488ac78 100644
+--- a/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
++++ b/drivers/net/dsa/mxl862xx/mxl862xx-phylink.c
+@@ -303,7 +303,7 @@ static int mxl862xx_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
+ 	struct mxl862xx_pcs *mpcs = pcs_to_mxl862xx_pcs(pcs);
+ 	struct mxl862xx_priv *priv = mpcs->priv;
+ 	struct mxl862xx_xpcs_pcs_cfg cfg = {};
+-	int if_mode, lane, ret, adv;
++	int if_mode, neg, lane, ret, adv;
+ 
+ 	if_mode = mxl862xx_xpcs_if_mode(interface);
+ 	if (if_mode < 0) {
+@@ -324,6 +324,7 @@ static int mxl862xx_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
+ 	 */
+ 	lane = (interface == PHY_INTERFACE_MODE_10G_QXGMII) ?
+ 	       MXL862XX_XPCS_USX_QUAD : MXL862XX_XPCS_USX_SINGLE;
++	neg = mxl862xx_xpcs_neg_mode(neg_mode);
+ 
+ 	cfg.mode = cpu_to_le16(FIELD_PREP(MXL862XX_XPCS_CFG_PORT_ID,
+ 					  mpcs->serdes_id) |
+@@ -331,8 +332,7 @@ static int mxl862xx_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
+ 					  mpcs->slot) |
+ 			       FIELD_PREP(MXL862XX_XPCS_CFG_USX_LANE_MODE, lane) |
+ 			       FIELD_PREP(MXL862XX_XPCS_CFG_INTERFACE, if_mode) |
+-			       FIELD_PREP(MXL862XX_XPCS_CFG_NEG_MODE,
+-					  mxl862xx_xpcs_neg_mode(neg_mode)) |
++			       FIELD_PREP(MXL862XX_XPCS_CFG_NEG_MODE, neg) |
+ 			       FIELD_PREP(MXL862XX_XPCS_CFG_ROLE,
+ 					  MXL862XX_XPCS_ROLE_MAC) |
+ 			       FIELD_PREP(MXL862XX_XPCS_CFG_PERMIT_PAUSE,
+@@ -345,16 +345,50 @@ static int mxl862xx_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
+ 			cfg.advertising.cl37 = cpu_to_le16(adv);
+ 	}
+ 
++	WRITE_ONCE(mpcs->diag_cfg_interface, if_mode);
++	WRITE_ONCE(mpcs->diag_cfg_neg_mode, neg);
++	WRITE_ONCE(mpcs->diag_cfg_permit_pause, permit_pause_to_mac);
++
+ 	ret = MXL862XX_API_READ(priv, MXL862XX_XPCS_PCS_CONFIG, cfg);
+-	if (ret)
+-		return ret;
++	if (!ret) {
++		ret = (s16)le16_to_cpu(cfg.result);
++		if (ret < 0) {
++			ret = mxl862xx_xpcs_errno(ret);
++		} else {
++			mpcs->interface = interface;
++			ret = ret > 0 ? 1 : 0;
++		}
++	}
++
++	WRITE_ONCE(mpcs->diag_cfg_result, ret);
++	WRITE_ONCE(mpcs->diag_cfg_calls,
++		   READ_ONCE(mpcs->diag_cfg_calls) + 1);
++	return ret;
++}
++
++static int mxl862xx_xpcs_read_state(struct mxl862xx_pcs *mpcs,
++				    phy_interface_t interface,
++				    struct mxl862xx_xpcs_pcs_state *st)
++{
++	struct mxl862xx_priv *priv = mpcs->priv;
++	int if_mode, lane;
++
++	if_mode = mxl862xx_xpcs_if_mode(interface);
++	if (if_mode < 0)
++		return if_mode;
+ 
+-	ret = (s16)le16_to_cpu(cfg.result);
+-	if (ret < 0)
+-		return mxl862xx_xpcs_errno(ret);
++	lane = (interface == PHY_INTERFACE_MODE_10G_QXGMII) ?
++	       MXL862XX_XPCS_USX_QUAD : MXL862XX_XPCS_USX_SINGLE;
+ 
+-	mpcs->interface = interface;
+-	return ret > 0 ? 1 : 0;
++	memset(st, 0, sizeof(*st));
++	st->mode = cpu_to_le32(FIELD_PREP(MXL862XX_XPCS_ST_PORT_ID,
++					  mpcs->serdes_id) |
++			       FIELD_PREP(MXL862XX_XPCS_ST_INTERFACE, if_mode) |
++			       FIELD_PREP(MXL862XX_XPCS_ST_USX_SUBPORT,
++					  mpcs->slot) |
++			       FIELD_PREP(MXL862XX_XPCS_ST_USX_LANE_MODE, lane));
++
++	return MXL862XX_API_READ(priv, MXL862XX_XPCS_PCS_GET_STATE, *st);
+ }
+ 
+ static void mxl862xx_pcs_get_state(struct phylink_pcs *pcs,
+@@ -362,29 +396,12 @@ static void mxl862xx_pcs_get_state(struct phylink_pcs *pcs,
+ 				   struct phylink_link_state *state)
+ {
+ 	struct mxl862xx_pcs *mpcs = pcs_to_mxl862xx_pcs(pcs);
+-	struct mxl862xx_priv *priv = mpcs->priv;
+-	struct mxl862xx_xpcs_pcs_state st = {};
+-	int if_mode, lane, ret;
++	struct mxl862xx_xpcs_pcs_state st;
+ 	u32 mode;
+ 	u16 bmsr;
++	int ret;
+ 
+-	if_mode = mxl862xx_xpcs_if_mode(state->interface);
+-	if (if_mode < 0) {
+-		state->link = false;
+-		return;
+-	}
+-
+-	lane = (state->interface == PHY_INTERFACE_MODE_10G_QXGMII) ?
+-	       MXL862XX_XPCS_USX_QUAD : MXL862XX_XPCS_USX_SINGLE;
+-
+-	st.mode = cpu_to_le32(FIELD_PREP(MXL862XX_XPCS_ST_PORT_ID,
+-					 mpcs->serdes_id) |
+-			      FIELD_PREP(MXL862XX_XPCS_ST_INTERFACE, if_mode) |
+-			      FIELD_PREP(MXL862XX_XPCS_ST_USX_SUBPORT,
+-					 mpcs->slot) |
+-			      FIELD_PREP(MXL862XX_XPCS_ST_USX_LANE_MODE, lane));
+-
+-	ret = MXL862XX_API_READ(priv, MXL862XX_XPCS_PCS_GET_STATE, st);
++	ret = mxl862xx_xpcs_read_state(mpcs, state->interface, &st);
+ 	if (ret) {
+ 		state->link = false;
+ 		return;
+@@ -458,7 +475,7 @@ static void mxl862xx_pcs_link_up(struct phylink_pcs *pcs, unsigned int neg_mode,
+ 	struct mxl862xx_pcs *mpcs = pcs_to_mxl862xx_pcs(pcs);
+ 	struct mxl862xx_xpcs_pcs_link_up lu = {};
+ 	struct mxl862xx_priv *priv = mpcs->priv;
+-	int if_mode, lane, dup;
++	int if_mode, lane, dup, ret;
+ 
+ 	/* With inband-AN enabled (role=MAC), the XPCS auto-resolves
+ 	 * speed/duplex from the partner's AN word and the firmware
+@@ -486,7 +503,19 @@ static void mxl862xx_pcs_link_up(struct phylink_pcs *pcs, unsigned int neg_mode,
+ 			      FIELD_PREP(MXL862XX_XPCS_LU_DUPLEX, dup));
+ 	lu.speed = cpu_to_le16(speed);
+ 
+-	MXL862XX_API_WRITE(priv, MXL862XX_XPCS_PCS_LINK_UP, lu);
++	WRITE_ONCE(mpcs->diag_link_up_interface, if_mode);
++	WRITE_ONCE(mpcs->diag_link_up_speed, speed);
++	WRITE_ONCE(mpcs->diag_link_up_duplex, duplex);
++
++	ret = MXL862XX_API_WRITE(priv, MXL862XX_XPCS_PCS_LINK_UP, lu);
++	WRITE_ONCE(mpcs->diag_link_up_result, ret);
++	WRITE_ONCE(mpcs->diag_link_up_calls,
++		   READ_ONCE(mpcs->diag_link_up_calls) + 1);
++	if (ret)
++		dev_warn_ratelimited(priv->ds->dev,
++			"port %d: XPCS link-up failed for %s at %dMbps: %d\n",
++			MXL862XX_PCS_PORT(mpcs), phy_modes(interface), speed,
++			ret);
+ }
+ 
+ static unsigned int mxl862xx_pcs_inband_caps(struct phylink_pcs *pcs,
+@@ -597,6 +626,34 @@ const struct phylink_mac_ops mxl862xx_phylink_mac_ops = {
+ 
+ /* --- SerDes ethtool statistics --- */
+ 
++#define MXL862XX_SERDES_EQ_STATS	15
++
++enum mxl862xx_xpcs_diag_stat {
++	MXL862XX_XPCS_STAT_VALID,
++	MXL862XX_XPCS_STAT_INTERFACE,
++	MXL862XX_XPCS_STAT_LINK,
++	MXL862XX_XPCS_STAT_AN_COMPLETE,
++	MXL862XX_XPCS_STAT_PCS_FAULT,
++	MXL862XX_XPCS_STAT_SPEED,
++	MXL862XX_XPCS_STAT_DUPLEX,
++	MXL862XX_XPCS_STAT_PAUSE,
++	MXL862XX_XPCS_STAT_LPA,
++	MXL862XX_XPCS_STAT_LP_EEE,
++	MXL862XX_XPCS_STAT_LP_EEE_CS,
++	MXL862XX_XPCS_STAT_CFG_CALLS,
++	MXL862XX_XPCS_STAT_CFG_INTERFACE,
++	MXL862XX_XPCS_STAT_CFG_NEG_MODE,
++	MXL862XX_XPCS_STAT_CFG_PERMIT_PAUSE,
++	MXL862XX_XPCS_STAT_CFG_CHANGED,
++	MXL862XX_XPCS_STAT_CFG_ERRNO,
++	MXL862XX_XPCS_STAT_LINK_UP_CALLS,
++	MXL862XX_XPCS_STAT_LINK_UP_INTERFACE,
++	MXL862XX_XPCS_STAT_LINK_UP_SPEED,
++	MXL862XX_XPCS_STAT_LINK_UP_DUPLEX,
++	MXL862XX_XPCS_STAT_LINK_UP_ERRNO,
++	MXL862XX_XPCS_STAT_COUNT,
++};
++
+ static const char mxl862xx_serdes_stats[][ETH_GSTRING_LEN] = {
+ 	"serdes_tx_main",
+ 	"serdes_tx_pre",
+@@ -613,8 +670,33 @@ static const char mxl862xx_serdes_stats[][ETH_GSTRING_LEN] = {
+ 	"serdes_rx_dfe_bypass",
+ 	"serdes_rx_adapt_mode",
+ 	"serdes_rx_adapt_sel",
++	"xpcs_state_valid",
++	"xpcs_interface",
++	"xpcs_link",
++	"xpcs_an_complete",
++	"xpcs_pcs_fault",
++	"xpcs_speed_mbps",
++	"xpcs_duplex",
++	"xpcs_pause",
++	"xpcs_lpa",
++	"xpcs_lp_eee_cap",
++	"xpcs_lp_eee_cs_cap",
++	"xpcs_cfg_calls",
++	"xpcs_cfg_interface",
++	"xpcs_cfg_neg_mode",
++	"xpcs_cfg_permit_pause",
++	"xpcs_cfg_changed",
++	"xpcs_cfg_errno",
++	"xpcs_link_up_calls",
++	"xpcs_link_up_interface",
++	"xpcs_link_up_speed_mbps",
++	"xpcs_link_up_duplex",
++	"xpcs_link_up_errno",
+ };
+ 
++static_assert(ARRAY_SIZE(mxl862xx_serdes_stats) ==
++	      MXL862XX_SERDES_EQ_STATS + MXL862XX_XPCS_STAT_COUNT);
++
+ static bool mxl862xx_port_has_serdes_stats(struct dsa_switch *ds, int port)
+ {
+ 	struct mxl862xx_priv *priv = ds->priv;
+@@ -654,40 +736,108 @@ static u64 mxl862xx_eq_effective(const struct mxl862xx_xpcs_eq_item *it)
+ 
+ void mxl862xx_serdes_get_stats(struct dsa_switch *ds, int port, u64 *data)
+ {
++	struct mxl862xx_priv *priv = ds->priv;
++	struct mxl862xx_pcs *mpcs =
++		&priv->serdes_ports[port - MXL862XX_FIRST_SERDES_PORT];
+ 	struct mxl862xx_xpcs_eq_get eq = {
+ 		.port_id = MXL862XX_SERDES_PORT_ID(port),
+ 	};
+-	int ret;
++	struct mxl862xx_xpcs_pcs_state st;
++	u64 *xpcs_data = data + MXL862XX_SERDES_EQ_STATS;
++	u32 cfg_calls, link_up_calls;
++	u32 mode;
++	int i, result, ret;
+ 
+ 	if (!mxl862xx_port_has_serdes_stats(ds, port))
+ 		return;
+ 
+-	ret = MXL862XX_API_READ(ds->priv, MXL862XX_XPCS_EQ_GET, eq);
++	for (i = 0; i < ARRAY_SIZE(mxl862xx_serdes_stats); i++)
++		data[i] = U64_MAX;
++	xpcs_data[MXL862XX_XPCS_STAT_VALID] = 0;
++
++	cfg_calls = READ_ONCE(mpcs->diag_cfg_calls);
++	xpcs_data[MXL862XX_XPCS_STAT_CFG_CALLS] = cfg_calls;
++	if (cfg_calls) {
++		result = READ_ONCE(mpcs->diag_cfg_result);
++		xpcs_data[MXL862XX_XPCS_STAT_CFG_INTERFACE] =
++			READ_ONCE(mpcs->diag_cfg_interface);
++		xpcs_data[MXL862XX_XPCS_STAT_CFG_NEG_MODE] =
++			READ_ONCE(mpcs->diag_cfg_neg_mode);
++		xpcs_data[MXL862XX_XPCS_STAT_CFG_PERMIT_PAUSE] =
++			READ_ONCE(mpcs->diag_cfg_permit_pause);
++		xpcs_data[MXL862XX_XPCS_STAT_CFG_CHANGED] = result > 0;
++		xpcs_data[MXL862XX_XPCS_STAT_CFG_ERRNO] =
++			result < 0 ? -result : 0;
++	}
++
++	link_up_calls = READ_ONCE(mpcs->diag_link_up_calls);
++	xpcs_data[MXL862XX_XPCS_STAT_LINK_UP_CALLS] = link_up_calls;
++	if (link_up_calls) {
++		result = READ_ONCE(mpcs->diag_link_up_result);
++		xpcs_data[MXL862XX_XPCS_STAT_LINK_UP_INTERFACE] =
++			READ_ONCE(mpcs->diag_link_up_interface);
++		xpcs_data[MXL862XX_XPCS_STAT_LINK_UP_SPEED] =
++			READ_ONCE(mpcs->diag_link_up_speed);
++		xpcs_data[MXL862XX_XPCS_STAT_LINK_UP_DUPLEX] =
++			READ_ONCE(mpcs->diag_link_up_duplex);
++		xpcs_data[MXL862XX_XPCS_STAT_LINK_UP_ERRNO] =
++			result < 0 ? -result : 0;
++	}
++
++	ret = MXL862XX_API_READ(priv, MXL862XX_XPCS_EQ_GET, eq);
+ 	if (ret) {
+ 		dev_err(ds->dev,
+ 			"port %d: XPCS EQ_GET failed: %d\n", port, ret);
+-		return;
+-	}
+-	if ((s16)le16_to_cpu(eq.result) < 0) {
++	} else if ((s16)le16_to_cpu(eq.result) < 0) {
+ 		dev_err(ds->dev,
+ 			"port %d: XPCS EQ_GET firmware result: %d\n",
+ 			port, (s16)le16_to_cpu(eq.result));
++	} else {
++		data[0] = mxl862xx_eq_effective(&eq.tx.main);
++		data[1] = mxl862xx_eq_effective(&eq.tx.pre);
++		data[2] = mxl862xx_eq_effective(&eq.tx.post);
++		data[3] = mxl862xx_eq_effective(&eq.tx.iboost_lvl);
++		data[4] = mxl862xx_eq_effective(&eq.tx.vboost_lvl);
++		data[5] = mxl862xx_eq_effective(&eq.tx.vboost_en);
++		data[6] = mxl862xx_eq_effective(&eq.rx.att_lvl);
++		data[7] = mxl862xx_eq_effective(&eq.rx.vga1_gain);
++		data[8] = mxl862xx_eq_effective(&eq.rx.vga2_gain);
++		data[9] = mxl862xx_eq_effective(&eq.rx.ctle_boost);
++		data[10] = mxl862xx_eq_effective(&eq.rx.ctle_pole);
++		data[11] = mxl862xx_eq_effective(&eq.rx.dfe_tap1);
++		data[12] = mxl862xx_eq_effective(&eq.rx.dfe_bypass);
++		data[13] = mxl862xx_eq_effective(&eq.rx.adapt_mode);
++		data[14] = mxl862xx_eq_effective(&eq.rx.adapt_sel);
++	}
++
++	if (mpcs->interface == PHY_INTERFACE_MODE_NA)
++		return;
++
++	ret = mxl862xx_xpcs_read_state(mpcs, mpcs->interface, &st);
++	if (ret) {
++		dev_err(ds->dev, "port %d: XPCS GET_STATE failed: %d\n",
++			port, ret);
+ 		return;
+ 	}
+ 
+-	*data++ = mxl862xx_eq_effective(&eq.tx.main);
+-	*data++ = mxl862xx_eq_effective(&eq.tx.pre);
+-	*data++ = mxl862xx_eq_effective(&eq.tx.post);
+-	*data++ = mxl862xx_eq_effective(&eq.tx.iboost_lvl);
+-	*data++ = mxl862xx_eq_effective(&eq.tx.vboost_lvl);
+-	*data++ = mxl862xx_eq_effective(&eq.tx.vboost_en);
+-	*data++ = mxl862xx_eq_effective(&eq.rx.att_lvl);
+-	*data++ = mxl862xx_eq_effective(&eq.rx.vga1_gain);
+-	*data++ = mxl862xx_eq_effective(&eq.rx.vga2_gain);
+-	*data++ = mxl862xx_eq_effective(&eq.rx.ctle_boost);
+-	*data++ = mxl862xx_eq_effective(&eq.rx.ctle_pole);
+-	*data++ = mxl862xx_eq_effective(&eq.rx.dfe_tap1);
+-	*data++ = mxl862xx_eq_effective(&eq.rx.dfe_bypass);
+-	*data++ = mxl862xx_eq_effective(&eq.rx.adapt_mode);
+-	*data++ = mxl862xx_eq_effective(&eq.rx.adapt_sel);
++	mode = le32_to_cpu(st.mode);
++	xpcs_data[MXL862XX_XPCS_STAT_VALID] = 1;
++	xpcs_data[MXL862XX_XPCS_STAT_INTERFACE] =
++		FIELD_GET(MXL862XX_XPCS_ST_INTERFACE, mode);
++	xpcs_data[MXL862XX_XPCS_STAT_LINK] =
++		FIELD_GET(MXL862XX_XPCS_ST_LINK, mode);
++	xpcs_data[MXL862XX_XPCS_STAT_AN_COMPLETE] =
++		FIELD_GET(MXL862XX_XPCS_ST_AN_COMPLETE, mode);
++	xpcs_data[MXL862XX_XPCS_STAT_PCS_FAULT] =
++		FIELD_GET(MXL862XX_XPCS_ST_PCS_FAULT, mode);
++	xpcs_data[MXL862XX_XPCS_STAT_SPEED] = le16_to_cpu(st.speed);
++	xpcs_data[MXL862XX_XPCS_STAT_DUPLEX] =
++		FIELD_GET(MXL862XX_XPCS_ST_DUPLEX, mode);
++	xpcs_data[MXL862XX_XPCS_STAT_PAUSE] =
++		FIELD_GET(MXL862XX_XPCS_ST_PAUSE, mode);
++	xpcs_data[MXL862XX_XPCS_STAT_LPA] = le16_to_cpu(st.lpa.usx);
++	xpcs_data[MXL862XX_XPCS_STAT_LP_EEE] =
++		FIELD_GET(MXL862XX_XPCS_ST_LP_EEE_CAP, mode);
++	xpcs_data[MXL862XX_XPCS_STAT_LP_EEE_CS] =
++		FIELD_GET(MXL862XX_XPCS_ST_LP_EEE_CS_CAP, mode);
+ }
+diff --git a/drivers/net/dsa/mxl862xx/mxl862xx.h b/drivers/net/dsa/mxl862xx/mxl862xx.h
+index 9d8113f..805724c 100644
+--- a/drivers/net/dsa/mxl862xx/mxl862xx.h
++++ b/drivers/net/dsa/mxl862xx/mxl862xx.h
+@@ -310,6 +310,17 @@ struct mxl862xx_pcs {
+ 	int serdes_id;
+ 	int slot;
+ 	phy_interface_t interface;
++	/* Temporary command diagnostics, exposed through ethtool stats. */
++	u32 diag_cfg_calls;
++	u8 diag_cfg_interface;
++	u8 diag_cfg_neg_mode;
++	bool diag_cfg_permit_pause;
++	int diag_cfg_result;
++	u32 diag_link_up_calls;
++	u8 diag_link_up_interface;
++	int diag_link_up_speed;
++	int diag_link_up_duplex;
++	int diag_link_up_result;
+ };
+ 
+ /**

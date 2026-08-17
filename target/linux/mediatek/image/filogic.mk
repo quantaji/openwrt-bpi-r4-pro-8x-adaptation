@@ -845,6 +845,45 @@ define Device/bananapi_bpi-r4-pro-8x
 endef
 TARGET_DEVICES += bananapi_bpi-r4-pro-8x
 
+define Device/bananapi_bpi-r4-pro-8x-diag-common
+  DEVICE_MODEL := BPI-R4 Pro 8X
+  DEVICE_DTS_CONFIG := config-mt7988a-bananapi-bpi-r4-pro-8x
+  DEVICE_BL2 := comb-4bg
+  $(call Device/bananapi_bpi-r4-pro-common)
+  DEVICE_PACKAGES += e2fsprogs f2fsck mkf2fs \
+		     kmod-phy-aeonsemi-as21xxx
+  SUPPORTED_DEVICES += bananapi,bpi-r4-pro-8x
+  ARTIFACTS :=
+endef
+
+define Device/bananapi_bpi-r4-pro-8x-diag-usxgmii
+  DEVICE_VARIANT := AS21/MxL USXGMII diagnostic
+  DEVICE_DTS := mt7988a-bananapi-bpi-r4-pro-8x-diag-usxgmii
+  $(call Device/bananapi_bpi-r4-pro-8x-diag-common)
+endef
+TARGET_DEVICES += bananapi_bpi-r4-pro-8x-diag-usxgmii
+
+define Device/bananapi_bpi-r4-pro-8x-diag-10gbase-r
+  DEVICE_VARIANT := AS21/MxL 10GBASE-R diagnostic
+  DEVICE_DTS := mt7988a-bananapi-bpi-r4-pro-8x-diag-10gbase-r
+  $(call Device/bananapi_bpi-r4-pro-8x-diag-common)
+endef
+TARGET_DEVICES += bananapi_bpi-r4-pro-8x-diag-10gbase-r
+
+define Device/bananapi_bpi-r4-pro-8x-diag-5gbase-r
+  DEVICE_VARIANT := AS21/MxL 5GBASE-R diagnostic
+  DEVICE_DTS := mt7988a-bananapi-bpi-r4-pro-8x-diag-5gbase-r
+  $(call Device/bananapi_bpi-r4-pro-8x-diag-common)
+endef
+TARGET_DEVICES += bananapi_bpi-r4-pro-8x-diag-5gbase-r
+
+define Device/bananapi_bpi-r4-pro-8x-diag-2500base-x
+  DEVICE_VARIANT := AS21/MxL 2500BASE-X diagnostic
+  DEVICE_DTS := mt7988a-bananapi-bpi-r4-pro-8x-diag-2500base-x
+  $(call Device/bananapi_bpi-r4-pro-8x-diag-common)
+endef
+TARGET_DEVICES += bananapi_bpi-r4-pro-8x-diag-2500base-x
+
 define Device/bananapi_bpi-r4-lite
   DEVICE_VENDOR := Bananapi
   DEVICE_MODEL := BPi-R4 Lite
