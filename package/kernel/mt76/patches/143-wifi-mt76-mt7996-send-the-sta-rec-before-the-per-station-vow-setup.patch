@@ -1,0 +1,52 @@
+From da2c90d2167d8b2402c007186c6072947d9f6482 Mon Sep 17 00:00:00 2001
+From: Felix Fietkau <nbd@nbd.name>
+Date: Wed, 29 Jul 2026 17:56:48 +0200
+Subject: [PATCH] wifi: mt76: mt7996: send the STA_REC before the per-station
+ VoW setup
+
+mt7996_mcu_add_sta() issued the VoW DRR control commands for a station
+before sending the STA_REC that instantiates it in the firmware. On a
+fresh peer entry there is no station context yet, so the firmware
+rejects UNI_VOW_DRR_CTRL with 0xC0000001, logging "GetDisablePerStaTx
+Failed". That error was returned to the caller, which freed the STA_REC
+skb without ever sending it, so bringing up client mode occasionally
+failed with "failed to move station to desired state".
+
+Send the STA_REC first and set up the airtime scheduler afterwards.
+Airtime fairness is not required for the link to work and the station
+record has already been committed at that point, so a failure there no
+longer aborts the connection.
+
+Fixes: 910db36ae5b1 ("wifi: mt76: mt7996: HW ATF support")
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+---
+ mt7996/mcu.c | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/mt7996/mcu.c b/mt7996/mcu.c
+index e6e2bbcd4..176d71e8f 100644
+--- a/mt7996/mcu.c
++++ b/mt7996/mcu.c
+@@ -3044,14 +3044,15 @@ int mt7996_mcu_add_sta(struct mt7996_dev *dev,
+ 		}
+ 	}
+ 
+-	ret = mt7996_mcu_sta_init_vow(dev, &link->mt76, wcid);
+-	if (ret) {
+-		dev_kfree_skb(skb);
+-		return ret;
+-	}
+ out:
+-	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
+-				     MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
++	ret = mt76_mcu_skb_send_msg(&dev->mt76, skb,
++				    MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
++	if (ret || conn_state == CONN_STATE_DISCONNECT)
++		return ret;
++
++	mt7996_mcu_sta_init_vow(dev, &link->mt76, wcid);
++
++	return 0;
+ }
+ 
+ int mt7996_mcu_teardown_mld_sta(struct mt7996_dev *dev,

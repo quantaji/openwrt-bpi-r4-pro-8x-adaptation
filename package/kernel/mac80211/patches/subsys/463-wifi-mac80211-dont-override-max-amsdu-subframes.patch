@@ -1,0 +1,49 @@
+From e1e83feb8eae82cc9cc676db4c70f52fedc4735d Mon Sep 17 00:00:00 2001
+From: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+Date: Wed, 13 May 2026 17:06:27 +0300
+Subject: [PATCH] wifi: mac80211: don't override max_amsdu_subframes
+
+In client mode, the extended capabilities are handled by the kernel
+looking at the association frame.  When the supplicant installs the keys
+it calls sta_apply_parameters and it doesn't include the extended
+capabilities since those can't change after association.
+As a result, we overrode the max_amsdu_subframes that we set after
+association.
+
+Check that the ext_capa coming from the user space is valid before
+looking at it. If the ext_capa is NULL, it really means that the
+extended capabilities are not changed (as opposed to cleared).
+
+The default value for max_amsdu_subframes is 0, which means there is no
+limit. This value is valid and in case the association response frame
+does not have extended capabilities, this is the value we should use.
+
+Closes: https://bugzilla.kernel.org/show_bug.cgi?id=221079
+Signed-off-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+Reviewed-by: Johannes Berg <johannes.berg@intel.com>
+Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20260513170623.828dbb58c782.Ifd2bfc190c26140e919127adb02ffddd7b551499@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/cfg.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index 7b77d57c9f96..f9ee9947a94d 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -2344,8 +2344,9 @@ static int sta_apply_parameters(struct ieee80211_local *local,
+ 		sta->sta.max_sp = params->max_sp;
+ 	}
+ 
+-	ieee80211_sta_set_max_amsdu_subframes(sta, params->ext_capab,
+-					      params->ext_capab_len);
++	if (params->ext_capab)
++		ieee80211_sta_set_max_amsdu_subframes(sta, params->ext_capab,
++						      params->ext_capab_len);
+ 
+ 	/*
+ 	 * cfg80211 validates this (1-2007) and allows setting the AID
+-- 
+2.53.0
+

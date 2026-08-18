@@ -1,0 +1,45 @@
+From 50480826f5a9d2c615296bb12493ffee8c6b1281 Mon Sep 17 00:00:00 2001
+From: Chad Monroe <chad@monroe.io>
+Date: Wed, 15 Jul 2026 18:30:00 -0700
+Subject: [PATCH] wifi: mt76: mt7996: hold dev->mutex in remove_interface
+ teardown
+
+mt7996_remove_interface() destroys the remaining vif links, clearing
+omac_mask, vif_mask and mld_idx_mask, with only the wiphy mutex held.
+Those masks are modified under dev->mutex everywhere else, so the
+unlocked clears can race the scan-link teardown and the reset work
+and lose updates.
+
+Take dev->mutex around the link destroy loop, matching
+mt7996_add_interface() and mt7915_remove_interface(). The mutex is
+released before mt76_vif_cleanup(), which aborts a pending scan and
+takes the mutex itself.
+
+Signed-off-by: Chad Monroe <chad@monroe.io>
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+---
+ mt7996/main.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/mt7996/main.c b/mt7996/main.c
+index 2e6bda6c4..87edcefe1 100644
+--- a/mt7996/main.c
++++ b/mt7996/main.c
+@@ -606,6 +606,8 @@ static void mt7996_remove_interface(struct ieee80211_hw *hw,
+ 	unsigned int link_id;
+ 	int i;
+ 
++	mutex_lock(&dev->mt76.mutex);
++
+ 	/* Remove all active links */
+ 	for_each_set_bit(link_id, &rem_links, IEEE80211_MLD_MAX_NUM_LINKS) {
+ 		struct mt7996_vif_link *link;
+@@ -622,6 +624,8 @@ static void mt7996_remove_interface(struct ieee80211_hw *hw,
+ 		mt7996_vif_link_destroy(phy, link, vif, NULL);
+ 	}
+ 
++	mutex_unlock(&dev->mt76.mutex);
++
+ 	ieee80211_iterate_active_interfaces_mtx(hw, 0, mt7996_remove_iter,
+ 						&rdata);
+ 	mt76_vif_cleanup(&dev->mt76, vif);

@@ -1,0 +1,37 @@
+From 0e5c735ef797c9b88bfa8ac817158cfe15db1f0b Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Wed, 15 Apr 2026 14:42:03 +0200
+Subject: [PATCH] wifi: mac80211: use chandef in TDLS chanctx handling
+
+When getting the station's bandwidth for TDLS chanctx
+updates, pass the chandef so that the band can be used
+in _ieee80211_sta_cap_rx_bw(), instead of this using
+ieee80211_sta_cap_rx_bw() which looks it up from the
+link.
+
+This removes the last user of ieee80211_sta_cap_rx_bw().
+
+Reviewed-by: Miriam Rachel Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20260415144514.cc7c1590e953.Id2381d2b5a9d1ded170501976240d4fca23ee35c@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/tdls.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/net/mac80211/tdls.c b/net/mac80211/tdls.c
+index 44bba7c3e603..90a122dc274f 100644
+--- a/net/mac80211/tdls.c
++++ b/net/mac80211/tdls.c
+@@ -1334,7 +1334,8 @@ static void iee80211_tdls_recalc_chanctx(struct ieee80211_sub_if_data *sdata,
+ 			enum ieee80211_sta_rx_bandwidth bw;
+ 
+ 			bw = ieee80211_chan_width_to_rx_bw(conf->def.width);
+-			bw = min(bw, ieee80211_sta_cap_rx_bw(&sta->deflink));
++			bw = min(bw, _ieee80211_sta_cap_rx_bw(&sta->deflink,
++							      &conf->def));
+ 			if (bw != sta->sta.deflink.bandwidth) {
+ 				sta->sta.deflink.bandwidth = bw;
+ 				rate_control_rate_update(local, sband,
+-- 
+2.53.0
+

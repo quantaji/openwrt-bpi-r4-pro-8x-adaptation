@@ -1,0 +1,38 @@
+From eb092b188fcf96ef2c770ff086ebfc2a15b061d3 Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Wed, 18 Mar 2026 18:06:22 +0100
+Subject: [PATCH] wifi: mac80211: fix STA link removal during link removal
+
+ieee80211_sta_free_link() only frees the link and doesn't
+unhash it, so it can't be used here. Instead this needs
+to use ieee80211_sta_remove_link(), which unhashes it. An
+argument against it was that it also calls the driver and
+that already happened, but calls to the driver removing a
+link that's already removed are suppressed, so that's not
+actually an issue. Use it to fix the hashtable.
+
+Reported-and-tested-by: Jouni Malinen <j@w1.fi>
+Fixes: 84674b03d8bf ("wifi: mac80211: Remove deleted sta links in ieee80211_ml_reconf_work()")
+Acked-by: Lorenzo Bianconi <lorenzo@kernel.org>
+Link: https://patch.msgid.link/20260318180622.9240067117e9.I45fb2b7f04d75e48d2f3e9c6650ef9f54a314f5b@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/mlme.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index f279bdb03aca..0cd8d07bf668 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -7119,7 +7119,7 @@ static void ieee80211_ml_reconf_work(struct wiphy *wiphy,
+ 
+ 		for_each_set_bit(link_id, &removed_links,
+ 				 IEEE80211_MLD_MAX_NUM_LINKS)
+-			ieee80211_sta_free_link(sta, link_id);
++			ieee80211_sta_remove_link(sta, link_id);
+ 	}
+ 
+ 	new_dormant_links = sdata->vif.dormant_links & ~sdata->u.mgd.removed_links;
+-- 
+2.53.0
+

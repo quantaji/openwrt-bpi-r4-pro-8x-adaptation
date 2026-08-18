@@ -1,0 +1,91 @@
+From 915c1d23e2e3a94f432bda6fb64f47c06f840ca1 Mon Sep 17 00:00:00 2001
+From: Tamizh Chelvam Raja <tamizh.raja@oss.qualcomm.com>
+Date: Thu, 26 Mar 2026 22:17:23 +0530
+Subject: [PATCH] wifi: mac80211: enable MLO support for 4-address mode
+ interfaces
+
+The current code does not support establishing MLO connections for
+interfaces operating in 4-address AP_VLAN mode.
+MLO bringup is blocked by sanity checks in cfg.c, iface.c, and mlme.c,
+which prevent MLD initialization when use_4addr is enabled.
+Remove these restrictions to allow 4-address AP_VLAN interfaces to
+initialize as part of an MLD and successfully participate in MLO
+connections. This patch series also adds the necessary changes to
+support WDS operation in MLO, making these modifications valid.
+
+Allow 4-address mode interfaces to:
+- Proceed with MLD initialization during interface setup
+- Add MLO links dynamically via ieee80211_add_intf_link()
+- Establish associations with MLO-capable access points
+- Support AP_VLAN interfaces with MLO parent APs
+
+Signed-off-by: Tamizh Chelvam Raja <tamizh.raja@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260326164723.553927-4-tamizh.raja@oss.qualcomm.com
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/cfg.c   | 7 -------
+ net/mac80211/iface.c | 7 -------
+ net/mac80211/mlme.c  | 4 ----
+ 3 files changed, 18 deletions(-)
+
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index 6a5bf403fd85..7b77d57c9f96 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -281,10 +281,6 @@ static int ieee80211_change_iface(struct wiphy *wiphy,
+ 		if (params->use_4addr == ifmgd->use_4addr)
+ 			return 0;
+ 
+-		/* FIXME: no support for 4-addr MLO yet */
+-		if (ieee80211_vif_is_mld(&sdata->vif))
+-			return -EOPNOTSUPP;
+-
+ 		sdata->u.mgd.use_4addr = params->use_4addr;
+ 		if (!ifmgd->associated)
+ 			return 0;
+@@ -5585,9 +5581,6 @@ static int ieee80211_add_intf_link(struct wiphy *wiphy,
+ 
+ 	lockdep_assert_wiphy(sdata->local->hw.wiphy);
+ 
+-	if (wdev->use_4addr)
+-		return -EOPNOTSUPP;
+-
+ 	return ieee80211_vif_set_links(sdata, wdev->valid_links, 0);
+ }
+ 
+diff --git a/net/mac80211/iface.c b/net/mac80211/iface.c
+index f1ab85ff326d..95b779c4d627 100644
+--- a/net/mac80211/iface.c
++++ b/net/mac80211/iface.c
+@@ -409,13 +409,6 @@ static int ieee80211_check_concurrent_iface(struct ieee80211_sub_if_data *sdata,
+ 							nsdata->vif.type))
+ 				return -ENOTUNIQ;
+ 
+-			/* No support for VLAN with MLO yet */
+-			if (iftype == NL80211_IFTYPE_AP_VLAN &&
+-			    sdata->wdev.use_4addr &&
+-			    nsdata->vif.type == NL80211_IFTYPE_AP &&
+-			    nsdata->vif.valid_links)
+-				return -EOPNOTSUPP;
+-
+ 			/*
+ 			 * can only add VLANs to enabled APs
+ 			 */
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 4a34547b39d5..160ae65a5c64 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -9859,10 +9859,6 @@ int ieee80211_mgd_assoc(struct ieee80211_sub_if_data *sdata,
+ 	for (i = 0; i < IEEE80211_MLD_MAX_NUM_LINKS; i++)
+ 		size += req->links[i].elems_len;
+ 
+-	/* FIXME: no support for 4-addr MLO yet */
+-	if (sdata->u.mgd.use_4addr && req->link_id >= 0)
+-		return -EOPNOTSUPP;
+-
+ 	assoc_data = kzalloc(size, GFP_KERNEL);
+ 	if (!assoc_data)
+ 		return -ENOMEM;
+-- 
+2.53.0
+

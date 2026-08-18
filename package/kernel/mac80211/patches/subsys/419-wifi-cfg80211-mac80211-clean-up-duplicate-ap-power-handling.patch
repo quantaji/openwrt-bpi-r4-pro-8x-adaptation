@@ -1,0 +1,121 @@
+From e18efacc9c2f17b12c6e019cabad70a2989bd3a9 Mon Sep 17 00:00:00 2001
+From: Pagadala Yesu Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+Date: Mon, 10 Nov 2025 14:10:29 +0200
+Subject: [PATCH] wifi: cfg80211/mac80211: clean up duplicate ap_power handling
+
+Move duplicated ap_power type handling code to an inline
+function in cfg80211.
+
+Signed-off-by: Pagadala Yesu Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+Reviewed-by: Johannes Berg <johannes.berg@intel.com>
+Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20251110140806.959948da1cb5.I893b5168329fb3232f249c182a35c99804112da6@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ include/net/cfg80211.h | 24 ++++++++++++++++++++++++
+ net/mac80211/mlme.c    | 20 +-------------------
+ net/wireless/scan.c    | 15 +--------------
+ 3 files changed, 26 insertions(+), 33 deletions(-)
+
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index d87c18e1b133..1b257eaf8de5 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -10134,6 +10134,30 @@ static inline int cfg80211_color_change_notify(struct net_device *dev,
+ 					 0, 0, link_id);
+ }
+ 
++/**
++ * cfg80211_6ghz_power_type - determine AP regulatory power type
++ * @control: control flags
++ *
++ * Return: regulatory power type from &enum ieee80211_ap_reg_power
++ */
++static inline enum ieee80211_ap_reg_power
++cfg80211_6ghz_power_type(u8 control)
++{
++	switch (u8_get_bits(control, IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO)) {
++	case IEEE80211_6GHZ_CTRL_REG_LPI_AP:
++	case IEEE80211_6GHZ_CTRL_REG_INDOOR_LPI_AP:
++		return IEEE80211_REG_LPI_AP;
++	case IEEE80211_6GHZ_CTRL_REG_SP_AP:
++	case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP:
++	case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP_OLD:
++		return IEEE80211_REG_SP_AP;
++	case IEEE80211_6GHZ_CTRL_REG_VLP_AP:
++		return IEEE80211_REG_VLP_AP;
++	default:
++		return IEEE80211_REG_UNSET_AP;
++	}
++}
++
+ /**
+  * cfg80211_links_removed - Notify about removed STA MLD setup links.
+  * @dev: network device.
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 804c3a95b7c6..64230696f3e4 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -6034,24 +6034,6 @@ ieee80211_determine_our_sta_mode_assoc(struct ieee80211_sub_if_data *sdata,
+ 			       conn->bw_limit, tmp.bw_limit);
+ }
+ 
+-static enum ieee80211_ap_reg_power
+-ieee80211_ap_power_type(u8 control)
+-{
+-	switch (u8_get_bits(control, IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO)) {
+-	case IEEE80211_6GHZ_CTRL_REG_LPI_AP:
+-	case IEEE80211_6GHZ_CTRL_REG_INDOOR_LPI_AP:
+-		return IEEE80211_REG_LPI_AP;
+-	case IEEE80211_6GHZ_CTRL_REG_SP_AP:
+-	case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP:
+-	case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP_OLD:
+-		return IEEE80211_REG_SP_AP;
+-	case IEEE80211_6GHZ_CTRL_REG_VLP_AP:
+-		return IEEE80211_REG_VLP_AP;
+-	default:
+-		return IEEE80211_REG_UNSET_AP;
+-	}
+-}
+-
+ static int ieee80211_prep_channel(struct ieee80211_sub_if_data *sdata,
+ 				  struct ieee80211_link_data *link,
+ 				  int link_id,
+@@ -6094,7 +6076,7 @@ static int ieee80211_prep_channel(struct ieee80211_sub_if_data *sdata,
+ 		he_6ghz_oper = ieee80211_he_6ghz_oper(elems->he_operation);
+ 		if (he_6ghz_oper)
+ 			link->conf->power_type =
+-				ieee80211_ap_power_type(he_6ghz_oper->control);
++				cfg80211_6ghz_power_type(he_6ghz_oper->control);
+ 		else
+ 			link_info(link,
+ 				  "HE 6 GHz operation missing (on %d MHz), expect issues\n",
+diff --git a/net/wireless/scan.c b/net/wireless/scan.c
+index 90a9187a6b13..68c4130d602f 100644
+--- a/net/wireless/scan.c
++++ b/net/wireless/scan.c
+@@ -2230,20 +2230,7 @@ cfg80211_get_6ghz_power_type(const u8 *elems, size_t elems_len)
+ 	if (!he_6ghz_oper)
+ 		return IEEE80211_REG_UNSET_AP;
+ 
+-	switch (u8_get_bits(he_6ghz_oper->control,
+-			    IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO)) {
+-	case IEEE80211_6GHZ_CTRL_REG_LPI_AP:
+-	case IEEE80211_6GHZ_CTRL_REG_INDOOR_LPI_AP:
+-		return IEEE80211_REG_LPI_AP;
+-	case IEEE80211_6GHZ_CTRL_REG_SP_AP:
+-	case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP:
+-	case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP_OLD:
+-		return IEEE80211_REG_SP_AP;
+-	case IEEE80211_6GHZ_CTRL_REG_VLP_AP:
+-		return IEEE80211_REG_VLP_AP;
+-	default:
+-		return IEEE80211_REG_UNSET_AP;
+-	}
++	return cfg80211_6ghz_power_type(he_6ghz_oper->control);
+ }
+ 
+ static bool cfg80211_6ghz_power_type_valid(const u8 *elems, size_t elems_len,
+-- 
+2.53.0
+

@@ -1,0 +1,60 @@
+From 29cc798e7061e603843091af2f17b5b25009e7b8 Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Wed, 5 Nov 2025 16:03:42 +0100
+Subject: [PATCH] wifi: mac80211: make link iteration safe for 'break'
+
+The current link iteration macros for_each_sdata_link() and
+for_each_sdata_link_rcu() are various nested for loops, but
+because they iterate all sdata instances and then all links
+inside, using 'break' inside the iteration doesn't actually
+break out of the whole iteration.
+
+Make it work by tracking whether or not the inner iteration
+(over links) actually completed, if it broke out then given
+list_for_each_entry() it still iterates all sdata instances
+but won't go into them.
+
+Link: https://patch.msgid.link/20251105160431.c21956654fc0.I8d4739af061c44c57d172f19a15303a44ad1e596@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/ieee80211_i.h | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
+index 878c3b14aeb8..72e4f326946f 100644
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -1239,9 +1239,12 @@ struct ieee80211_sub_if_data *vif_to_sdata(struct ieee80211_vif *p)
+ 	for (struct ieee80211_sub_if_data *___sdata = NULL;		\
+ 	     !___sdata;							\
+ 	     ___sdata = (void *)~0 /* always stop */)			\
++	for (int ___link_id = ARRAY_SIZE(___sdata->link);		\
++	     ___link_id; ___link_id = 0 /* always stop */)		\
+ 	list_for_each_entry(___sdata, &(_local)->interfaces, list)	\
+-	if (ieee80211_sdata_running(___sdata))				\
+-	for (int ___link_id = 0;					\
++	if (___link_id == ARRAY_SIZE(___sdata->link) &&			\
++	    ieee80211_sdata_running(___sdata))				\
++	for (___link_id = 0;						\
+ 	     ___link_id < ARRAY_SIZE(___sdata->link);			\
+ 	     ___link_id++)						\
+ 	if ((_link = wiphy_dereference((_local)->hw.wiphy,		\
+@@ -1255,9 +1258,12 @@ struct ieee80211_sub_if_data *vif_to_sdata(struct ieee80211_vif *p)
+ 	for (struct ieee80211_sub_if_data *___sdata = NULL;				\
+ 	     !___sdata;									\
+ 	     ___sdata = (void *)~0 /* always stop */)					\
+-	list_for_each_entry_rcu(___sdata, &(_local)->interfaces, list)			\
+-	if (ieee80211_sdata_running(___sdata))						\
+-	for (int ___link_id = 0;							\
++	for (int ___link_id = ARRAY_SIZE(___sdata->link);		\
++	     ___link_id; ___link_id = 0 /* always stop */)		\
++	list_for_each_entry(___sdata, &(_local)->interfaces, list)	\
++	if (___link_id == ARRAY_SIZE(___sdata->link) &&			\
++	    ieee80211_sdata_running(___sdata))				\
++	for (___link_id = 0;						\
+ 	     ___link_id < ARRAY_SIZE((___sdata)->link);					\
+ 	     ___link_id++)								\
+ 	if ((_link = rcu_dereference((___sdata)->link[___link_id])))
+-- 
+2.53.0
+

@@ -1,0 +1,47 @@
+From ae6691b8c1fde1a21579386664fa971c76504f2b Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Tue, 5 May 2026 15:17:31 +0200
+Subject: [PATCH] wifi: mac80211: check stations are removed before MLD change
+
+If an interface changes to/from MLD, then all stations related
+to it must have been removed first. This is just natural since
+we go from having links to not (or vice versa), but not doing
+so also causes crashes in debugfs since vif changing to/from
+MLD removes the entire debugfs for the vif, including stations.
+
+Delete all stations but warn in this case, other code should
+be handling it, in effect fail fast rather than doing a double
+free or use-after-free in debugfs.
+
+Link: https://patch.msgid.link/20260505151731.3d7cbb8b952c.I4ce7b536e8af26d7b115e82fd733734446cc56a4@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/link.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/net/mac80211/link.c b/net/mac80211/link.c
+index 93e290dd783f..e81dd02de12e 100644
+--- a/net/mac80211/link.c
++++ b/net/mac80211/link.c
+@@ -2,7 +2,7 @@
+ /*
+  * MLO link handling
+  *
+- * Copyright (C) 2022-2025 Intel Corporation
++ * Copyright (C) 2022-2026 Intel Corporation
+  */
+ #include <linux/slab.h>
+ #include <linux/kernel.h>
+@@ -307,6 +307,9 @@ static int ieee80211_vif_update_links(struct ieee80211_sub_if_data *sdata,
+ 	if (old_links == new_links && dormant_links == sdata->vif.dormant_links)
+ 		return 0;
+ 
++	if (!old_links || !new_links)
++		WARN_ON(sta_info_flush(sdata, -1) > 0);
++
+ 	/* if there were no old links, need to clear the pointers to deflink */
+ 	if (!old_links)
+ 		rem |= BIT(0);
+-- 
+2.53.0
+

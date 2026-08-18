@@ -1,0 +1,152 @@
+From 0495b64132154dd04ed5d443bb35afd3769a13a6 Mon Sep 17 00:00:00 2001
+From: Sriram R <quic_srirrama@quicinc.com>
+Date: Fri, 20 Feb 2026 01:12:41 +0530
+Subject: [PATCH] wifi: mac80211: fetch FILS discovery template by link ID
+
+Currently, the FILS discovery template is always fetched from the default
+link of a virtual interface in both Multi-Link Operation (MLO) and
+non-MLO cases. However, in the MLO case there is a need to fetch the FILS
+discovery template from a specific link instead of the default link.
+
+Hence, add support for fetching the FILS discovery template based on the
+link ID from the corresponding link data.
+
+Signed-off-by: Sriram R <quic_srirrama@quicinc.com>
+Co-developed-by: Raj Kumar Bhagat <raj.bhagat@oss.qualcomm.com>
+Signed-off-by: Raj Kumar Bhagat <raj.bhagat@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260220-fils-prob-by-link-v1-1-a2746a853f75@oss.qualcomm.com
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ drivers/net/wireless/ath/ath11k/mac.c         |  2 +-
+ drivers/net/wireless/ath/ath12k/mac.c         |  3 ++-
+ .../net/wireless/mediatek/mt76/mt7915/mcu.c   |  2 +-
+ .../net/wireless/mediatek/mt76/mt7996/mcu.c   |  3 ++-
+ include/net/mac80211.h                        |  4 +++-
+ net/mac80211/tx.c                             | 20 ++++++++++++-------
+ 6 files changed, 22 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index e4ee2ba1f669..dda77f87461e 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -3305,7 +3305,7 @@ static int ath11k_mac_fils_discovery(struct ath11k_vif *arvif,
+ 	if (info->fils_discovery.max_interval) {
+ 		interval = info->fils_discovery.max_interval;
+ 
+-		tmpl = ieee80211_get_fils_discovery_tmpl(ar->hw, arvif->vif);
++		tmpl = ieee80211_get_fils_discovery_tmpl(ar->hw, arvif->vif, 0);
+ 		if (tmpl)
+ 			ret = ath11k_wmi_fils_discovery_tmpl(ar, arvif->vdev_id,
+ 							     tmpl);
+diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/ath12k/mac.c
+index c6b88909b6b7..af57ac10d517 100644
+--- a/drivers/net/wireless/ath/ath12k/mac.c
++++ b/drivers/net/wireless/ath/ath12k/mac.c
+@@ -4311,7 +4311,8 @@ static int ath12k_mac_fils_discovery(struct ath12k_link_vif *arvif,
+ 	if (info->fils_discovery.max_interval) {
+ 		interval = info->fils_discovery.max_interval;
+ 
+-		tmpl = ieee80211_get_fils_discovery_tmpl(hw, vif);
++		tmpl = ieee80211_get_fils_discovery_tmpl(hw, vif,
++							 info->link_id);
+ 		if (tmpl)
+ 			ret = ath12k_wmi_fils_discovery_tmpl(ar, arvif->vdev_id,
+ 							     tmpl);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+index 00bff4d3aab8..83ce06857a1e 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+@@ -1977,7 +1977,7 @@ mt7915_mcu_add_inband_discov(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 
+ 	if (changed & BSS_CHANGED_FILS_DISCOVERY) {
+ 		interval = vif->bss_conf.fils_discovery.max_interval;
+-		skb = ieee80211_get_fils_discovery_tmpl(hw, vif);
++		skb = ieee80211_get_fils_discovery_tmpl(hw, vif, 0);
+ 	} else if (changed & BSS_CHANGED_UNSOL_BCAST_PROBE_RESP &&
+ 		   vif->bss_conf.unsol_bcast_probe_resp_interval) {
+ 		interval = vif->bss_conf.unsol_bcast_probe_resp_interval;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7996/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7996/mcu.c
+index c0c042de477b..968afc2967a8 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7996/mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7996/mcu.c
+@@ -2863,7 +2863,8 @@ int mt7996_mcu_beacon_inband_discov(struct mt7996_dev *dev,
+ 	if (changed & BSS_CHANGED_FILS_DISCOVERY &&
+ 	    link_conf->fils_discovery.max_interval) {
+ 		interval = link_conf->fils_discovery.max_interval;
+-		skb = ieee80211_get_fils_discovery_tmpl(hw, vif);
++		skb = ieee80211_get_fils_discovery_tmpl(hw, vif,
++							link_conf->link_id);
+ 	} else if (changed & BSS_CHANGED_UNSOL_BCAST_PROBE_RESP &&
+ 		   link_conf->unsol_bcast_probe_resp_interval) {
+ 		interval = link_conf->unsol_bcast_probe_resp_interval;
+diff --git a/include/net/mac80211.h b/include/net/mac80211.h
+index 7f9d96939a4e..d36c14a86c8a 100644
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -7766,13 +7766,15 @@ u32 ieee80211_calc_tx_airtime(struct ieee80211_hw *hw,
+  * ieee80211_get_fils_discovery_tmpl - Get FILS discovery template.
+  * @hw: pointer obtained from ieee80211_alloc_hw().
+  * @vif: &struct ieee80211_vif pointer from the add_interface callback.
++ * @link_id: valid link_id during MLO or 0 for non-MLO.
+  *
+  * The driver is responsible for freeing the returned skb.
+  *
+  * Return: FILS discovery template. %NULL on error.
+  */
+ struct sk_buff *ieee80211_get_fils_discovery_tmpl(struct ieee80211_hw *hw,
+-						  struct ieee80211_vif *vif);
++						  struct ieee80211_vif *vif,
++						  unsigned int link_id);
+ 
+ /**
+  * ieee80211_get_unsol_bcast_probe_resp_tmpl - Get unsolicited broadcast
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index 8cdbd417d7be..77ad85a49924 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -5837,21 +5837,28 @@ struct sk_buff *ieee80211_proberesp_get(struct ieee80211_hw *hw,
+ EXPORT_SYMBOL(ieee80211_proberesp_get);
+ 
+ struct sk_buff *ieee80211_get_fils_discovery_tmpl(struct ieee80211_hw *hw,
+-						  struct ieee80211_vif *vif)
++						  struct ieee80211_vif *vif,
++						  unsigned int link_id)
+ {
+ 	struct sk_buff *skb = NULL;
+ 	struct fils_discovery_data *tmpl = NULL;
+ 	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
++	struct ieee80211_link_data *link;
+ 
+ 	if (sdata->vif.type != NL80211_IFTYPE_AP)
+ 		return NULL;
+ 
+-	rcu_read_lock();
+-	tmpl = rcu_dereference(sdata->deflink.u.ap.fils_discovery);
+-	if (!tmpl) {
+-		rcu_read_unlock();
++	if (link_id >= IEEE80211_MLD_MAX_NUM_LINKS)
++		return NULL;
++
++	guard(rcu)();
++	link = rcu_dereference(sdata->link[link_id]);
++	if (!link)
++		return NULL;
++
++	tmpl = rcu_dereference(link->u.ap.fils_discovery);
++	if (!tmpl)
+ 		return NULL;
+-	}
+ 
+ 	skb = dev_alloc_skb(sdata->local->hw.extra_tx_headroom + tmpl->len);
+ 	if (skb) {
+@@ -5859,7 +5866,6 @@ struct sk_buff *ieee80211_get_fils_discovery_tmpl(struct ieee80211_hw *hw,
+ 		skb_put_data(skb, tmpl->data, tmpl->len);
+ 	}
+ 
+-	rcu_read_unlock();
+ 	return skb;
+ }
+ EXPORT_SYMBOL(ieee80211_get_fils_discovery_tmpl);
+-- 
+2.53.0
+

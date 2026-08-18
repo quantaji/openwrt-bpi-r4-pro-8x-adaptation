@@ -1,0 +1,108 @@
+From eeb07a4edc8c9275233ed9423f2fd7e5d946bd0a Mon Sep 17 00:00:00 2001
+From: Peter Chiu <chui-hao.chiu@mediatek.com>
+Date: Fri, 17 Jul 2026 04:03:40 +0200
+Subject: [PATCH] wifi: mt76: mt7996: add mcu command to set bssid mapping
+ address
+
+When receiving a 4 address non-AMSDU packet, there is no bssid in the
+address fields, which breaks powersave handling for 4-address peers.
+Set the mcu command to use A1 as bssid when receiving 4 address
+non-AMSDU packets on mt7992 and mt7990.
+
+Also skip mt7996_mac_init_band() for invalid bands, so the command is
+only sent for bands that actually exist on the device.
+
+Signed-off-by: Peter Chiu <chui-hao.chiu@mediatek.com>
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+---
+ mt7996/init.c   |  6 ++++++
+ mt7996/mcu.c    | 26 ++++++++++++++++++++++++++
+ mt7996/mcu.h    |  1 +
+ mt7996/mt7996.h |  1 +
+ 4 files changed, 34 insertions(+)
+
+diff --git a/mt7996/init.c b/mt7996/init.c
+index 4684d771d..5aada567f 100644
+--- a/mt7996/init.c
++++ b/mt7996/init.c
+@@ -563,6 +563,9 @@ mt7996_mac_init_band(struct mt7996_dev *dev, u8 band)
+ {
+ 	u32 mask, set;
+ 
++	if (!mt7996_band_valid(dev, band))
++		return;
++
+ 	/* clear estimated value of EIFS for Rx duration & OBSS time */
+ 	mt76_wr(dev, MT_WF_RMAC_RSVD0(band), MT_WF_RMAC_RSVD0_EIFS_CLR);
+ 
+@@ -594,6 +597,9 @@ mt7996_mac_init_band(struct mt7996_dev *dev, u8 band)
+ 	 * MT_AGG_ACR_PPDU_TXS2H (PPDU format) even though ACR bit is set.
+ 	 */
+ 	mt76_set(dev, MT_AGG_ACR4(band), MT_AGG_ACR_PPDU_TXS2H);
++
++	if (!is_mt7996(&dev->mt76))
++		mt7996_mcu_set_bssid_mapping_addr(&dev->mt76, band);
+ }
+ 
+ static void mt7996_mac_init_basic_rates(struct mt7996_dev *dev)
+diff --git a/mt7996/mcu.c b/mt7996/mcu.c
+index 9b3a25422..9ca65f6a5 100644
+--- a/mt7996/mcu.c
++++ b/mt7996/mcu.c
+@@ -5279,6 +5279,32 @@ int mt7996_mcu_twt_agrt_update(struct mt7996_dev *dev,
+ 				 &req, sizeof(req), true);
+ }
+ 
++int mt7996_mcu_set_bssid_mapping_addr(struct mt76_dev *dev, u8 band_idx)
++{
++	enum {
++		BSSID_MAPPING_ADDR1,
++		BSSID_MAPPING_ADDR2,
++		BSSID_MAPPING_ADDR3,
++	};
++	struct {
++		u8 band_idx;
++		u8 _rsv1[3];
++
++		__le16 tag;
++		__le16 len;
++		u8 addr;
++		u8 _rsv2[3];
++	} __packed req = {
++		.band_idx = band_idx,
++		.tag = cpu_to_le16(UNI_BAND_CONFIG_BSSID_MAPPING_ADDR),
++		.len = cpu_to_le16(sizeof(req) - 4),
++		.addr = BSSID_MAPPING_ADDR1,
++	};
++
++	return mt76_mcu_send_msg(dev, MCU_WM_UNI_CMD(BAND_CONFIG),
++				 &req, sizeof(req), true);
++}
++
+ int mt7996_mcu_set_rts_thresh(struct mt7996_phy *phy, u32 val)
+ {
+ 	struct {
+diff --git a/mt7996/mcu.h b/mt7996/mcu.h
+index 4e7842cd6..7acc8bb22 100644
+--- a/mt7996/mcu.h
++++ b/mt7996/mcu.h
+@@ -960,6 +960,7 @@ enum {
+ 	UNI_BAND_CONFIG_RADIO_ENABLE,
+ 	UNI_BAND_CONFIG_RTS_THRESHOLD = 0x08,
+ 	UNI_BAND_CONFIG_MAC_ENABLE_CTRL = 0x0c,
++	UNI_BAND_CONFIG_BSSID_MAPPING_ADDR = 0x12,
+ };
+ 
+ enum {
+diff --git a/mt7996/mt7996.h b/mt7996/mt7996.h
+index 3013027c4..c589a2ba8 100644
+--- a/mt7996/mt7996.h
++++ b/mt7996/mt7996.h
+@@ -826,6 +826,7 @@ int mt7996_mcu_set_protection(struct mt7996_phy *phy, struct mt7996_vif_link *li
+ 			      u8 ht_mode, bool use_cts_prot);
+ int mt7996_mcu_set_timing(struct mt7996_phy *phy, struct ieee80211_vif *vif,
+ 			  struct ieee80211_bss_conf *link_conf);
++int mt7996_mcu_set_bssid_mapping_addr(struct mt76_dev *dev, u8 band_idx);
+ int mt7996_mcu_get_chan_mib_info(struct mt7996_phy *phy, bool chan_switch);
+ int mt7996_mcu_get_temperature(struct mt7996_phy *phy);
+ int mt7996_mcu_set_thermal_throttling(struct mt7996_phy *phy, u8 state);

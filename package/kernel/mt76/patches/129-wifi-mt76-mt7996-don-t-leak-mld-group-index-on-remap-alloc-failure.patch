@@ -1,0 +1,29 @@
+From d67367ec326036675749b49fcc5f532acfd8b357 Mon Sep 17 00:00:00 2001
+From: Felix Fietkau <nbd@nbd.name>
+Date: Thu, 2 Jul 2026 15:56:45 +0000
+Subject: [PATCH] wifi: mt76: mt7996: don't leak MLD group index on remap alloc
+ failure
+
+mt7996_change_vif_links() sets the mld_idx_mask group bit before
+allocating the remap index. If the remap allocation fails it jumped to
+the exit without clearing that bit, permanently consuming one of the 16
+MLD group slots. Release the group bit on the error path.
+
+Fixes: 4fb3b4e7d1ca ("wifi: mt76: mt7996: fix MLD group index assignment")
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+---
+ mt7996/main.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/mt7996/main.c b/mt7996/main.c
+index 6a28fe8a6..c4e1e8557 100644
+--- a/mt7996/main.c
++++ b/mt7996/main.c
+@@ -2488,6 +2488,7 @@ mt7996_change_vif_links(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+ 
+ 		idx = get_free_idx(dev->mld_remap_idx_mask, 0, 15) - 1;
+ 		if (idx < 0) {
++			dev->mld_idx_mask &= ~BIT_ULL(mvif->mld_group_idx);
+ 			ret = -ENOSPC;
+ 			goto out;
+ 		}

@@ -1,0 +1,61 @@
+From d823fc25eaaf357be292bd9c827026985bd502b3 Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Fri, 29 May 2026 10:25:01 +0200
+Subject: [PATCH] wifi: mac80211: always expose multi-link element
+
+During beacon processing, the parser is always called with
+a BSS to find the correct multi-BSSID profile (if any) and
+therefore never attempts to parse a multi-link element.
+This means the code to handle cross-link CSA can effectively
+never do anything.
+
+Fix this by parsing the multi-link element in the regular
+parser as well.
+
+Fixes: 7ef8f6821d16 ("wifi: mac80211: mlme: handle cross-link CSA")
+Reviewed-by: Miriam Rachel Korenblit <miriam.rachel.korenblit@intel.com>
+Reviewed-by: Benjamin Berg <benjamin.berg@intel.com>
+Reviewed-by: Ilan Peer <ilan.peer@intel.com>
+Link: https://patch.msgid.link/20260529102644.2a74b2659f50.I8f9454bf5e05c419a9b1eb23ecad302a6bf63fbb@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/parse.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/net/mac80211/parse.c b/net/mac80211/parse.c
+index 34f4c76ebc5d..c2f2f78f2b4f 100644
+--- a/net/mac80211/parse.c
++++ b/net/mac80211/parse.c
+@@ -54,7 +54,7 @@ struct ieee80211_elems_parse {
+ 	/* must be first for kfree to work */
+ 	struct ieee802_11_elems elems;
+ 
+-	struct ieee80211_elem_defrag ml_reconf, ml_epcs;
++	struct ieee80211_elem_defrag ml_reconf, ml_epcs, ml_basic;
+ 
+ 	bool inside_multilink;
+ 	bool skip_vendor;
+@@ -169,6 +169,9 @@ ieee80211_parse_extension_element(u32 *crc,
+ 						IEEE80211_PARSE_ERR_DUP_NEST_ML_BASIC;
+ 					break;
+ 				}
++				elems_parse->ml_basic.elem = elem;
++				elems_parse->ml_basic.start = params->start;
++				elems_parse->ml_basic.len = params->len;
+ 				break;
+ 			case IEEE80211_ML_CONTROL_TYPE_RECONF:
+ 				elems_parse->ml_reconf.elem = elem;
+@@ -1155,6 +1158,10 @@ ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params)
+ 	elems->ml_epcs = ieee80211_mle_defrag(elems_parse,
+ 					      &elems_parse->ml_epcs,
+ 					      &elems->ml_epcs_len);
++	if (!elems->ml_basic)
++		elems->ml_basic = ieee80211_mle_defrag(elems_parse,
++						       &elems_parse->ml_basic,
++						       &elems->ml_basic_len);
+ 
+ 	if (elems->tim && !elems->parse_error) {
+ 		const struct ieee80211_tim_ie *tim_ie = elems->tim;
+-- 
+2.53.0
+

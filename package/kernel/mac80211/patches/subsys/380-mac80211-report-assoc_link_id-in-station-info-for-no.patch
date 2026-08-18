@@ -1,6 +1,7 @@
+From 5f508715e960613572fe231837b6b4e250a64f8d Mon Sep 17 00:00:00 2001
 From: Felix Fietkau <nbd@nbd.name>
-Date: Wed, 18 Mar 2026 20:01:16 +0000
-Subject: [PATCH] mac80211: report assoc_link_id in station info for non-MLD
+Date: Thu, 28 May 2026 10:50:42 +0000
+Subject: [PATCH] wifi: mac80211: report assoc_link_id in station info for non-MLD
  STAs on MLD AP
 
 When a non-MLD station associates with an MLD AP, it does so on a
@@ -15,6 +16,8 @@ Also set the mld_addr copy only for MLD STAs, so that non-MLD STAs
 get a zeroed mld_addr as documented.
 
 Signed-off-by: Felix Fietkau <nbd@nbd.name>
+Link: https://patch.msgid.link/20260528105042.835284-1-nbd@nbd.name
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
 ---
 
 --- a/net/mac80211/sta_info.c

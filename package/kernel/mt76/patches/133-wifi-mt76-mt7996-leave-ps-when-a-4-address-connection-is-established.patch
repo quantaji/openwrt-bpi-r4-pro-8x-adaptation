@@ -1,0 +1,114 @@
+From ffabf1e53b633610580a4698f83745b8aebb57ce Mon Sep 17 00:00:00 2001
+From: Peter Chiu <chui-hao.chiu@mediatek.com>
+Date: Fri, 17 Jul 2026 04:02:15 +0200
+Subject: [PATCH] wifi: mt76: mt7996: leave PS when a 4-address connection is
+ established
+
+Because 4 address non-AMSDU packets do not have a bssid field, the
+hardware cannot get the bssid. Without the bssid, stations are not
+able to leave PS mode due to HW design. Wake up non-setup links when
+4-address mode is established to prevent this issue.
+
+mt7992 and mt7990 handle this via the BSSID mapping band config
+instead, so restrict the command to mt7996.
+
+Signed-off-by: Peter Chiu <chui-hao.chiu@mediatek.com>
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+---
+ mt76_connac_mcu.h |  1 +
+ mt7996/main.c     |  8 ++++++++
+ mt7996/mcu.c      | 18 ++++++++++++++++++
+ mt7996/mcu.h      |  6 ++++++
+ mt7996/mt7996.h   |  2 ++
+ 5 files changed, 35 insertions(+)
+
+diff --git a/mt76_connac_mcu.h b/mt76_connac_mcu.h
+index 6dc04c462..98a224095 100644
+--- a/mt76_connac_mcu.h
++++ b/mt76_connac_mcu.h
+@@ -867,6 +867,7 @@ enum {
+ 	STA_REC_HDRT = 0x28,
+ 	STA_REC_EML_OP = 0x29,
+ 	STA_REC_HDR_TRANS = 0x2B,
++	STA_REC_PS_LEAVE = 0x45,
+ 	STA_REC_MAX_NUM
+ };
+ 
+diff --git a/mt7996/main.c b/mt7996/main.c
+index c4e1e8557..54d1aac9b 100644
+--- a/mt7996/main.c
++++ b/mt7996/main.c
+@@ -2057,6 +2057,14 @@ static void mt7996_sta_set_4addr(struct ieee80211_hw *hw,
+ 			continue;
+ 
+ 		mt7996_mcu_wtbl_update_hdr_trans(dev, vif, link, msta_link);
++
++		/* HW cannot derive the BSSID from 4-address non-AMSDU frames,
++		 * so PS exit is missed on links other than the setup link.
++		 * Let the firmware wake those links instead.
++		 */
++		if (enabled && msta->deflink_id != link_id &&
++		    is_mt7996(&dev->mt76))
++			mt7996_mcu_ps_leave(dev, link, msta_link);
+ 	}
+ 
+ 	mutex_unlock(&dev->mt76.mutex);
+diff --git a/mt7996/mcu.c b/mt7996/mcu.c
+index 9ca65f6a5..c8a9f316d 100644
+--- a/mt7996/mcu.c
++++ b/mt7996/mcu.c
+@@ -5421,6 +5421,24 @@ int mt7996_mcu_wtbl_update_hdr_trans(struct mt7996_dev *dev,
+ 				     MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
+ }
+ 
++int mt7996_mcu_ps_leave(struct mt7996_dev *dev, struct mt7996_vif_link *link,
++			struct mt7996_sta_link *msta_link)
++{
++	struct sk_buff *skb;
++
++	skb = __mt76_connac_mcu_alloc_sta_req(&dev->mt76, &link->mt76,
++					      &msta_link->wcid,
++					      MT7996_STA_UPDATE_MAX_SIZE);
++	if (IS_ERR(skb))
++		return PTR_ERR(skb);
++
++	mt76_connac_mcu_add_tlv(skb, STA_REC_PS_LEAVE,
++				sizeof(struct sta_rec_ps_leave));
++
++	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
++				     MCU_WMWA_UNI_CMD(STA_REC_UPDATE), true);
++}
++
+ int mt7996_mcu_set_fixed_rate_table(struct mt7996_phy *phy, u8 table_idx,
+ 				    u16 rate_idx, bool beacon)
+ {
+diff --git a/mt7996/mcu.h b/mt7996/mcu.h
+index 7acc8bb22..71f87da03 100644
+--- a/mt7996/mcu.h
++++ b/mt7996/mcu.h
+@@ -713,6 +713,12 @@ struct sta_rec_hdr_trans {
+ 	u8 mesh;
+ } __packed;
+ 
++struct sta_rec_ps_leave {
++	__le16 tag;
++	__le16 len;
++	u8 __rsv[4];
++} __packed;
++
+ struct sta_rec_mld_setup {
+ 	__le16 tag;
+ 	__le16 len;
+diff --git a/mt7996/mt7996.h b/mt7996/mt7996.h
+index c589a2ba8..673be6df2 100644
+--- a/mt7996/mt7996.h
++++ b/mt7996/mt7996.h
+@@ -982,6 +982,8 @@ int mt7996_mcu_wtbl_update_hdr_trans(struct mt7996_dev *dev,
+ 				     struct ieee80211_vif *vif,
+ 				     struct mt7996_vif_link *link,
+ 				     struct mt7996_sta_link *msta_link);
++int mt7996_mcu_ps_leave(struct mt7996_dev *dev, struct mt7996_vif_link *link,
++			struct mt7996_sta_link *msta_link);
+ int mt7996_mcu_cp_support(struct mt7996_dev *dev, u8 mode);
+ int mt7996_mcu_set_emlsr_mode(struct mt7996_dev *dev,
+ 			      struct ieee80211_vif *vif,

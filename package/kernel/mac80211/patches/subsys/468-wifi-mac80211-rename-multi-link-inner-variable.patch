@@ -1,0 +1,68 @@
+From e41dc5921e2413cefd627b270f63367ed67d3f28 Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Fri, 29 May 2026 10:24:57 +0200
+Subject: [PATCH] wifi: mac80211: rename "multi_link_inner" variable
+
+This variable name seems a bit misleading now (I added it
+myself a year ago or so), it indicates that the parsing is
+happening on the inner elements of a multi-link element.
+Rename it to "inside_multilink" to clarify.
+
+Link: https://patch.msgid.link/20260529102644.7ccd55a411cf.I4101e1cfd133a2ce2374340712da8bb1f0292a40@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/parse.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/net/mac80211/parse.c b/net/mac80211/parse.c
+index 1ed1fc25da12..2587284fa67b 100644
+--- a/net/mac80211/parse.c
++++ b/net/mac80211/parse.c
+@@ -59,7 +59,7 @@ struct ieee80211_elems_parse {
+ 
+ 	struct ieee80211_elem_defrag ml_reconf, ml_epcs;
+ 
+-	bool multi_link_inner;
++	bool inside_multilink;
+ 	bool skip_vendor;
+ 
+ 	/*
+@@ -167,7 +167,7 @@ ieee80211_parse_extension_element(u32 *crc,
+ 			switch (le16_get_bits(mle->control,
+ 					      IEEE80211_ML_CONTROL_TYPE)) {
+ 			case IEEE80211_ML_CONTROL_TYPE_BASIC:
+-				if (elems_parse->multi_link_inner) {
++				if (elems_parse->inside_multilink) {
+ 					elems->parse_error |=
+ 						IEEE80211_PARSE_ERR_DUP_NEST_ML_BASIC;
+ 					break;
+@@ -1061,7 +1061,7 @@ ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params)
+ 	const struct element *non_inherit = NULL;
+ 	struct ieee802_11_elems *elems;
+ 	size_t scratch_len = 3 * params->len;
+-	bool multi_link_inner = false;
++	bool inside_multilink = false;
+ 
+ 	BUILD_BUG_ON(sizeof(empty_non_inheritance) != empty_non_inheritance[1] + 2);
+ 	BUILD_BUG_ON(offsetof(typeof(*elems_parse), elems) != 0);
+@@ -1129,7 +1129,7 @@ ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params)
+ 		/* must always parse to get elems_parse->ml_basic_elem */
+ 		non_inherit = ieee80211_prep_mle_link_parse(elems_parse, params,
+ 							    &sub);
+-		multi_link_inner = true;
++		inside_multilink = true;
+ 	}
+ 
+ 	elems_parse->skip_vendor =
+@@ -1140,7 +1140,7 @@ ieee802_11_parse_elems_full(struct ieee80211_elems_parse_params *params)
+ 
+ 	/* Override with nontransmitted/per-STA profile if found */
+ 	if (sub.len) {
+-		elems_parse->multi_link_inner = multi_link_inner;
++		elems_parse->inside_multilink = inside_multilink;
+ 		elems_parse->skip_vendor = false;
+ 		_ieee802_11_parse_elems_full(&sub, elems_parse, NULL);
+ 	}
+-- 
+2.53.0
+

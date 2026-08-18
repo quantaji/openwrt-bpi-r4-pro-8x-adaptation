@@ -1,0 +1,43 @@
+From 3b142c38b2c5e9885bb43fed394285c613b3975a Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Fri, 29 May 2026 10:24:56 +0200
+Subject: [PATCH] wifi: mac80211: clean up return in
+ ieee802_11_find_bssid_profile()
+
+There's no need to define 'profile_len' at the outer scope
+and initialize it, move it where needed and just return 0
+if nothing can be found.
+
+Link: https://patch.msgid.link/20260529102644.46f25609ddef.I9e651a0018e66953f4fb508f784188e00351c07f@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/parse.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/net/mac80211/parse.c b/net/mac80211/parse.c
+index c44e81a2f80d..1ed1fc25da12 100644
+--- a/net/mac80211/parse.c
++++ b/net/mac80211/parse.c
+@@ -828,10 +828,9 @@ static size_t ieee802_11_find_bssid_profile(const u8 *start, size_t len,
+ 					    u8 *nontransmitted_profile)
+ {
+ 	const struct element *elem, *sub;
+-	size_t profile_len = 0;
+ 
+ 	if (!bss || !bss->transmitted_bss)
+-		return profile_len;
++		return 0;
+ 
+ 	for_each_element_id(elem, WLAN_EID_MULTIPLE_BSSID, start, len) {
+ 		if (elem->datalen < 2)
+@@ -841,6 +840,7 @@ static size_t ieee802_11_find_bssid_profile(const u8 *start, size_t len,
+ 
+ 		for_each_element(sub, elem->data + 1, elem->datalen - 1) {
+ 			u8 new_bssid[ETH_ALEN];
++			size_t profile_len;
+ 			const u8 *index;
+ 
+ 			if (sub->id != 0 || sub->datalen < 4) {
+-- 
+2.53.0
+

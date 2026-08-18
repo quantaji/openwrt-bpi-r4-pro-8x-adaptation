@@ -1,0 +1,283 @@
+From d879d4da45797a360992b451e25a9a8c0512b1ef Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Wed, 15 Apr 2026 14:42:08 +0200
+Subject: [PATCH] wifi: mac80211: clean up initial STA NSS/bandwidth handling
+
+Currently, the initial STA bandwidth is set during each
+parsing of HT/VHT/... elements to the station capabilities,
+multiple times, in a confusing way that's not very good in
+the case of NAN stations either.
+
+For now, keep the NULL chandef pointer and all that, but
+clean up the initial handling of NSS/BW capabilities and
+then apply the VHT operation mode on top of that. This
+clarifies the code and the client code now also handles
+the bandwidth change from Operating Mode Notification in
+association response.
+
+The HT code is completely unnecessary now, since the VHT
+(soon to be renamed) function will be called and handles
+HT as well.
+
+Reviewed-by: Miriam Rachel Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20260415144514.a4d88eb27a8d.Id7a316e75e7e3dce2023d987e6939060f5286378@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+Backport to OpenWrt backports-6.18.39: adapt the upstream change to
+the target API and source layout while preserving its applicable behavior.
+Signed-off-by: Codex <codex@openai.com>
+---
+ net/mac80211/cfg.c        |  9 ++++++++-
+ net/mac80211/eht.c        |  2 --
+ net/mac80211/he.c         |  2 --
+ net/mac80211/ht.c         | 31 -------------------------------
+ net/mac80211/ibss.c       |  3 ++-
+ net/mac80211/mesh_plink.c |  3 ++-
+ net/mac80211/mlme.c       | 21 ++++++---------------
+ net/mac80211/ocb.c        |  3 ++-
+ net/mac80211/sta_info.c   | 18 +++++++++++-------
+ net/mac80211/sta_info.h   |  3 ++-
+ net/mac80211/vht.c        |  2 --
+ 11 files changed, 33 insertions(+), 64 deletions(-)
+
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index 6b673fe..91d6a2e 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -2134,7 +2134,14 @@ static int sta_link_apply_parameters(struct ieee80211_local *local,
+ 		ieee80211_s1g_cap_to_sta_s1g_cap(sdata, params->s1g_capa,
+ 						 link_sta);
+ 
+-	ieee80211_sta_init_nss(link_sta);
++	switch (sdata->vif.type) {
++	case NL80211_IFTYPE_NAN:
++		/* not applicable - they don't use NSS/BW as capability */
++		break;
++	default:
++		ieee80211_sta_init_nss_bw_capa(link_sta, &link->conf->chanreq.oper);
++		break;
++	}
+ 
+ 	if (params->opmode_notif_used) {
+ 		enum nl80211_chan_width width = link->conf->chanreq.oper.width;
+diff --git a/net/mac80211/eht.c b/net/mac80211/eht.c
+index 92f066a..77ae45b 100644
+--- a/net/mac80211/eht.c
++++ b/net/mac80211/eht.c
+@@ -74,8 +74,6 @@ ieee80211_eht_cap_ie_to_sta_eht_cap(struct ieee80211_sub_if_data *sdata,
+ 
+ 	eht_cap->has_eht = true;
+ 
+-	link_sta->pub->bandwidth = ieee80211_sta_cur_vht_bw(link_sta);
+-
+ 	/*
+ 	 * The MPDU length bits are reserved on all but 2.4 GHz and get set via
+ 	 * VHT (5 GHz) or HE (6 GHz) capabilities.
+diff --git a/net/mac80211/he.c b/net/mac80211/he.c
+index bd761f4..75f6379 100644
+--- a/net/mac80211/he.c
++++ b/net/mac80211/he.c
+@@ -161,8 +161,6 @@ ieee80211_he_cap_ie_to_sta_he_cap(struct ieee80211_sub_if_data *sdata,
+ 
+ 	he_cap->has_he = true;
+ 
+-	link_sta->pub->bandwidth = ieee80211_sta_cur_vht_bw(link_sta);
+-
+ 	if (sband->band == NL80211_BAND_6GHZ && he_6ghz_capa)
+ 		ieee80211_update_from_he_6ghz_capa(he_6ghz_capa, link_sta);
+ 
+diff --git a/net/mac80211/ht.c b/net/mac80211/ht.c
+index e451109..9ce471d 100644
+--- a/net/mac80211/ht.c
++++ b/net/mac80211/ht.c
+@@ -140,14 +140,11 @@ bool ieee80211_ht_cap_ie_to_sta_ht_cap(struct ieee80211_sub_if_data *sdata,
+ 				       const struct ieee80211_ht_cap *ht_cap_ie,
+ 				       struct link_sta_info *link_sta)
+ {
+-	struct ieee80211_bss_conf *link_conf;
+ 	struct sta_info *sta = link_sta->sta;
+ 	struct ieee80211_sta_ht_cap ht_cap, own_cap;
+ 	u8 ampdu_info, tx_mcs_set_cap;
+ 	int i, max_tx_streams;
+ 	bool changed;
+-	enum ieee80211_sta_rx_bandwidth bw;
+-	enum nl80211_chan_width width;
+ 
+ 	memset(&ht_cap, 0, sizeof(ht_cap));
+ 
+@@ -252,34 +249,6 @@ bool ieee80211_ht_cap_ie_to_sta_ht_cap(struct ieee80211_sub_if_data *sdata,
+ 
+ 	memcpy(&link_sta->pub->ht_cap, &ht_cap, sizeof(ht_cap));
+ 
+-	rcu_read_lock();
+-	link_conf = rcu_dereference(sdata->vif.link_conf[link_sta->link_id]);
+-	if (WARN_ON(!link_conf))
+-		width = NL80211_CHAN_WIDTH_20_NOHT;
+-	else
+-		width = link_conf->chanreq.oper.width;
+-
+-	switch (width) {
+-	default:
+-		WARN_ON_ONCE(1);
+-		fallthrough;
+-	case NL80211_CHAN_WIDTH_20_NOHT:
+-	case NL80211_CHAN_WIDTH_20:
+-		bw = IEEE80211_STA_RX_BW_20;
+-		break;
+-	case NL80211_CHAN_WIDTH_40:
+-	case NL80211_CHAN_WIDTH_80:
+-	case NL80211_CHAN_WIDTH_80P80:
+-	case NL80211_CHAN_WIDTH_160:
+-	case NL80211_CHAN_WIDTH_320:
+-		bw = ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40 ?
+-				IEEE80211_STA_RX_BW_40 : IEEE80211_STA_RX_BW_20;
+-		break;
+-	}
+-	rcu_read_unlock();
+-
+-	link_sta->pub->bandwidth = bw;
+-
+ 	if (sta->sdata->vif.type == NL80211_IFTYPE_AP ||
+ 	    sta->sdata->vif.type == NL80211_IFTYPE_AP_VLAN) {
+ 		enum ieee80211_smps_mode smps_mode;
+diff --git a/net/mac80211/ibss.c b/net/mac80211/ibss.c
+index 8b6565b..d7c9699 100644
+--- a/net/mac80211/ibss.c
++++ b/net/mac80211/ibss.c
+@@ -553,7 +553,8 @@ static struct sta_info *ieee80211_ibss_finish_sta(struct sta_info *sta)
+ 
+ 	memcpy(addr, sta->sta.addr, ETH_ALEN);
+ 
+-	ieee80211_sta_init_nss(&sta->deflink);
++	ieee80211_sta_init_nss_bw_capa(&sta->deflink,
++				       &sdata->deflink.conf->chanreq.oper);
+ 
+ 	ibss_dbg(sdata, "Adding new IBSS station %pM\n", addr);
+ 
+diff --git a/net/mac80211/mesh_plink.c b/net/mac80211/mesh_plink.c
+index 1a5409f..27cf2b0 100644
+--- a/net/mac80211/mesh_plink.c
++++ b/net/mac80211/mesh_plink.c
+@@ -469,7 +469,8 @@ static void mesh_sta_info_init(struct ieee80211_sub_if_data *sdata,
+ 					    elems->eht_cap, elems->eht_cap_len,
+ 					    &sta->deflink);
+ 
+-	ieee80211_sta_init_nss(&sta->deflink);
++	ieee80211_sta_init_nss_bw_capa(&sta->deflink,
++				       &sdata->deflink.conf->chanreq.oper);
+ 
+ 	if (bw != sta->sta.deflink.bandwidth)
+ 		changed |= IEEE80211_RC_BW_CHANGED;
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index c543970..3e482c0 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -5604,22 +5604,13 @@ static bool ieee80211_assoc_config_link(struct ieee80211_link_data *link,
+ 	 * next beacon and update then.
+ 	 */
+ 
+-	/*
+-	 * If an operating mode notification element is present, set the opmode
+-	 * NSS override to correct for the current number of spatial streams,
+-	 * overriding the capabilities. ieee80211_sta_init_nss() uses this.
+-	 */
+-	if (elems->opmode_notif &&
+-	    !(*elems->opmode_notif & IEEE80211_OPMODE_NOTIF_RX_NSS_TYPE_BF)) {
+-		u8 nss;
++	ieee80211_sta_init_nss_bw_capa(link_sta, &bss_conf->chanreq.oper);
+ 
+-		nss = *elems->opmode_notif & IEEE80211_OPMODE_NOTIF_RX_NSS_MASK;
+-		nss >>= IEEE80211_OPMODE_NOTIF_RX_NSS_SHIFT;
+-		nss += 1;
+-		link_sta->op_mode_nss = nss;
+-	}
+-
+-	ieee80211_sta_init_nss(link_sta);
++	/* If an operating mode notification element is present, use it. */
++	if (elems->opmode_notif)
++		__ieee80211_vht_handle_opmode(sdata, link_sta,
++					      *elems->opmode_notif,
++					      sband->band);
+ 
+ 	/*
+ 	 * Always handle WMM once after association regardless
+diff --git a/net/mac80211/ocb.c b/net/mac80211/ocb.c
+index 447c842..e9bf4ba 100644
+--- a/net/mac80211/ocb.c
++++ b/net/mac80211/ocb.c
+@@ -92,7 +92,8 @@ static struct sta_info *ieee80211_ocb_finish_sta(struct sta_info *sta)
+ 
+ 	memcpy(addr, sta->sta.addr, ETH_ALEN);
+ 
+-	ieee80211_sta_init_nss(&sta->deflink);
++	ieee80211_sta_init_nss_bw_capa(&sta->deflink,
++				       &sdata->deflink.conf->chanreq.oper);
+ 
+ 	ocb_dbg(sdata, "Adding new IBSS station %pM (dev=%s)\n",
+ 		addr, sdata->name);
+diff --git a/net/mac80211/sta_info.c b/net/mac80211/sta_info.c
+index ad21111..b5bf168 100644
+--- a/net/mac80211/sta_info.c
++++ b/net/mac80211/sta_info.c
+@@ -3453,7 +3453,7 @@ void ieee80211_sta_remove_link(struct sta_info *sta, unsigned int link_id)
+ 	sta_remove_link(sta, link_id, true);
+ }
+ 
+-void ieee80211_sta_init_nss(struct link_sta_info *link_sta)
++static u8 ieee80211_sta_nss_capability(struct link_sta_info *link_sta)
+ {
+ 	u8 ht_rx_nss = 0, vht_rx_nss = 0, he_rx_nss = 0, eht_rx_nss = 0, rx_nss;
+ 	bool support_160;
+@@ -3536,13 +3536,17 @@ void ieee80211_sta_init_nss(struct link_sta_info *link_sta)
+ 	rx_nss = max(he_rx_nss, rx_nss);
+ 	rx_nss = max(eht_rx_nss, rx_nss);
+ 	rx_nss = max_t(u8, 1, rx_nss);
+-	link_sta->capa_nss = rx_nss;
+ 
+-	if (link_sta->op_mode_nss)
+-		link_sta->pub->rx_nss =
+-			min_t(u8, rx_nss, link_sta->op_mode_nss);
+-	else
+-		link_sta->pub->rx_nss = rx_nss;
++	return rx_nss;
++}
++
++void ieee80211_sta_init_nss_bw_capa(struct link_sta_info *link_sta,
++				    struct cfg80211_chan_def *chandef)
++{
++	link_sta->capa_nss = ieee80211_sta_nss_capability(link_sta);
++	link_sta->pub->rx_nss = link_sta->capa_nss;
++
++	link_sta->pub->bandwidth = _ieee80211_sta_cur_vht_bw(link_sta, chandef);
+ }
+ 
+ void ieee80211_sta_set_max_amsdu_subframes(struct sta_info *sta,
+diff --git a/net/mac80211/sta_info.h b/net/mac80211/sta_info.h
+index 62551ee..d42b67a 100644
+--- a/net/mac80211/sta_info.h
++++ b/net/mac80211/sta_info.h
+@@ -996,7 +996,8 @@ void ieee80211_sta_ps_deliver_uapsd(struct sta_info *sta);
+ 
+ unsigned long ieee80211_sta_last_active(struct sta_info *sta, int link_id);
+ 
+-void ieee80211_sta_init_nss(struct link_sta_info *link_sta);
++void ieee80211_sta_init_nss_bw_capa(struct link_sta_info *link_sta,
++				    struct cfg80211_chan_def *chandef);
+ void ieee80211_sta_set_max_amsdu_subframes(struct sta_info *sta,
+ 					   const u8 *ext_capab,
+ 					   unsigned int ext_capab_len);
+diff --git a/net/mac80211/vht.c b/net/mac80211/vht.c
+index a637d7e..7df77a3 100644
+--- a/net/mac80211/vht.c
++++ b/net/mac80211/vht.c
+@@ -294,8 +294,6 @@ ieee80211_vht_cap_ie_to_sta_vht_cap(struct ieee80211_sub_if_data *sdata,
+ 		return;
+ 	}
+ 
+-	link_sta->pub->bandwidth = ieee80211_sta_cur_vht_bw(link_sta);
+-
+ 	/*
+ 	 * Work around the Cisco 9115 FW 17.3 bug by taking the min of
+ 	 * both reported MPDU lengths.
+-- 
+2.53.0

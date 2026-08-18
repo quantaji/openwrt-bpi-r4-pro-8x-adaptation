@@ -1,0 +1,49 @@
+From 8f24be708829854560e1db9f765c51305b046183 Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Sun, 19 Oct 2025 11:50:49 +0300
+Subject: [PATCH] wifi: mac80211: reset CRC valid after CSA
+
+While waiting for a beacon after CSA, reset the CRC valid
+so that the next beacon is handled even if it happens to
+be identical the last one on the old channel. This is an
+AP bug either way, but it's better to disconnect cleanly
+than to have lingering CSA state.
+
+In the iwlwifi instantiation of this problem, mac80211 is
+ignoring the beacon but the firmware creates a new CSA,
+and then crashes later because mac80211/driver didn't do
+anything about it.
+
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+Reviewed-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20251019115024.521ad9c6b87d.I86376900df3d3423185b75bf63358c29f33a5eb6@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/mlme.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 3b5827ea438e..e699702fe5b1 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -2508,6 +2508,16 @@ static void ieee80211_csa_switch_work(struct wiphy *wiphy,
+ 
+ 	link->u.mgd.csa.waiting_bcn = true;
+ 
++	/*
++	 * The next beacon really should always be different, so this should
++	 * have no effect whatsoever. However, some APs (we observed this in
++	 * an Asus AXE11000), the beacon after the CSA might be identical to
++	 * the last beacon on the old channel - in this case we'd ignore it.
++	 * Resetting the CRC will lead us to handle it better (albeit with a
++	 * disconnect, but clearly the AP is broken.)
++	 */
++	link->u.mgd.beacon_crc_valid = false;
++
+ 	/* apply new TPE restrictions immediately on the new channel */
+ 	if (link->u.mgd.csa.ap_chandef.chan->band == NL80211_BAND_6GHZ &&
+ 	    link->u.mgd.conn.mode >= IEEE80211_CONN_MODE_HE) {
+-- 
+2.53.0
+

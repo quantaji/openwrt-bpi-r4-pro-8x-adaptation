@@ -1,0 +1,136 @@
+From ba90a7af74a56326f4ff774674ff4f510dcddee1 Mon Sep 17 00:00:00 2001
+From: Amith A <amith.a@oss.qualcomm.com>
+Date: Fri, 30 Jan 2026 09:25:11 +0530
+Subject: [PATCH] wifi: mac80211: use wiphy_hrtimer_work for CAC timeout
+
+Prior initiating communication in a DFS channel, there should be a
+monitoring of RADAR in that channel for a minimum of 600 seconds if it
+is a Weather RADAR channel and 60 seconds for other DFS channels. This
+Channel Availability Check(CAC) is currently implemented by scheduling
+a work item for execution with a delay equal to an appropriate timeout.
+But this work item is observed to take more delay than specified
+(4-5 seconds in regular DFS channels and 25-30 seconds in Weather RADAR
+channels). Even though this delay is expected in case of delayed work
+queue as there is no guarantee that the work will be scheduled exactly
+after the specified delay, a delay of more than 20 seconds is too much
+for the AP to be in non-operational state.
+
+Recently commit 7ceba45a6658 ("wifi: cfg80211: add an hrtimer based
+delayed work item") added an infrastructure to overcome this issue by
+supporting high resolution timers for mac80211 delayed work, which do not
+have this timeout latency. Switch the CAC timeout to use this
+infrastructure, so the CAC completion handling is triggered with tighter
+timing and reduced latency.
+
+Signed-off-by: Amith A <amith.a@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260130035511.2328713-1-amith.a@oss.qualcomm.com
+[fix delay handling]
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+Backport to OpenWrt backports-6.18.39: adapt the upstream change to
+the target API and source layout while preserving its applicable behavior.
+Signed-off-by: Codex <codex@openai.com>
+---
+ net/mac80211/cfg.c         | 8 ++++----
+ net/mac80211/ieee80211_i.h | 2 +-
+ net/mac80211/iface.c       | 2 +-
+ net/mac80211/link.c        | 4 ++--
+ net/mac80211/util.c        | 2 +-
+ 5 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index b0c6194..3cb6fe7 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -1886,7 +1886,7 @@ static int ieee80211_stop_ap(struct wiphy *wiphy, struct net_device *dev,
+ 
+ 	if (sdata->wdev.links[link_id].cac_started) {
+ 		chandef = link_conf->chanreq.oper;
+-		wiphy_delayed_work_cancel(wiphy, &link->dfs_cac_timer_work);
++		wiphy_hrtimer_work_cancel(wiphy, &link->dfs_cac_timer_work);
+ 		cfg80211_cac_event(sdata->dev, &chandef,
+ 				   NL80211_RADAR_CAC_ABORTED,
+ 				   GFP_KERNEL, link_id);
+@@ -3870,8 +3870,8 @@ static int ieee80211_start_radar_detection(struct wiphy *wiphy,
+ 	if (err)
+ 		return err;
+ 
+-	wiphy_delayed_work_queue(wiphy, &link_data->dfs_cac_timer_work,
+-				 msecs_to_jiffies(cac_time_ms));
++	wiphy_hrtimer_work_queue(wiphy, &link_data->dfs_cac_timer_work,
++				 ms_to_ktime(cac_time_ms));
+ 
+ 	return 0;
+ }
+@@ -3890,7 +3890,7 @@ static void ieee80211_end_cac(struct wiphy *wiphy,
+ 		if (!link_data)
+ 			continue;
+ 
+-		wiphy_delayed_work_cancel(wiphy,
++		wiphy_hrtimer_work_cancel(wiphy,
+ 					  &link_data->dfs_cac_timer_work);
+ 
+ 		if (sdata->wdev.links[link_id].cac_started) {
+diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
+index 4090a41..9f278d4 100644
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -1107,7 +1107,7 @@ struct ieee80211_link_data {
+ 	int ap_power_level; /* in dBm */
+ 
+ 	bool radar_required;
+-	struct wiphy_delayed_work dfs_cac_timer_work;
++	struct wiphy_hrtimer_work dfs_cac_timer_work;
+ 
+ 	union {
+ 		struct ieee80211_link_data_managed mgd;
+diff --git a/net/mac80211/iface.c b/net/mac80211/iface.c
+index 2b4cffa..b8897db 100644
+--- a/net/mac80211/iface.c
++++ b/net/mac80211/iface.c
+@@ -565,7 +565,7 @@ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata, bool going_do
+ 	wiphy_work_cancel(local->hw.wiphy, &sdata->deflink.csa.finalize_work);
+ 	wiphy_work_cancel(local->hw.wiphy,
+ 			  &sdata->deflink.color_change_finalize_work);
+-	wiphy_delayed_work_cancel(local->hw.wiphy,
++	wiphy_hrtimer_work_cancel(local->hw.wiphy,
+ 				  &sdata->deflink.dfs_cac_timer_work);
+ 
+ 	if (sdata->wdev.links[0].cac_started) {
+diff --git a/net/mac80211/link.c b/net/mac80211/link.c
+index 235e370..bfc4768 100644
+--- a/net/mac80211/link.c
++++ b/net/mac80211/link.c
+@@ -121,7 +121,7 @@ void ieee80211_link_init(struct ieee80211_sub_if_data *sdata,
+ 				ieee80211_color_collision_detection_work);
+ 	INIT_LIST_HEAD(&link->assigned_chanctx_list);
+ 	INIT_LIST_HEAD(&link->reserved_chanctx_list);
+-	wiphy_delayed_work_init(&link->dfs_cac_timer_work,
++	wiphy_hrtimer_work_init(&link->dfs_cac_timer_work,
+ 				ieee80211_dfs_cac_timer_work);
+ 
+ 	if (!deflink) {
+@@ -160,7 +160,7 @@ void ieee80211_link_stop(struct ieee80211_link_data *link)
+ 			  &link->csa.finalize_work);
+ 
+ 	if (link->sdata->wdev.links[link->link_id].cac_started) {
+-		wiphy_delayed_work_cancel(link->sdata->local->hw.wiphy,
++		wiphy_hrtimer_work_cancel(link->sdata->local->hw.wiphy,
+ 					  &link->dfs_cac_timer_work);
+ 		cfg80211_cac_event(link->sdata->dev,
+ 				   &link->conf->chanreq.oper,
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index e4f92b9..ae374f6 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -3608,7 +3608,7 @@ void ieee80211_dfs_cac_cancel(struct ieee80211_local *local,
+ 			if (ctx && &ctx->conf != chanctx_conf)
+ 				continue;
+ 
+-			wiphy_delayed_work_cancel(local->hw.wiphy,
++			wiphy_hrtimer_work_cancel(local->hw.wiphy,
+ 						  &link->dfs_cac_timer_work);
+ 
+ 			if (!sdata->wdev.links[link_id].cac_started)
+-- 
+2.53.0

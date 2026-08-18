@@ -1,0 +1,56 @@
+From 0495b64132154dd04ed5d443bb35afd3769a13a6 Mon Sep 17 00:00:00 2001
+From: Sriram R <quic_srirrama@quicinc.com>
+Date: Fri, 20 Feb 2026 01:12:41 +0530
+Subject: [PATCH] wifi: mac80211: fetch FILS discovery template by link ID
+
+Currently, the FILS discovery template is always fetched from the default
+link of a virtual interface in both Multi-Link Operation (MLO) and
+non-MLO cases. However, in the MLO case there is a need to fetch the FILS
+discovery template from a specific link instead of the default link.
+
+Hence, add support for fetching the FILS discovery template based on the
+link ID from the corresponding link data.
+
+Signed-off-by: Sriram R <quic_srirrama@quicinc.com>
+Co-developed-by: Raj Kumar Bhagat <raj.bhagat@oss.qualcomm.com>
+Signed-off-by: Raj Kumar Bhagat <raj.bhagat@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260220-fils-prob-by-link-v1-1-a2746a853f75@oss.qualcomm.com
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+Backport to OpenWrt mt76: extract the mt7915 and mt7996 driver hunks
+from the accepted Linux commit for the separately built mt76 package.
+Signed-off-by: Codex <codex@openai.com>
+---
+ mt7915/mcu.c | 2 +-
+ mt7996/mcu.c | 3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/mt7915/mcu.c b/mt7915/mcu.c
+index ef0ec6a8..1e8c188b 100644
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -2003,7 +2003,7 @@ mt7915_mcu_add_inband_discov(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 
+ 	if (changed & BSS_CHANGED_FILS_DISCOVERY) {
+ 		interval = vif->bss_conf.fils_discovery.max_interval;
+-		skb = ieee80211_get_fils_discovery_tmpl(hw, vif);
++		skb = ieee80211_get_fils_discovery_tmpl(hw, vif, 0);
+ 	} else if (changed & BSS_CHANGED_UNSOL_BCAST_PROBE_RESP &&
+ 		   vif->bss_conf.unsol_bcast_probe_resp_interval) {
+ 		interval = vif->bss_conf.unsol_bcast_probe_resp_interval;
+diff --git a/mt7996/mcu.c b/mt7996/mcu.c
+index 086bf06b..31da4b1f 100644
+--- a/mt7996/mcu.c
++++ b/mt7996/mcu.c
+@@ -3465,7 +3465,8 @@ int mt7996_mcu_beacon_inband_discov(struct mt7996_dev *dev,
+ 	if (changed & BSS_CHANGED_FILS_DISCOVERY &&
+ 	    link_conf->fils_discovery.max_interval) {
+ 		interval = link_conf->fils_discovery.max_interval;
+-		skb = ieee80211_get_fils_discovery_tmpl(hw, vif);
++		skb = ieee80211_get_fils_discovery_tmpl(hw, vif,
++						link_conf->link_id);
+ 	} else if (changed & BSS_CHANGED_UNSOL_BCAST_PROBE_RESP &&
+ 		   link_conf->unsol_bcast_probe_resp_interval) {
+ 		interval = link_conf->unsol_bcast_probe_resp_interval;
+-- 
+2.53.0

@@ -1,0 +1,42 @@
+From 032d1a3fc0e95ca804213df65ef57f5ced2a867b Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Wed, 15 Apr 2026 14:42:05 +0200
+Subject: [PATCH] wifi: nl80211: document channel opmode change channel width
+
+The opmode change notification is entirely unused by existing
+userspace except for printing out the values. As such, there's
+no need to keep it perfectly accurate, and the implementation
+in mac80211 doesn't report it correctly today. Add a note in
+the documentation that it may not differentiate 80+80 and 160.
+
+Reviewed-by: Miriam Rachel Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20260415144514.87d5b1ce688f.Ia9a0769d52dcfe56f7b0dff903ed14db3ef04920@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ include/uapi/linux/nl80211.h | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/include/uapi/linux/nl80211.h b/include/uapi/linux/nl80211.h
+index 3d55bf4be36f..072b383d7d3c 100644
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -1204,10 +1204,12 @@
+  *	user space through the connect result as the user space would have
+  *	initiated the connection through the connect request.
+  *
+- * @NL80211_CMD_STA_OPMODE_CHANGED: An event that notify station's
+- *	ht opmode or vht opmode changes using any of %NL80211_ATTR_SMPS_MODE,
+- *	%NL80211_ATTR_CHANNEL_WIDTH,%NL80211_ATTR_NSS attributes with its
+- *	address(specified in %NL80211_ATTR_MAC).
++ * @NL80211_CMD_STA_OPMODE_CHANGED: An event that notifies that a station's
++ *	HT opmode or VHT opmode changed using any of %NL80211_ATTR_SMPS_MODE,
++ *	%NL80211_ATTR_CHANNEL_WIDTH, %NL80211_ATTR_NSS attributes with its
++ *	address (specified in %NL80211_ATTR_MAC).
++ *	Note that 80+80 and 160 MHz might not be differentiated, i.e. may
++ *	report %NL80211_CHAN_WIDTH_160 instead of %NL80211_CHAN_WIDTH_80P80.
+  *
+  * @NL80211_CMD_GET_FTM_RESPONDER_STATS: Retrieve FTM responder statistics, in
+  *	the %NL80211_ATTR_FTM_RESPONDER_STATS attribute.
+-- 
+2.53.0
+

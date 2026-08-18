@@ -1,0 +1,53 @@
+From f2514ff78855c45fe93c82bdb45f7609dd70c637 Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Tue, 3 Mar 2026 15:08:33 +0100
+Subject: [PATCH] wifi: mac80211: validate HE 6 GHz operation when EHT is used
+
+When in strict mode, validate that the HE 6 GHz operation is
+valid even when EHT operation is used instead. This checks
+that APs are advertising correct information for HE clients,
+without testing with such clients.
+
+Reviewed-by: Ilan Peer <ilan.peer@intel.com>
+Reviewed-by: Miriam Rachel Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20260303150832.74b934163b99.If4d1db3f39c37900cf0d0f4669cd5f8b677daaa0@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+Backport to OpenWrt backports-6.18.39: adapt the upstream change to
+the target API and source layout while preserving its applicable behavior.
+Signed-off-by: Codex <codex@openai.com>
+---
+ net/mac80211/mlme.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 0d81f08..61aacd7 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -216,6 +216,24 @@ ieee80211_determine_ap_chan(struct ieee80211_sub_if_data *sdata,
+ 		}
+ 
+ 		return mode;
++		if (eht_oper && ieee80211_hw_check(&sdata->local->hw, STRICT)) {
++			struct cfg80211_chan_def he_chandef = *chandef;
++
++			if (!ieee80211_chandef_he_6ghz_oper(sdata->local,
++							    he_oper, NULL,
++							    &he_chandef)) {
++				sdata_info(sdata,
++					   "bad HE operation in EHT AP\n");
++				return IEEE80211_CONN_MODE_LEGACY;
++			}
++
++			if (!cfg80211_chandef_compatible(chandef,
++							 &he_chandef)) {
++				sdata_info(sdata, "HE/EHT incompatible\n");
++				return IEEE80211_CONN_MODE_LEGACY;
++			}
++		}
++
+ 	}
+ 
+ 	/* now we have the progression HT, VHT, ... */
+-- 
+2.53.0

@@ -1,0 +1,40 @@
+From cb9959ab5f99611d27a06586add84811fe8102dc Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Wed, 3 Jun 2026 11:18:11 +0200
+Subject: [PATCH] wifi: cfg80211: enforce HE/EHT cap/oper consistency
+
+Xiang Mei reports that mac80211 could crash if eht_cap is set
+but eht_oper isn't. Rather than fixing that for the individual
+user(s), enforce that both HE/EHT have consistent elements.
+
+Reported-by: Xiang Mei <xmei5@asu.edu>
+Fixes: 22c64f37e1d4 ("wifi: mac80211: Update MCS15 support in link_conf")
+Link: https://patch.msgid.link/20260603091812.101894-2-johannes@sipsolutions.net
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+Backport to OpenWrt backports-6.18.39: adapt the validation to the
+target capability parser and beacon operation field layout.
+Signed-off-by: Codex <codex@openai.com>
+---
+ net/wireless/nl80211.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index 8aa2759..7feb3d4 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -6507,6 +6507,12 @@ static int nl80211_calculate_ap_capabilities(struct genl_info *info,
+ 		}
+ 	}
+ 
++	if (!!params->he_cap != !!params->beacon.he_oper)
++		return -EINVAL;
++
++	if (!!params->eht_cap != !!params->beacon.eht_oper)
++		return -EINVAL;
++
+ 	return 0;
+ }
+ 
+-- 
+2.53.0

@@ -1,0 +1,100 @@
+From 50b359896fe55d0443ed550e1fabba71d242031a Mon Sep 17 00:00:00 2001
+From: Benjamin Berg <benjamin.berg@intel.com>
+Date: Sun, 18 Jan 2026 09:51:15 +0200
+Subject: [PATCH] wifi: cfg80211: ignore link disabled flag from userspace
+
+When the AP has an advertised TID to Link Mapping (TTLM) it shall
+include the element in the association response. As such, when this
+element is present it needs to be used for the currently dormant links.
+See Draft P802.11REVmf_D1.0 section 35.3.7.2.3 ("Negotiation of TTLM")
+for the details. The flag is also not usable in case userspace wants to
+specify a negotiated TTLM during association.
+
+Note that for the link reconfiguration case, mac80211 did not use the
+information. Draft P802.11REVmf_D1.0 states in section 35.3.6.4 ("Link
+reconfiguration to the setup links) that we "shall operate with all the
+TIDs mapped to the newly added links ..."
+
+All this means that the flag is not needed. The implementation should
+parse the information from the association response.
+
+Signed-off-by: Benjamin Berg <benjamin.berg@intel.com>
+Reviewed-by: Johannes Berg <johannes.berg@intel.com>
+Reviewed-by: Ilan Peer <ilan.peer@intel.com>
+Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20260118093904.754e057896a5.Ifd06f5ef839a93bfd54d0593dc932870f95f3242@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ include/net/cfg80211.h       |  3 ---
+ include/uapi/linux/nl80211.h |  5 +++--
+ net/wireless/nl80211.c       | 10 ----------
+ 3 files changed, 3 insertions(+), 15 deletions(-)
+
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index 899f267b7cf9..2900202588a5 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -3221,8 +3221,6 @@ struct cfg80211_auth_request {
+  *	if this is %NULL for a link, that link is not requested
+  * @elems: extra elements for the per-STA profile for this link
+  * @elems_len: length of the elements
+- * @disabled: If set this link should be included during association etc. but it
+- *	should not be used until enabled by the AP MLD.
+  * @error: per-link error code, must be <= 0. If there is an error, then the
+  *	operation as a whole must fail.
+  */
+@@ -3230,7 +3228,6 @@ struct cfg80211_assoc_link {
+ 	struct cfg80211_bss *bss;
+ 	const u8 *elems;
+ 	size_t elems_len;
+-	bool disabled;
+ 	int error;
+ };
+ 
+diff --git a/include/uapi/linux/nl80211.h b/include/uapi/linux/nl80211.h
+index 8134f10e4e6c..8433bac48112 100644
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -2880,8 +2880,9 @@ enum nl80211_commands {
+  *	index. If the userspace includes more RNR elements than number of
+  *	MBSSID elements then these will be added in every EMA beacon.
+  *
+- * @NL80211_ATTR_MLO_LINK_DISABLED: Flag attribute indicating that the link is
+- *	disabled.
++ * @NL80211_ATTR_MLO_LINK_DISABLED: Unused. It was used to indicate that a link
++ *	is disabled during association. However, the AP will send the
++ *	information by including a TTLM in the association response.
+  *
+  * @NL80211_ATTR_BSS_DUMP_INCLUDE_USE_DATA: Include BSS usage data, i.e.
+  *	include BSSes that can only be used in restricted scenarios and/or
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index c961cd42a832..03efd45c007f 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -12241,9 +12241,6 @@ static int nl80211_process_links(struct cfg80211_registered_device *rdev,
+ 				return -EINVAL;
+ 			}
+ 		}
+-
+-		links[link_id].disabled =
+-			nla_get_flag(attrs[NL80211_ATTR_MLO_LINK_DISABLED]);
+ 	}
+ 
+ 	return 0;
+@@ -12423,13 +12420,6 @@ static int nl80211_associate(struct sk_buff *skb, struct genl_info *info)
+ 			goto free;
+ 		}
+ 
+-		if (req.links[req.link_id].disabled) {
+-			GENL_SET_ERR_MSG(info,
+-					 "cannot have assoc link disabled");
+-			err = -EINVAL;
+-			goto free;
+-		}
+-
+ 		if (info->attrs[NL80211_ATTR_ASSOC_MLD_EXT_CAPA_OPS])
+ 			req.ext_mld_capa_ops =
+ 				nla_get_u16(info->attrs[NL80211_ATTR_ASSOC_MLD_EXT_CAPA_OPS]);
+-- 
+2.53.0
+

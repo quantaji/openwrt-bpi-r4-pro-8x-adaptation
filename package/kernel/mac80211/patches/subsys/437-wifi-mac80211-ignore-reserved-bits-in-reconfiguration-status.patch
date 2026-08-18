@@ -1,0 +1,84 @@
+From 7dd6f81f4ef801b57f6ce7b0eee32aef5c488538 Mon Sep 17 00:00:00 2001
+From: Benjamin Berg <benjamin.berg@intel.com>
+Date: Wed, 25 Mar 2026 21:57:39 +0200
+Subject: [PATCH] wifi: mac80211: ignore reserved bits in reconfiguration
+ status
+
+The Link ID Info field in the Reconfiguration Status Duple subfield of
+the Reconfiguration Response frame only uses the lower four bits for the
+link ID. The upper bits are reserved and should therefore be ignored.
+
+Signed-off-by: Benjamin Berg <benjamin.berg@intel.com>
+Reviewed-by: Ilan Peer <ilan.peer@intel.com>
+Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20260325215404.ab5ccf4bc62e.I9aef8f4fb6f1b06671bb6cf0e2bd4ec6e4c8bda4@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+Backport to OpenWrt backports-6.18.39: adapt the upstream change to
+the target API and source layout while preserving its applicable behavior.
+Signed-off-by: Codex <codex@openai.com>
+---
+ include/linux/ieee80211.h |  7 +++++++
+ net/mac80211/mlme.c       | 14 ++++++++------
+ 2 files changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/include/linux/ieee80211.h b/include/linux/ieee80211.h
+index e2d3283..6f4b87d 100644
+--- a/include/linux/ieee80211.h
++++ b/include/linux/ieee80211.h
+@@ -1394,6 +1394,13 @@ struct ieee80211_mgmt {
+ /* mgmt header + 1 byte category code */
+ #define IEEE80211_MIN_ACTION_SIZE offsetof(struct ieee80211_mgmt, u.action.u)
+ 
++/* Link Reconfiguration Status Duple field */
++struct ieee80211_ml_reconf_status {
++	u8 info;
++	__le16 status;
++} __packed;
++
++#define IEEE80211_ML_RECONF_LINK_ID_MASK	0xf
+ 
+ /* Management MIC information element (IEEE 802.11w) */
+ struct ieee80211_mmie {
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index de14df6..d558912 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -10276,8 +10276,8 @@ void ieee80211_process_ml_reconf_resp(struct ieee80211_sub_if_data *sdata,
+ 	pos = mgmt->u.action.u.ml_reconf_resp.variable;
+ 	len -= offsetofend(typeof(*mgmt), u.action.u.ml_reconf_resp);
+ 
+-	/* each status duple is 3 octets */
+-	if (len < mgmt->u.action.u.ml_reconf_resp.count * 3) {
++	if (len < mgmt->u.action.u.ml_reconf_resp.count *
++				sizeof(struct ieee80211_ml_reconf_status)) {
+ 		sdata_info(sdata,
+ 			   "mlo: reconf: unexpected len=%zu, count=%u\n",
+ 			   len, mgmt->u.action.u.ml_reconf_resp.count);
+@@ -10286,9 +10286,11 @@ void ieee80211_process_ml_reconf_resp(struct ieee80211_sub_if_data *sdata,
+ 
+ 	link_mask = sta_changed_links;
+ 	for (i = 0; i < mgmt->u.action.u.ml_reconf_resp.count; i++) {
+-		u16 status = get_unaligned_le16(pos + 1);
++		struct ieee80211_ml_reconf_status *reconf_status = (void *)pos;
++		u16 status = le16_to_cpu(reconf_status->status);
+ 
+-		link_id = *pos;
++		link_id = u8_get_bits(reconf_status->info,
++				      IEEE80211_ML_RECONF_LINK_ID_MASK);
+ 
+ 		if (!(link_mask & BIT(link_id))) {
+ 			sdata_info(sdata,
+@@ -10323,8 +10325,8 @@ void ieee80211_process_ml_reconf_resp(struct ieee80211_sub_if_data *sdata,
+ 			sdata->u.mgd.reconf.added_links &= ~BIT(link_id);
+ 		}
+ 
+-		pos += 3;
+-		len -= 3;
++		pos += sizeof(*reconf_status);
++		len -= sizeof(*reconf_status);
+ 	}
+ 
+ 	if (link_mask) {
+-- 
+2.53.0

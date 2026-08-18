@@ -1,0 +1,143 @@
+From b54cf0f4495a8f3fa94245cdda7716792400299e Mon Sep 17 00:00:00 2001
+From: Pagadala Yesu Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+Date: Mon, 10 Nov 2025 14:10:30 +0200
+Subject: [PATCH] wifi: cfg80211/mac80211: Add fallback mechanism for INDOOR_SP
+ connection
+
+Implement fallback to LPI mode when SP mode is not permitted
+by regulatory constraints for INDOOR_SP connections.
+Limit fallback mechanism to client mode.
+
+Signed-off-by: Pagadala Yesu Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+Reviewed-by: Johannes Berg <johannes.berg@intel.com>
+Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20251110140806.8b43201a34ae.I37fc7bb5892eb9d044d619802e8f2095fde6b296@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+Backport to OpenWrt backports-6.18.39: adapt the upstream change to
+the target API and source layout while preserving its applicable behavior.
+Signed-off-by: Codex <codex@openai.com>
+---
+ include/net/cfg80211.h | 9 +++++++--
+ net/mac80211/mlme.c    | 3 ++-
+ net/wireless/core.h    | 3 ++-
+ net/wireless/nl80211.c | 4 ++--
+ net/wireless/scan.c    | 7 ++++---
+ 5 files changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index ca01597..c725f37 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -10124,22 +10124,27 @@ static inline int cfg80211_color_change_notify(struct net_device *dev,
+ /**
+  * cfg80211_6ghz_power_type - determine AP regulatory power type
+  * @control: control flags
++ * @client_flags: &enum ieee80211_channel_flags for station mode to enable
++ *	SP to LPI fallback, zero otherwise.
+  *
+  * Return: regulatory power type from &enum ieee80211_ap_reg_power
+  */
+ static inline enum ieee80211_ap_reg_power
+-cfg80211_6ghz_power_type(u8 control)
++cfg80211_6ghz_power_type(u8 control, u32 client_flags)
+ {
+ 	switch (u8_get_bits(control, IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO)) {
+ 	case IEEE80211_6GHZ_CTRL_REG_LPI_AP:
+ 	case IEEE80211_6GHZ_CTRL_REG_INDOOR_LPI_AP:
+ 		return IEEE80211_REG_LPI_AP;
+ 	case IEEE80211_6GHZ_CTRL_REG_SP_AP:
+-	case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP:
+ 	case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP_OLD:
+ 		return IEEE80211_REG_SP_AP;
+ 	case IEEE80211_6GHZ_CTRL_REG_VLP_AP:
+ 		return IEEE80211_REG_VLP_AP;
++	case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP:
++		if (client_flags & IEEE80211_CHAN_NO_6GHZ_AFC_CLIENT)
++			return IEEE80211_REG_LPI_AP;
++		return IEEE80211_REG_SP_AP;
+ 	default:
+ 		return IEEE80211_REG_UNSET_AP;
+ 	}
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 0806335..0d81f08 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -6092,7 +6092,8 @@ static int ieee80211_prep_channel(struct ieee80211_sub_if_data *sdata,
+ 		he_6ghz_oper = ieee80211_he_6ghz_oper(elems->he_operation);
+ 		if (he_6ghz_oper)
+ 			link->conf->power_type =
+-				cfg80211_6ghz_power_type(he_6ghz_oper->control);
++				cfg80211_6ghz_power_type(he_6ghz_oper->control,
++							 cbss->channel->flags);
+ 		else
+ 			link_info(link,
+ 				  "HE 6 GHz operation missing (on %d MHz), expect issues\n",
+diff --git a/net/wireless/core.h b/net/wireless/core.h
+index 1974a7b..ca4dabd 100644
+--- a/net/wireless/core.h
++++ b/net/wireless/core.h
+@@ -555,7 +555,8 @@ cfg80211_bss_update(struct cfg80211_registered_device *rdev,
+ 		    bool signal_valid, unsigned long ts);
+ 
+ enum ieee80211_ap_reg_power
+-cfg80211_get_6ghz_power_type(const u8 *elems, size_t elems_len);
++cfg80211_get_6ghz_power_type(const u8 *elems, size_t elems_len,
++			     u32 client_flags);
+ 
+ #ifdef CPTCFG_CFG80211_DEVELOPER_WARNINGS
+ #define CFG80211_DEV_WARN_ON(cond)	WARN_ON(cond)
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index f1c4523..fbdcb99 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -6760,7 +6760,7 @@ static int nl80211_start_ap(struct sk_buff *skb, struct genl_info *info)
+ 	beacon_check.relax = true;
+ 	beacon_check.reg_power =
+ 		cfg80211_get_6ghz_power_type(params->beacon.tail,
+-					     params->beacon.tail_len);
++					     params->beacon.tail_len, 0);
+ 	if (!cfg80211_reg_check_beaconing(&rdev->wiphy, &params->chandef,
+ 					  &beacon_check)) {
+ 		err = -EINVAL;
+@@ -6939,7 +6939,7 @@ static int nl80211_set_beacon(struct sk_buff *skb, struct genl_info *info)
+ 	beacon_check.relax = true;
+ 	beacon_check.reg_power =
+ 		cfg80211_get_6ghz_power_type(params->beacon.tail,
+-					     params->beacon.tail_len);
++					     params->beacon.tail_len, 0);
+ 	if (!cfg80211_reg_check_beaconing(&rdev->wiphy,
+ 					  &wdev->links[link_id].ap.chandef,
+ 					  &beacon_check)) {
+diff --git a/net/wireless/scan.c b/net/wireless/scan.c
+index 975244f..6a66cd7 100644
+--- a/net/wireless/scan.c
++++ b/net/wireless/scan.c
+@@ -2222,7 +2222,8 @@ struct cfg80211_inform_single_bss_data {
+ };
+ 
+ enum ieee80211_ap_reg_power
+-cfg80211_get_6ghz_power_type(const u8 *elems, size_t elems_len)
++cfg80211_get_6ghz_power_type(const u8 *elems, size_t elems_len,
++			     u32 client_flags)
+ {
+ 	const struct ieee80211_he_6ghz_oper *he_6ghz_oper;
+ 	struct ieee80211_he_operation *he_oper;
+@@ -2240,13 +2241,13 @@ cfg80211_get_6ghz_power_type(const u8 *elems, size_t elems_len)
+ 	if (!he_6ghz_oper)
+ 		return IEEE80211_REG_UNSET_AP;
+ 
+-	return cfg80211_6ghz_power_type(he_6ghz_oper->control);
++	return cfg80211_6ghz_power_type(he_6ghz_oper->control, client_flags);
+ }
+ 
+ static bool cfg80211_6ghz_power_type_valid(const u8 *elems, size_t elems_len,
+ 					   const u32 flags)
+ {
+-	switch (cfg80211_get_6ghz_power_type(elems, elems_len)) {
++	switch (cfg80211_get_6ghz_power_type(elems, elems_len, flags)) {
+ 	case IEEE80211_REG_LPI_AP:
+ 		return true;
+ 	case IEEE80211_REG_SP_AP:
+-- 
+2.53.0

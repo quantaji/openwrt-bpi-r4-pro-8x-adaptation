@@ -1,0 +1,263 @@
+From dc4b176cce09b8f92ccdc8639feedc7b19e28740 Mon Sep 17 00:00:00 2001
+From: Manish Dharanenthiran <manish.dharanenthiran@oss.qualcomm.com>
+Date: Thu, 27 Nov 2025 15:41:23 +0530
+Subject: [PATCH] wifi: cfg80211: add cfg80211_stop_link() for per-link
+ teardown
+
+Currently, whenever cfg80211_stop_iface() is called, the entire iface
+is stopped. However, there could be a need in AP/P2P_GO mode, where
+one would like to stop a single link in MLO operation instead of the
+whole MLD interface.
+
+Hence, introduce cfg80211_stop_link() to allow drivers to tear down
+only a specified AP/P2P_GO link during MLO operation. Passing -1
+preserves the existing behavior of stopping the whole interface. Make
+cfg80211_stop_iface() call this function by passing -1 to keep the
+default behavior the same, that is, to stop all links and use
+cfg80211_stop_link() with the desired link_id for AP/P2P_GO mode, to
+stop only that link.
+
+This brings no behavioral change for single-link/non-MLO interfaces,
+and enables drivers to stop an AP/P2P_GO link without disrupting other
+links on the same interface.
+
+Signed-off-by: Manish Dharanenthiran <manish.dharanenthiran@oss.qualcomm.com>
+Link: https://patch.msgid.link/20251127-stop_link-v2-1-43745846c5fd@qti.qualcomm.com
+[make cfg80211_stop_iface() inline]
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ include/net/cfg80211.h | 22 ++++++++++++++++++++--
+ net/wireless/core.c    | 24 ++++++++++++++++--------
+ net/wireless/core.h    |  4 +++-
+ net/wireless/reg.c     |  2 +-
+ net/wireless/sysfs.c   |  2 +-
+ net/wireless/trace.h   | 13 ++++++++-----
+ net/wireless/util.c    |  5 +++--
+ 7 files changed, 52 insertions(+), 20 deletions(-)
+
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index 899f267b7cf9..cbccedf32228 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -9788,6 +9788,21 @@ int cfg80211_iter_combinations(struct wiphy *wiphy,
+ int cfg80211_get_radio_idx_by_chan(struct wiphy *wiphy,
+ 				   const struct ieee80211_channel *chan);
+ 
++/**
++ * cfg80211_stop_link - stop AP/P2P_GO link if link_id is non-negative or stops
++ *                      all links on the interface.
++ *
++ * @wiphy: the wiphy
++ * @wdev: wireless device
++ * @link_id: valid link ID in case of MLO AP/P2P_GO Operation or else -1
++ * @gfp: context flags
++ *
++ * If link_id is set during MLO operation, stops only the specified AP/P2P_GO
++ * link and if link_id is set to -1 or last link is stopped, the entire
++ * interface is stopped as if AP was stopped, IBSS/mesh left, STA disconnected.
++ */
++void cfg80211_stop_link(struct wiphy *wiphy, struct wireless_dev *wdev,
++			int link_id, gfp_t gfp);
+ 
+ /**
+  * cfg80211_stop_iface - trigger interface disconnection
+@@ -9801,8 +9816,11 @@ int cfg80211_get_radio_idx_by_chan(struct wiphy *wiphy,
+  *
+  * Note: This doesn't need any locks and is asynchronous.
+  */
+-void cfg80211_stop_iface(struct wiphy *wiphy, struct wireless_dev *wdev,
+-			 gfp_t gfp);
++static inline void
++cfg80211_stop_iface(struct wiphy *wiphy, struct wireless_dev *wdev, gfp_t gfp)
++{
++	cfg80211_stop_link(wiphy, wdev, -1, gfp);
++}
+ 
+ /**
+  * cfg80211_shutdown_all_interfaces - shut down all interfaces for a wiphy
+diff --git a/net/wireless/core.c b/net/wireless/core.c
+index 9a420d627d3c..d0c7d9ff03b3 100644
+--- a/net/wireless/core.c
++++ b/net/wireless/core.c
+@@ -347,7 +347,7 @@ void cfg80211_destroy_ifaces(struct cfg80211_registered_device *rdev)
+ 
+ 			guard(wiphy)(&rdev->wiphy);
+ 
+-			cfg80211_leave(rdev, wdev);
++			cfg80211_leave(rdev, wdev, -1);
+ 			cfg80211_remove_virtual_intf(rdev, wdev);
+ 		}
+ 	}
+@@ -1371,7 +1371,8 @@ void cfg80211_update_iface_num(struct cfg80211_registered_device *rdev,
+ }
+ 
+ void cfg80211_leave(struct cfg80211_registered_device *rdev,
+-		    struct wireless_dev *wdev)
++		    struct wireless_dev *wdev,
++		    int link_id)
+ {
+ 	struct net_device *dev = wdev->netdev;
+ 	struct cfg80211_sched_scan_request *pos, *tmp;
+@@ -1409,7 +1410,7 @@ void cfg80211_leave(struct cfg80211_registered_device *rdev,
+ 		break;
+ 	case NL80211_IFTYPE_AP:
+ 	case NL80211_IFTYPE_P2P_GO:
+-		cfg80211_stop_ap(rdev, dev, -1, true);
++		cfg80211_stop_ap(rdev, dev, link_id, true);
+ 		break;
+ 	case NL80211_IFTYPE_OCB:
+ 		cfg80211_leave_ocb(rdev, dev);
+@@ -1430,27 +1431,34 @@ void cfg80211_leave(struct cfg80211_registered_device *rdev,
+ 	}
+ }
+ 
+-void cfg80211_stop_iface(struct wiphy *wiphy, struct wireless_dev *wdev,
+-			 gfp_t gfp)
++void cfg80211_stop_link(struct wiphy *wiphy, struct wireless_dev *wdev,
++			int link_id, gfp_t gfp)
+ {
+ 	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wiphy);
+ 	struct cfg80211_event *ev;
+ 	unsigned long flags;
+ 
+-	trace_cfg80211_stop_iface(wiphy, wdev);
++	/* Only AP/GO interfaces may have a specific link_id */
++	if (WARN_ON_ONCE(link_id != -1 &&
++			 wdev->iftype != NL80211_IFTYPE_AP &&
++			 wdev->iftype != NL80211_IFTYPE_P2P_GO))
++		link_id = -1;
++
++	trace_cfg80211_stop_link(wiphy, wdev, link_id);
+ 
+ 	ev = kzalloc(sizeof(*ev), gfp);
+ 	if (!ev)
+ 		return;
+ 
+ 	ev->type = EVENT_STOPPED;
++	ev->link_id = link_id;
+ 
+ 	spin_lock_irqsave(&wdev->event_lock, flags);
+ 	list_add_tail(&ev->list, &wdev->event_list);
+ 	spin_unlock_irqrestore(&wdev->event_lock, flags);
+ 	queue_work(cfg80211_wq, &rdev->event_work);
+ }
+-EXPORT_SYMBOL(cfg80211_stop_iface);
++EXPORT_SYMBOL(cfg80211_stop_link);
+ 
+ void cfg80211_init_wdev(struct wireless_dev *wdev)
+ {
+@@ -1589,7 +1597,7 @@ static int cfg80211_netdev_notifier_call(struct notifier_block *nb,
+ 		break;
+ 	case NETDEV_GOING_DOWN:
+ 		scoped_guard(wiphy, &rdev->wiphy) {
+-			cfg80211_leave(rdev, wdev);
++			cfg80211_leave(rdev, wdev, -1);
+ 			cfg80211_remove_links(wdev);
+ 		}
+ 		/* since we just did cfg80211_leave() nothing to do there */
+diff --git a/net/wireless/core.h b/net/wireless/core.h
+index 63dcf315dba7..6ac57b7b2615 100644
+--- a/net/wireless/core.h
++++ b/net/wireless/core.h
+@@ -289,6 +289,7 @@ struct cfg80211_event {
+ 			u8 td_bitmap_len;
+ 		} pa;
+ 	};
++	int link_id;
+ };
+ 
+ struct cfg80211_cached_keys {
+@@ -537,7 +538,8 @@ void cfg80211_update_iface_num(struct cfg80211_registered_device *rdev,
+ 			       enum nl80211_iftype iftype, int num);
+ 
+ void cfg80211_leave(struct cfg80211_registered_device *rdev,
+-		    struct wireless_dev *wdev);
++		    struct wireless_dev *wdev,
++		    int link_id);
+ 
+ void cfg80211_stop_p2p_device(struct cfg80211_registered_device *rdev,
+ 			      struct wireless_dev *wdev);
+diff --git a/net/wireless/reg.c b/net/wireless/reg.c
+index 73cab51f6379..a8ab0ab22d90 100644
+--- a/net/wireless/reg.c
++++ b/net/wireless/reg.c
+@@ -2442,7 +2442,7 @@ static void reg_leave_invalid_chans(struct wiphy *wiphy)
+ 
+ 	list_for_each_entry(wdev, &rdev->wiphy.wdev_list, list)
+ 		if (!reg_wdev_chan_valid(wiphy, wdev))
+-			cfg80211_leave(rdev, wdev);
++			cfg80211_leave(rdev, wdev, -1);
+ }
+ 
+ static void reg_check_chans_work(struct work_struct *work)
+diff --git a/net/wireless/sysfs.c b/net/wireless/sysfs.c
+index 8d142856e385..2e0ea69b9604 100644
+--- a/net/wireless/sysfs.c
++++ b/net/wireless/sysfs.c
+@@ -88,7 +88,7 @@ static void cfg80211_leave_all(struct cfg80211_registered_device *rdev)
+ 	struct wireless_dev *wdev;
+ 
+ 	list_for_each_entry(wdev, &rdev->wiphy.wdev_list, list)
+-		cfg80211_leave(rdev, wdev);
++		cfg80211_leave(rdev, wdev, -1);
+ }
+ 
+ static int wiphy_suspend(struct device *dev)
+diff --git a/net/wireless/trace.h b/net/wireless/trace.h
+index 2b71f1d867a0..643ccf4f0227 100644
+--- a/net/wireless/trace.h
++++ b/net/wireless/trace.h
+@@ -3915,19 +3915,22 @@ TRACE_EVENT(cfg80211_ft_event,
+ 		  WIPHY_PR_ARG, NETDEV_PR_ARG, __entry->target_ap)
+ );
+ 
+-TRACE_EVENT(cfg80211_stop_iface,
+-	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev),
+-	TP_ARGS(wiphy, wdev),
++TRACE_EVENT(cfg80211_stop_link,
++	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev,
++		 int link_id),
++	TP_ARGS(wiphy, wdev, link_id),
+ 	TP_STRUCT__entry(
+ 		WIPHY_ENTRY
+ 		WDEV_ENTRY
++		__field(int, link_id)
+ 	),
+ 	TP_fast_assign(
+ 		WIPHY_ASSIGN;
+ 		WDEV_ASSIGN;
++		__entry->link_id = link_id;
+ 	),
+-	TP_printk(WIPHY_PR_FMT ", " WDEV_PR_FMT,
+-		  WIPHY_PR_ARG, WDEV_PR_ARG)
++	TP_printk(WIPHY_PR_FMT ", " WDEV_PR_FMT ", link_id: %d",
++		  WIPHY_PR_ARG, WDEV_PR_ARG, __entry->link_id)
+ );
+ 
+ TRACE_EVENT(cfg80211_pmsr_report,
+diff --git a/net/wireless/util.c b/net/wireless/util.c
+index 27e8a2f52f04..cc55b759694e 100644
+--- a/net/wireless/util.c
++++ b/net/wireless/util.c
+@@ -1144,7 +1144,8 @@ void cfg80211_process_wdev_events(struct wireless_dev *wdev)
+ 					       ev->ij.channel);
+ 			break;
+ 		case EVENT_STOPPED:
+-			cfg80211_leave(wiphy_to_rdev(wdev->wiphy), wdev);
++			cfg80211_leave(wiphy_to_rdev(wdev->wiphy), wdev,
++				       ev->link_id);
+ 			break;
+ 		case EVENT_PORT_AUTHORIZED:
+ 			__cfg80211_port_authorized(wdev, ev->pa.peer_addr,
+@@ -1203,7 +1204,7 @@ int cfg80211_change_iface(struct cfg80211_registered_device *rdev,
+ 		dev->ieee80211_ptr->use_4addr = false;
+ 		rdev_set_qos_map(rdev, dev, NULL);
+ 
+-		cfg80211_leave(rdev, dev->ieee80211_ptr);
++		cfg80211_leave(rdev, dev->ieee80211_ptr, -1);
+ 
+ 		cfg80211_process_rdev_events(rdev);
+ 		cfg80211_mlme_purge_registrations(dev->ieee80211_ptr);
+-- 
+2.53.0
+

@@ -1,0 +1,139 @@
+From ab806dcd85f0353361eef16559ade5d3eb47ca95 Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Wed, 15 Apr 2026 14:42:00 +0200
+Subject: [PATCH] wifi: mac80211: set cur_max_bandwidth to maximum
+
+Instead of calculating the individual maximum for each
+station from its capabilities, just unconditionally set
+cur_max_bandwidth to IEEE80211_STA_RX_BW_MAX. This still
+works because cur_max_bandwidth is only used together
+with the capabilities of the station anyway, and then
+adjusted by HT channel width notification or VHT opmode
+notification action frames.
+
+Reviewed-by: Miriam Rachel Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20260415144514.43cdb11b5c7e.I99a7ea2ab10b6fffb68a401a26b98d546e428c11@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+Backport to OpenWrt backports-6.18.39: adapt the upstream change to
+the target API and source layout while preserving its applicable behavior.
+Signed-off-by: Codex <codex@openai.com>
+---
+ net/mac80211/eht.c      |  3 +--
+ net/mac80211/he.c       |  1 -
+ net/mac80211/ht.c       |  4 ----
+ net/mac80211/sta_info.c |  2 ++
+ net/mac80211/sta_info.h |  2 +-
+ net/mac80211/vht.c      | 23 -----------------------
+ 6 files changed, 4 insertions(+), 31 deletions(-)
+
+diff --git a/net/mac80211/eht.c b/net/mac80211/eht.c
+index 078e1e2..92f066a 100644
+--- a/net/mac80211/eht.c
++++ b/net/mac80211/eht.c
+@@ -2,7 +2,7 @@
+ /*
+  * EHT handling
+  *
+- * Copyright(c) 2021-2025 Intel Corporation
++ * Copyright(c) 2021-2026 Intel Corporation
+  */
+ 
+ #include "driver-ops.h"
+@@ -74,7 +74,6 @@ ieee80211_eht_cap_ie_to_sta_eht_cap(struct ieee80211_sub_if_data *sdata,
+ 
+ 	eht_cap->has_eht = true;
+ 
+-	link_sta->cur_max_bandwidth = ieee80211_sta_cap_rx_bw(link_sta);
+ 	link_sta->pub->bandwidth = ieee80211_sta_cur_vht_bw(link_sta);
+ 
+ 	/*
+diff --git a/net/mac80211/he.c b/net/mac80211/he.c
+index 5792ef7..bd761f4 100644
+--- a/net/mac80211/he.c
++++ b/net/mac80211/he.c
+@@ -161,7 +161,6 @@ ieee80211_he_cap_ie_to_sta_he_cap(struct ieee80211_sub_if_data *sdata,
+ 
+ 	he_cap->has_he = true;
+ 
+-	link_sta->cur_max_bandwidth = ieee80211_sta_cap_rx_bw(link_sta);
+ 	link_sta->pub->bandwidth = ieee80211_sta_cur_vht_bw(link_sta);
+ 
+ 	if (sband->band == NL80211_BAND_6GHZ && he_6ghz_capa)
+diff --git a/net/mac80211/ht.c b/net/mac80211/ht.c
+index 1c82a28..23c5b56 100644
+--- a/net/mac80211/ht.c
++++ b/net/mac80211/ht.c
+@@ -280,10 +280,6 @@ bool ieee80211_ht_cap_ie_to_sta_ht_cap(struct ieee80211_sub_if_data *sdata,
+ 
+ 	link_sta->pub->bandwidth = bw;
+ 
+-	link_sta->cur_max_bandwidth =
+-		ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40 ?
+-				IEEE80211_STA_RX_BW_40 : IEEE80211_STA_RX_BW_20;
+-
+ 	if (sta->sdata->vif.type == NL80211_IFTYPE_AP ||
+ 	    sta->sdata->vif.type == NL80211_IFTYPE_AP_VLAN) {
+ 		enum ieee80211_smps_mode smps_mode;
+diff --git a/net/mac80211/sta_info.c b/net/mac80211/sta_info.c
+index 98b5ce1..b80791b 100644
+--- a/net/mac80211/sta_info.c
++++ b/net/mac80211/sta_info.c
+@@ -579,6 +579,8 @@ static int sta_info_alloc_link(struct ieee80211_local *local,
+ 	link_info->rx_omi_bw_tx = IEEE80211_STA_RX_BW_MAX;
+ 	link_info->rx_omi_bw_staging = IEEE80211_STA_RX_BW_MAX;
+ 
++	link_info->cur_max_bandwidth = IEEE80211_STA_RX_BW_MAX;
++
+ 	/*
+ 	 * Cause (a) warning(s) if IEEE80211_STA_RX_BW_MAX != 320
+ 	 * or if new values are added to the enum.
+diff --git a/net/mac80211/sta_info.h b/net/mac80211/sta_info.h
+index a1ce6f4..5237e63 100644
+--- a/net/mac80211/sta_info.h
++++ b/net/mac80211/sta_info.h
+@@ -503,7 +503,7 @@ struct ieee80211_fragment_cache {
+  * @status_stats.last_ack_signal: last ACK signal
+  * @status_stats.ack_signal_filled: last ACK signal validity
+  * @status_stats.avg_ack_signal: average ACK signal
+- * @cur_max_bandwidth: maximum bandwidth to use for TX to the station,
++ * @cur_max_bandwidth: dynamic bandwidth limit for the station,
+  *	taken from HT/VHT capabilities or VHT operating mode notification
+  * @rx_omi_bw_rx: RX OMI bandwidth restriction to apply for RX
+  * @rx_omi_bw_tx: RX OMI bandwidth restriction to apply for TX
+diff --git a/net/mac80211/vht.c b/net/mac80211/vht.c
+index b099d79..993a650 100644
+--- a/net/mac80211/vht.c
++++ b/net/mac80211/vht.c
+@@ -294,29 +294,6 @@ ieee80211_vht_cap_ie_to_sta_vht_cap(struct ieee80211_sub_if_data *sdata,
+ 		return;
+ 	}
+ 
+-	/* finally set up the bandwidth */
+-	switch (vht_cap->cap & IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_MASK) {
+-	case IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160MHZ:
+-	case IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160_80PLUS80MHZ:
+-		link_sta->cur_max_bandwidth = IEEE80211_STA_RX_BW_160;
+-		break;
+-	default:
+-		link_sta->cur_max_bandwidth = IEEE80211_STA_RX_BW_80;
+-
+-		if (!(vht_cap->vht_mcs.tx_highest &
+-				cpu_to_le16(IEEE80211_VHT_EXT_NSS_BW_CAPABLE)))
+-			break;
+-
+-		/*
+-		 * If this is non-zero, then it does support 160 MHz after all,
+-		 * in one form or the other. We don't distinguish here (or even
+-		 * above) between 160 and 80+80 yet.
+-		 */
+-		if (cap_info & IEEE80211_VHT_CAP_EXT_NSS_BW_MASK)
+-			link_sta->cur_max_bandwidth =
+-				IEEE80211_STA_RX_BW_160;
+-	}
+-
+ 	link_sta->pub->bandwidth = ieee80211_sta_cur_vht_bw(link_sta);
+ 
+ 	/*
+-- 
+2.53.0

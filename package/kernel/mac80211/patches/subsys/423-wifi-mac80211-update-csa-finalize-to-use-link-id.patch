@@ -1,0 +1,51 @@
+From bfcc957b6a6d992b4b4f6d9c2d66aabf1912b555 Mon Sep 17 00:00:00 2001
+From: Aditya Kumar Singh <aditya.kumar.singh@oss.qualcomm.com>
+Date: Thu, 27 Nov 2025 15:41:24 +0530
+Subject: [PATCH] wifi: mac80211: Update csa_finalize to use link_id
+
+With cfg80211_stop_link() adding support to stop a link in AP/P2P_GO
+mode, in failure cases only the corresponding link can be stopped,
+instead of stopping the whole interface.
+
+Hence, invoke cfg80211_stop_link() directly with the link_id set for
+AP/P2P_GO mode when CSA finalization fails.
+
+Signed-off-by: Aditya Kumar Singh <aditya.kumar.singh@oss.qualcomm.com>
+Signed-off-by: Manish Dharanenthiran <manish.dharanenthiran@oss.qualcomm.com>
+Link: https://patch.msgid.link/20251127-stop_link-v2-2-43745846c5fd@qti.qualcomm.com
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/cfg.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index c81091a5cc3a..27c234948fbe 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -4151,12 +4151,21 @@ static int __ieee80211_csa_finalize(struct ieee80211_link_data *link_data)
+ static void ieee80211_csa_finalize(struct ieee80211_link_data *link_data)
+ {
+ 	struct ieee80211_sub_if_data *sdata = link_data->sdata;
++	int link_id = -1;
+ 
+ 	if (__ieee80211_csa_finalize(link_data)) {
+ 		sdata_info(sdata, "failed to finalize CSA on link %d, disconnecting\n",
+ 			   link_data->link_id);
+-		cfg80211_stop_iface(sdata->local->hw.wiphy, &sdata->wdev,
+-				    GFP_KERNEL);
++		if (sdata->vif.type == NL80211_IFTYPE_AP ||
++		    sdata->vif.type == NL80211_IFTYPE_P2P_GO)
++			/*
++			 * link_id is expected only for AP/P2P_GO type
++			 * currently
++			 */
++			link_id = link_data->link_id;
++
++		cfg80211_stop_link(sdata->local->hw.wiphy, &sdata->wdev,
++				   link_id, GFP_KERNEL);
+ 	}
+ }
+ 
+-- 
+2.53.0
+

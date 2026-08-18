@@ -1,0 +1,44 @@
+From 508dfc1f2ccdc480893332aaeb5e8d076769f7c3 Mon Sep 17 00:00:00 2001
+From: Thomas Wu <quic_wthomas@quicinc.com>
+Date: Tue, 28 Oct 2025 10:04:42 +0530
+Subject: [PATCH] wifi: mac80211: Allow HT Action frame processing on 6 GHz
+ when HE is supported
+
+Management frames on 6 GHz do not include HT Capabilities, causing HT
+Action frames to be dropped in ieee80211_rx_h_action(). The current logic
+checks only ht_cap.ht_supported, which fails for 6 GHz radios that support
+only HE and EHT.
+
+Update the condition to also allow HT Action frame processing when
+he_cap.has_he is true. This enables support for HE dynamic SM power save
+as defined in IEEE Std 802.11ax-2021, section 26.14.4.
+
+Signed-off-by: Thomas Wu <quic_wthomas@quicinc.com>
+Signed-off-by: Aaradhana Sahu <aaradhana.sahu@oss.qualcomm.com>
+Link: https://patch.msgid.link/20251028043442.523647-1-aaradhana.sahu@oss.qualcomm.com
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/mac80211/rx.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/net/mac80211/rx.c b/net/mac80211/rx.c
+index b59aeed340b3..80067ed1da2f 100644
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -3602,8 +3602,11 @@ ieee80211_rx_h_action(struct ieee80211_rx_data *rx)
+ 
+ 	switch (mgmt->u.action.category) {
+ 	case WLAN_CATEGORY_HT:
+-		/* reject HT action frames from stations not supporting HT */
+-		if (!rx->link_sta->pub->ht_cap.ht_supported)
++		/* reject HT action frames from stations not supporting HT
++		 * or not HE Capable
++		 */
++		if (!rx->link_sta->pub->ht_cap.ht_supported &&
++		    !rx->link_sta->pub->he_cap.has_he)
+ 			goto invalid;
+ 
+ 		if (sdata->vif.type != NL80211_IFTYPE_STATION &&
+-- 
+2.53.0
+

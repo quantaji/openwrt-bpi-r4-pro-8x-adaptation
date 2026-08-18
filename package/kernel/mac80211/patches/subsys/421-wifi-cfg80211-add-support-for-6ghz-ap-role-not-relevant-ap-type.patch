@@ -1,0 +1,48 @@
+From a77f0ad44fde89874654ba48f461209fb0382107 Mon Sep 17 00:00:00 2001
+From: Pagadala Yesu Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+Date: Wed, 12 Nov 2025 11:10:23 +0200
+Subject: [PATCH] wifi: cfg80211: Add support for 6GHz AP role not relevant AP
+ type
+
+Add IEEE80211_6GHZ_CTRL_REG_AP_ROLE_NOT_RELEVANT
+and map it to IEEE80211_REG_LPI_AP for safe regulatory compliance
+when AP role classification is not applicable.
+Use LPI as safe fallback to prevent power limit violations.
+
+Signed-off-by: Pagadala Yesu Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+Reviewed-by: Johannes Berg <johannes.berg@intel.com>
+Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Link: https://patch.msgid.link/20251112110828.856283677cc7.I36138a34847c3b4e680974bf347dde844448f3bc@changeid
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ include/linux/ieee80211-he.h | 1 +
+ include/net/cfg80211.h       | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/include/linux/ieee80211-he.h b/include/linux/ieee80211-he.h
+index 904d50db5bb8..a08c446fbb04 100644
+--- a/include/linux/ieee80211-he.h
++++ b/include/linux/ieee80211-he.h
+@@ -548,6 +548,7 @@ static inline bool ieee80211_he_capa_size_ok(const u8 *data, u8 len)
+ #define IEEE80211_6GHZ_CTRL_REG_VLP_AP			2
+ #define IEEE80211_6GHZ_CTRL_REG_INDOOR_LPI_AP		3
+ #define IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP_OLD	4
++#define IEEE80211_6GHZ_CTRL_REG_AP_ROLE_NOT_RELEVANT	7
+ #define IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP		8
+ 
+ /**
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index 625cb2c78361..3d3ed1932262 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -10148,6 +10148,7 @@ cfg80211_6ghz_power_type(u8 control, u32 client_flags)
+ 	switch (u8_get_bits(control, IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO)) {
+ 	case IEEE80211_6GHZ_CTRL_REG_LPI_AP:
+ 	case IEEE80211_6GHZ_CTRL_REG_INDOOR_LPI_AP:
++	case IEEE80211_6GHZ_CTRL_REG_AP_ROLE_NOT_RELEVANT:
+ 		return IEEE80211_REG_LPI_AP;
+ 	case IEEE80211_6GHZ_CTRL_REG_SP_AP:
+ 	case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP_OLD:
+-- 
+2.53.0
+

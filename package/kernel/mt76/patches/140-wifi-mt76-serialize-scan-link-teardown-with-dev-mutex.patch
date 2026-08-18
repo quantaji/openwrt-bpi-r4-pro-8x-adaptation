@@ -1,0 +1,72 @@
+From 498e5ee81537f027d11dc895fb0ae49640dd819b Mon Sep 17 00:00:00 2001
+From: Chad Monroe <chad@monroe.io>
+Date: Wed, 15 Jul 2026 18:30:00 -0700
+Subject: [PATCH] wifi: mt76: serialize scan-link teardown with dev->mutex
+
+The offchannel scan link is allocated in mt76_hw_scan() under
+dev->mutex, but torn down without it: mt76_scan_complete() runs from
+mt76_scan_work() on the mac80211 workqueue, or from mt76_abort_scan(),
+and calls mt76_put_vif_phy_link(), whose vif_link_remove clears the
+per-phy omac_mask and the device-wide vif_mask/mld_idx_mask with plain
+read-modify-write. A vif link add or remove for another interface,
+running concurrently under dev->mutex, can interleave with these
+unlocked writes and lose an update: a cleared bit belonging to a live
+link gets handed out again (two links sharing an omac/bss/wcid index,
+breaking own-MAC unicast RX for the first one), or a freed bit stays
+set until reboot and eventually exhausts the index space.
+
+Take dev->mutex around the scan completion, mirroring the ROC teardown
+in mt76_roc_complete_work()/mt76_abort_roc(), and switch the channel
+restore to __mt76_set_channel() since the caller now holds the lock.
+mt76_abort_scan() keeps cancelling the scan work before taking the
+mutex, so the work-vs-abort ordering is unchanged.
+
+Signed-off-by: Chad Monroe <chad@monroe.io>
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+---
+ scan.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/scan.c b/scan.c
+index 3cb11689d..3594b5996 100644
+--- a/scan.c
++++ b/scan.c
+@@ -11,6 +11,8 @@ static void mt76_scan_complete(struct mt76_dev *dev, bool abort)
+ 		.aborted = abort,
+ 	};
+ 
++	lockdep_assert_held(&dev->mutex);
++
+ 	if (!phy)
+ 		return;
+ 
+@@ -24,7 +26,7 @@ static void mt76_scan_complete(struct mt76_dev *dev, bool abort)
+ 	    !test_bit(MT76_MCU_RESET, &dev->phy.state)) {
+ 		bool offchannel = phy->offchannel;
+ 
+-		mt76_set_channel(phy, &phy->main_chandef, false);
++		__mt76_set_channel(phy, &phy->main_chandef, false);
+ 		if (offchannel)
+ 			mt76_offchannel_notify(phy, false);
+ 	}
+@@ -41,7 +43,10 @@ void mt76_abort_scan(struct mt76_dev *dev)
+ 	spin_unlock_bh(&dev->scan_lock);
+ 
+ 	cancel_delayed_work_sync(&dev->scan_work);
++
++	mutex_lock(&dev->mutex);
+ 	mt76_scan_complete(dev, true);
++	mutex_unlock(&dev->mutex);
+ }
+ EXPORT_SYMBOL_GPL(mt76_abort_scan);
+ 
+@@ -139,7 +144,9 @@ void mt76_scan_work(struct work_struct *work)
+ 		goto probe;
+ 
+ 	if (dev->scan.chan_idx >= req->n_channels) {
++		mutex_lock(&dev->mutex);
+ 		mt76_scan_complete(dev, false);
++		mutex_unlock(&dev->mutex);
+ 		return;
+ 	}
+ 

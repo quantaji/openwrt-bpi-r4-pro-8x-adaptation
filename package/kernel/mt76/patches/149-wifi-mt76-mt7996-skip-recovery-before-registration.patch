@@ -1,0 +1,30 @@
+From: Codex <codex@openai.com>
+Date: Mon, 17 Aug 2026 20:00:00 -0700
+Subject: [PATCH] wifi: mt76: mt7996: skip recovery before registration
+
+An MCU timeout during mt7996_init_hardware() schedules reset_work before
+mt76_register_device() has initialized the mac80211 workqueue.  The reset
+worker then calls ieee80211_restart_hw() against a partially registered hw,
+causing a NULL pointer dereference instead of letting probe fail normally.
+
+Do not start runtime firmware recovery until device registration has
+completed.  The probe path already returns the MCU timeout and unwinds the
+partially initialized device.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ mt7996/mcu.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+--- a/mt7996/mcu.c
++++ b/mt7996/mcu.c
+@@ -229,6 +229,9 @@ static int mt7996_mcu_parse_response(stru
+ 		dev_err(mdev->dev, "Message %08x (seq %d) timeout\n",
+ 			cmd, seq);
+ 
++		if (!dev->recovery.hw_init_done)
++			return -ETIMEDOUT;
++
+ 		if (!test_and_set_bit(MT76_MCU_RESET, &dev->mphy.state)) {
+ 			dev->recovery.restart = true;
+ 			wake_up(&dev->mt76.mcu.wait);
