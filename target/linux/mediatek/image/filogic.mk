@@ -844,7 +844,8 @@ define Device/bananapi_bpi-r4-pro-8x
 		     kmod-hwmon-pwmfan \
 		     kmod-mt7996e kmod-mt7996-firmware \
 		     kmod-mt7996-233-firmware \
-		     kmod-phy-aeonsemi-as21xxx kmod-sfp
+		     kmod-phy-aeonsemi-as21xxx kmod-sfp \
+		     mt7988-wo-firmware
 endef
 TARGET_DEVICES += bananapi_bpi-r4-pro-8x
 
