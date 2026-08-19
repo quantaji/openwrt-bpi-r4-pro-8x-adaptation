@@ -10,10 +10,15 @@ Add WIFI HW reset before PCIe host detects EP device for reboot.
 NA
 
 Signed-off-by: Jianguo Zhang <jianguo.zhang@mediatek.com>
----
- drivers/pci/controller/pcie-mediatek-gen3.c | 29 +++++++++++++++++++++
- 1 file changed, 29 insertions(+)
+[codex: Refresh the patch context after the upstream MediaTek Gen3 PCIe startup and power-down series.]
+Signed-off-by: Codex <codex@openai.com>
 
+---
+ drivers/pci/controller/pcie-mediatek-gen3.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/drivers/pci/controller/pcie-mediatek-gen3.c b/drivers/pci/controller/pcie-mediatek-gen3.c
+index 71ec1ae99d28..e2b8733c37ea 100644
 --- a/drivers/pci/controller/pcie-mediatek-gen3.c
 +++ b/drivers/pci/controller/pcie-mediatek-gen3.c
 @@ -10,6 +10,7 @@
@@ -24,7 +29,7 @@ Signed-off-by: Jianguo Zhang <jianguo.zhang@mediatek.com>
  #include <linux/iopoll.h>
  #include <linux/irq.h>
  #include <linux/irqchip/irq-msi-lib.h>
-@@ -189,6 +190,8 @@ struct mtk_msi_set {
+@@ -195,6 +196,8 @@ struct mtk_msi_set {
   * @num_clks: PCIe clocks count for this port
   * @max_link_speed: Maximum link speed (PCIe Gen) for this port
   * @num_lanes: Number of PCIe lanes for this port
@@ -33,7 +38,7 @@ Signed-off-by: Jianguo Zhang <jianguo.zhang@mediatek.com>
   * @irq: PCIe controller interrupt number
   * @saved_irq_state: IRQ enable state saved at suspend time
   * @irq_lock: lock protecting IRQ register access
-@@ -211,6 +214,9 @@ struct mtk_gen3_pcie {
+@@ -217,6 +220,9 @@ struct mtk_gen3_pcie {
  	u8 max_link_speed;
  	u8 num_lanes;
  
@@ -43,7 +48,7 @@ Signed-off-by: Jianguo Zhang <jianguo.zhang@mediatek.com>
  	int irq;
  	u32 saved_irq_state;
  	raw_spinlock_t irq_lock;
-@@ -464,6 +470,12 @@ static int mtk_pcie_startup_port(struct
+@@ -533,6 +539,12 @@ static int mtk_pcie_startup_port(struct mtk_gen3_pcie *pcie)
  	val |= PCIE_DISABLE_DVFSRC_VLT_REQ;
  	writel_relaxed(val, pcie->base + PCIE_MISC_CTRL_REG);
  
@@ -53,10 +58,10 @@ Signed-off-by: Jianguo Zhang <jianguo.zhang@mediatek.com>
 +		gpiod_set_value_cansleep(pcie->wifi_reset, 0);
 +	}
 +
- 	/*
- 	 * Airoha EN7581 has a hw bug asserting/releasing PCIE_PE_RSTB signal
- 	 * causing occasional PCIe link down. In order to overcome the issue,
-@@ -926,6 +938,20 @@ static int mtk_pcie_parse_port(struct mt
+ 	mtk_pcie_enable_msi(pcie);
+ 
+ 	/* Set PCIe translation windows */
+@@ -959,6 +971,20 @@ static int mtk_pcie_parse_port(struct mtk_gen3_pcie *pcie)
  			pcie->num_lanes = num_lanes;
  	}
  
@@ -77,3 +82,5 @@ Signed-off-by: Jianguo Zhang <jianguo.zhang@mediatek.com>
  	return 0;
  }
  
+-- 
+2.53.0

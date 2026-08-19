@@ -69,7 +69,7 @@ bananapi,bpi-r4-poe)
 	ucidef_set_led_netdev "lan3" "lan3" "mt7530-0:03:green:lan" "lan3" "link tx rx"
 	;;
 bananapi,bpi-r4-pro-8x)
-	ucidef_set_led_netdev "lan5" "lan5" "mt7530-0:00:yellow" "lan5" "link tx rx"
+	ucidef_set_led_netdev "lan5" "lan5" "mt7530-0:00:yellow:lan" "lan5" "link tx rx"
 	;;
 bananapi,bpi-r4-lite)
 	ucidef_set_led_netdev "sfp0" "sfp0" "green:sfp" "sfp0" "link tx rx"

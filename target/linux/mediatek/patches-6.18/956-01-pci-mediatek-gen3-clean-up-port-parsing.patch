@@ -1,0 +1,94 @@
+From 98752193de5b3306b6815cba5a217337c2a93876 Mon Sep 17 00:00:00 2001
+From: Chen-Yu Tsai <wenst@chromium.org>
+Date: Tue, 24 Mar 2026 13:19:53 +0800
+Subject: [PATCH] PCI: mediatek-gen3: Clean up mtk_pcie_parse_port() with
+ dev_err_probe()
+
+mtk_pcie_parse_port() in the pcie-mediatek-gen driver has a bunch of
+
+  if (err) {
+    dev_err(dev, "error message\n");
+    return err; # or goto
+  }
+
+patterns.
+
+Simplify these with dev_err_probe(). The system also gains proper deferred
+probe messages that can be seen in:
+
+  /sys/kernel/debug/devices_deferred
+
+Signed-off-by: Chen-Yu Tsai <wenst@chromium.org>
+Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Reviewed-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Reviewed-by: Bartosz Golaszewski <bartosz.golaszewski@oss.qualcomm.com>
+Reviewed-by: Manivannan Sadhasivam <mani@kernel.org>
+Link: https://patch.msgid.link/20260324052002.4072430-2-wenst@chromium.org
+---
+ drivers/pci/controller/pcie-mediatek-gen3.c | 36 ++++++---------------
+ 1 file changed, 10 insertions(+), 26 deletions(-)
+
+diff --git a/drivers/pci/controller/pcie-mediatek-gen3.c b/drivers/pci/controller/pcie-mediatek-gen3.c
+index 75ddb8bee168..1939cac995b5 100644
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -876,10 +876,8 @@ static int mtk_pcie_parse_port(struct mtk_gen3_pcie *pcie)
+ 	if (!regs)
+ 		return -EINVAL;
+ 	pcie->base = devm_ioremap_resource(dev, regs);
+-	if (IS_ERR(pcie->base)) {
+-		dev_err(dev, "failed to map register base\n");
+-		return PTR_ERR(pcie->base);
+-	}
++	if (IS_ERR(pcie->base))
++		return dev_err_probe(dev, PTR_ERR(pcie->base), "failed to map register base\n");
+ 
+ 	pcie->reg_base = regs->start;
+ 
+@@ -888,34 +886,20 @@ static int mtk_pcie_parse_port(struct mtk_gen3_pcie *pcie)
+ 
+ 	ret = devm_reset_control_bulk_get_optional_shared(dev, num_resets,
+ 							  pcie->phy_resets);
+-	if (ret) {
+-		dev_err(dev, "failed to get PHY bulk reset\n");
+-		return ret;
+-	}
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get PHY bulk reset\n");
+ 
+ 	pcie->mac_reset = devm_reset_control_get_optional_exclusive(dev, "mac");
+-	if (IS_ERR(pcie->mac_reset)) {
+-		ret = PTR_ERR(pcie->mac_reset);
+-		if (ret != -EPROBE_DEFER)
+-			dev_err(dev, "failed to get MAC reset\n");
+-
+-		return ret;
+-	}
++	if (IS_ERR(pcie->mac_reset))
++		return dev_err_probe(dev, PTR_ERR(pcie->mac_reset), "failed to get MAC reset\n");
+ 
+ 	pcie->phy = devm_phy_optional_get(dev, "pcie-phy");
+-	if (IS_ERR(pcie->phy)) {
+-		ret = PTR_ERR(pcie->phy);
+-		if (ret != -EPROBE_DEFER)
+-			dev_err(dev, "failed to get PHY\n");
+-
+-		return ret;
+-	}
++	if (IS_ERR(pcie->phy))
++		return dev_err_probe(dev, PTR_ERR(pcie->phy), "failed to get PHY\n");
+ 
+ 	pcie->num_clks = devm_clk_bulk_get_all(dev, &pcie->clks);
+-	if (pcie->num_clks < 0) {
+-		dev_err(dev, "failed to get clocks\n");
+-		return pcie->num_clks;
+-	}
++	if (pcie->num_clks < 0)
++		return dev_err_probe(dev, pcie->num_clks, "failed to get clocks\n");
+ 
+ 	ret = of_property_read_u32(dev->of_node, "num-lanes", &num_lanes);
+ 	if (ret == 0) {
+-- 
+2.53.0
+

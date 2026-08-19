@@ -840,11 +840,11 @@ define Device/bananapi_bpi-r4-pro-8x
   DEVICE_DTS_CONFIG := config-mt7988a-bananapi-bpi-r4-pro-8x
   DEVICE_BL2 := comb-4bg
   $(call Device/bananapi_bpi-r4-pro-common)
-  DEVICE_PACKAGES += e2fsprogs f2fsck mkf2fs \
-		     kmod-hwmon-pwmfan \
+  DEVICE_PACKAGES += btrfs-progs e2fsprogs f2fsck mkf2fs \
+		     kmod-fs-btrfs kmod-hwmon-pwmfan \
 		     kmod-mt7996e kmod-mt7996-firmware \
 		     kmod-mt7996-233-firmware \
-		     kmod-phy-aeonsemi-as21xxx kmod-sfp \
+		     kmod-nvme kmod-phy-aeonsemi-as21xxx kmod-sfp kmod-usb3 \
 		     mt7988-wo-firmware
 endef
 TARGET_DEVICES += bananapi_bpi-r4-pro-8x

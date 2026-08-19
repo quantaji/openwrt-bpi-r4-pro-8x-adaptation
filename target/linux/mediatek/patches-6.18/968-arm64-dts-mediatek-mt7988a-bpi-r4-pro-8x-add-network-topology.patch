@@ -16,11 +16,14 @@ Based on BPI-R4 Pro topology work by Sean McCully at OpenWrt PR revision
 80f610ddf0075cf896d1e9ccaa47c0f4aa26ef98, MediaTek vendor descriptions,
 and locally validated BPI-R4 Pro 8X wiring.
 
+Define the board-local pinctrl state for PHY3 LED0 because Linux upstream
+keeps Ethernet LED pin groups in each board DTS rather than mt7988a.dtsi.
+
 Signed-off-by: Codex <codex@openai.com>
 ---
 --- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x.dts
 +++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-8x.dts
-@@ -13,4 +13,174 @@
+@@ -13,4 +13,185 @@
  	compatible = "bananapi,bpi-r4-pro-8x",
  		     "bananapi,bpi-r4-pro",
  		     "mediatek,mt7988a";
@@ -187,7 +190,18 @@ Signed-off-by: Codex <codex@openai.com>
 +	};
 +};
 +
++&pio {
++	gbe3_led0_pins: gbe3-led0-pins {
++		mux {
++			function = "led";
++			groups = "gbe3_led0";
++		};
++	};
++};
++
 +&gsw_phy3 {
++	pinctrl-names = "gbe-led";
++	pinctrl-0 = <&gbe3_led0_pins>;
 +	status = "okay";
 +};
 +

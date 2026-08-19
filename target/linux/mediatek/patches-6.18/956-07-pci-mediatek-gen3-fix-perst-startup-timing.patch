@@ -1,0 +1,98 @@
+From 22fc8822d14663cad66f2852e7a14f442e1d3ab5 Mon Sep 17 00:00:00 2001
+From: Jian Yang <jian.yang@mediatek.com>
+Date: Mon, 13 Apr 2026 15:13:55 +0800
+Subject: [PATCH] PCI: mediatek-gen3: Fix PERST# control timing during system
+ startup
+
+Some MediaTek chips stop generating REFCLK if the PCIE_PHY_RSTB signal of
+PCIe controller is asserted at the start of mtk_pcie_devices_power_up().
+
+But the driver deasserts PCIE_PHY_RSTB together with PCIE_PE_RSTB signal
+that is used to deassert PERST#. This violates PCIe CEM r6.0, sec 2.11.2,
+which mandates waiting for 100ms (PCIE_T_PVPERL_MS) after power becomes
+stable.
+
+Move the MAC, PHY and BRG reset deassert code above the PCIE_T_PVPERL_MS
+delay and leave the PCIE_PE_RSTB deassertion after the delay.
+
+Add the 10ms delay mentioned in the MediaTek datasheet after asserting
+PCIE_BRG_RSTB and before accessing the PCIE_RST_CTRL_REG register.
+
+Signed-off-by: Jian Yang <jian.yang@mediatek.com>
+[mani: commit log and comments rewording]
+Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Link: https://patch.msgid.link/20260413071401.1151-2-jian.yang@mediatek.com
+[codex: Backport to Linux 6.18.44 without the unused PCI pwrctrl context.]
+Signed-off-by: Codex <codex@openai.com>
+
+---
+ drivers/pci/controller/pcie-mediatek-gen3.c | 44 +++++++++++++++------
+ 1 file changed, 33 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/pci/controller/pcie-mediatek-gen3.c b/drivers/pci/controller/pcie-mediatek-gen3.c
+index 129fcf36cd80..b921582abc65 100644
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -62,6 +62,12 @@
+ #define PCIE_BRG_RSTB			BIT(2)
+ #define PCIE_PE_RSTB			BIT(3)
+ 
++/*
++ * As described in the datasheet of MediaTek PCIe Gen3 controller, wait 10ms
++ * after setting PCIE_BRG_RSTB, and before accessing PCIe internal registers.
++ */
++#define PCIE_BRG_RST_RDY_MS		10
++
+ #define PCIE_LTSSM_STATUS_REG		0x150
+ #define PCIE_LTSSM_STATE_MASK		GENMASK(28, 24)
+ #define PCIE_LTSSM_STATE(val)		((val & PCIE_LTSSM_STATE_MASK) >> 24)
+@@ -420,18 +426,34 @@ static int mtk_pcie_devices_power_up(struct mtk_gen3_pcie *pcie)
+ 		val |= PCIE_MAC_RSTB | PCIE_PHY_RSTB | PCIE_BRG_RSTB |
+ 		       PCIE_PE_RSTB;
+ 		writel_relaxed(val, pcie->base + PCIE_RST_CTRL_REG);
++	}
++
++	/*
++	 * Some of MediaTek's chips won't output REFCLK when PCIE_PHY_RSTB is
++	 * asserted, we have to de-assert MAC & PHY & BRG reset signals first
++	 * to allow the REFCLK to be stable. While PCIE_BRG_RSTB is asserted,
++	 * there is a short period during which the PCIe internal register
++	 * cannot be accessed, so we need to wait 10ms here.
++	 */
++	msleep(PCIE_BRG_RST_RDY_MS);
++
++	if (!(pcie->soc->flags & SKIP_PCIE_RSTB)) {
++		/* De-assert MAC, PHY and BRG reset signals */
++		val &= ~(PCIE_MAC_RSTB | PCIE_PHY_RSTB | PCIE_BRG_RSTB);
++		writel_relaxed(val, pcie->base + PCIE_RST_CTRL_REG);
++	}
++
++	/*
++	 * Described in PCIe CEM specification revision 6.0.
++	 *
++	 * The deassertion of PERST# should be delayed 100ms (TPVPERL)
++	 * for the power and clock to become stable.
++	 */
++	msleep(PCIE_T_PVPERL_MS);
+ 
+-		/*
+-		 * Described in PCIe CEM specification revision 6.0.
+-		 *
+-		 * The deassertion of PERST# should be delayed 100ms (TPVPERL)
+-		 * for the power and clock to become stable.
+-		 */
+-		msleep(PCIE_T_PVPERL_MS);
+-
+-		/* De-assert reset signals */
+-		val &= ~(PCIE_MAC_RSTB | PCIE_PHY_RSTB | PCIE_BRG_RSTB |
+-			 PCIE_PE_RSTB);
++	if (!(pcie->soc->flags & SKIP_PCIE_RSTB)) {
++		/* De-assert PERST# signal */
++		val &= ~PCIE_PE_RSTB;
+ 		writel_relaxed(val, pcie->base + PCIE_RST_CTRL_REG);
+ 	}
+ 
+-- 
+2.53.0
+

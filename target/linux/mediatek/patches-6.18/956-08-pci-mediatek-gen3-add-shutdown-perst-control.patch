@@ -1,0 +1,48 @@
+From 7a0e17e7a0816d532c0f02e8d64f603a4dc283ee Mon Sep 17 00:00:00 2001
+From: Jian Yang <jian.yang@mediatek.com>
+Date: Mon, 13 Apr 2026 15:13:56 +0800
+Subject: [PATCH] PCI: mediatek-gen3: Add a .shutdown() callback to control
+ PERST# signal
+
+Add a .shutdown() callback to control the timing of PERST# and power during
+system shutdown to ensure that PERST# is asserted before power to the
+connector is removed, as required by PCIe CEM r6.0, sec 2.2.
+
+Signed-off-by: Jian Yang <jian.yang@mediatek.com>
+Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Link: https://patch.msgid.link/20260413071401.1151-3-jian.yang@mediatek.com
+---
+ drivers/pci/controller/pcie-mediatek-gen3.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/pci/controller/pcie-mediatek-gen3.c b/drivers/pci/controller/pcie-mediatek-gen3.c
+index 01badc4f9311..8aec57626f5f 100644
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -1286,6 +1286,14 @@ static void mtk_pcie_remove(struct platform_device *pdev)
+ 	mtk_pcie_irq_teardown(pcie);
+ }
+ 
++static void mtk_pcie_shutdown(struct platform_device *pdev)
++{
++	struct mtk_gen3_pcie *pcie = platform_get_drvdata(pdev);
++
++	mtk_pcie_devices_power_down(pcie);
++	mtk_pcie_power_down(pcie);
++}
++
+ static void mtk_pcie_irq_save(struct mtk_gen3_pcie *pcie)
+ {
+ 	int i;
+@@ -1424,6 +1432,7 @@ MODULE_DEVICE_TABLE(of, mtk_pcie_of_match);
+ static struct platform_driver mtk_pcie_driver = {
+ 	.probe = mtk_pcie_probe,
+ 	.remove = mtk_pcie_remove,
++	.shutdown = mtk_pcie_shutdown,
+ 	.driver = {
+ 		.name = "mtk-pcie-gen3",
+ 		.of_match_table = mtk_pcie_of_match,
+-- 
+2.53.0
+

@@ -1,0 +1,41 @@
+From d39d55d7411c18ca6aeb63aafa8035f4ad8b317f Mon Sep 17 00:00:00 2001
+From: Chen-Yu Tsai <wenst@chromium.org>
+Date: Tue, 5 May 2026 18:59:16 +0800
+Subject: [PATCH] PCI: mediatek-gen3: Do full device power down on removal
+
+When power control for downstream devices was introduced in the
+mediatek-gen3 PCIe controller driver, only the power to the downstream
+devices was cut when the controller driver is removed. This matched
+existing behavior, but in hindsight a proper power down sequence should
+have been followed.
+
+Call mtk_pcie_devices_power_down() on driver removal so that in addition
+to removing power from the downstream devices, PERST# is asserted.
+
+Fixes: 1a152e21940a ("PCI: mediatek-gen3: Integrate new pwrctrl API")
+Signed-off-by: Chen-Yu Tsai <wenst@chromium.org>
+Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Link: https://patch.msgid.link/20260505105918.1823170-1-wenst@chromium.org
+[codex: Backport the PERST# power-down behavior to Linux 6.18.44 without the unused PCI pwrctrl context.]
+Signed-off-by: Codex <codex@openai.com>
+
+---
+ drivers/pci/controller/pcie-mediatek-gen3.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/pci/controller/pcie-mediatek-gen3.c b/drivers/pci/controller/pcie-mediatek-gen3.c
+index ab9cbbb78243..71ec1ae99d28 100644
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -1261,6 +1261,7 @@ static void mtk_pcie_remove(struct platform_device *pdev)
+ 	pci_remove_root_bus(host->bus);
+ 	pci_unlock_rescan_remove();
+ 
++	mtk_pcie_devices_power_down(pcie);
+ 	mtk_pcie_power_down(pcie);
+ 	mtk_pcie_irq_teardown(pcie);
+ }
+-- 
+2.53.0
+

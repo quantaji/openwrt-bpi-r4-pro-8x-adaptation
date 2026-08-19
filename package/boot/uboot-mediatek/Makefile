@@ -1239,7 +1239,7 @@ define U-Boot/mt7988_bananapi_bpi-r4-pro-8x-emmc
   BL2_BOOTDEV:=emmc
   BL2_SOC:=mt7988
   BL2_DDRTYPE:=comb
-  DEPENDS:=+trusted-firmware-a-mt7988-emmc-comb-4bg
+  DEPENDS:=+trusted-firmware-a-mt7988-emmc-comb +trusted-firmware-a-mt7988-emmc-comb-4bg
 endef
 
 define U-Boot/mt7988_bananapi_bpi-r4-pro-8x-sdmmc
@@ -1251,7 +1251,7 @@ define U-Boot/mt7988_bananapi_bpi-r4-pro-8x-sdmmc
   BL2_BOOTDEV:=sdmmc
   BL2_SOC:=mt7988
   BL2_DDRTYPE:=comb
-  DEPENDS:=+trusted-firmware-a-mt7988-sdmmc-comb-4bg
+  DEPENDS:=+trusted-firmware-a-mt7988-sdmmc-comb +trusted-firmware-a-mt7988-sdmmc-comb-4bg
 endef
 
 define U-Boot/mt7988_bananapi_bpi-r4-pro-8x-snand
@@ -1263,7 +1263,7 @@ define U-Boot/mt7988_bananapi_bpi-r4-pro-8x-snand
   BL2_BOOTDEV:=spim-nand-ubi
   BL2_SOC:=mt7988
   BL2_DDRTYPE:=comb
-  DEPENDS:=+trusted-firmware-a-mt7988-spim-nand-ubi-comb-4bg
+  DEPENDS:=+trusted-firmware-a-mt7988-spim-nand-ubi-comb +trusted-firmware-a-mt7988-spim-nand-ubi-comb-4bg
 endef
 
 define U-Boot/mt7988_rfb-spim-nand

@@ -1,0 +1,55 @@
+From 55482b95792bdaceb513da8a66a911da85d812cb Mon Sep 17 00:00:00 2001
+From: Chen-Yu Tsai <wenst@chromium.org>
+Date: Tue, 24 Mar 2026 13:19:58 +0800
+Subject: [PATCH] PCI: mediatek-gen3: Disable device if further setup fails
+
+If further setup fails after the device is powered on and link training
+succeeds, we want to place the device back in a quiescence state to avoid
+unintended activity and save power. This also helps with power state
+tracking and balancing once pwrctrl API is integrated.
+
+Power down the device in the error paths of mtk_pcie_startup_port() and
+mtk_pcie_probe().
+
+Signed-off-by: Chen-Yu Tsai <wenst@chromium.org>
+Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Reviewed-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Reviewed-by: Bartosz Golaszewski <bartosz.golaszewski@oss.qualcomm.com>
+Reviewed-by: Manivannan Sadhasivam <mani@kernel.org>
+Link: https://patch.msgid.link/20260324052002.4072430-7-wenst@chromium.org
+---
+ drivers/pci/controller/pcie-mediatek-gen3.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/pci/controller/pcie-mediatek-gen3.c b/drivers/pci/controller/pcie-mediatek-gen3.c
+index 436dbd925181..aa14b021834f 100644
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -555,10 +555,14 @@ static int mtk_pcie_startup_port(struct mtk_gen3_pcie *pcie)
+ 		dev_err(pcie->dev,
+ 			"PCIe link down, current LTSSM state: %s (%#x)\n",
+ 			ltssm_state, val);
+-		return err;
++		goto err_power_down_device;
+ 	}
+ 
+ 	return 0;
++
++err_power_down_device:
++	mtk_pcie_devices_power_down(pcie);
++	return err;
+ }
+ 
+ #define MTK_MSI_FLAGS_REQUIRED (MSI_FLAG_USE_DEF_DOM_OPS	| \
+@@ -1218,6 +1222,7 @@ static int mtk_pcie_probe(struct platform_device *pdev)
+ 	return 0;
+ 
+ err_power_down_pcie:
++	mtk_pcie_devices_power_down(pcie);
+ 	mtk_pcie_power_down(pcie);
+ err_tear_down_irq:
+ 	mtk_pcie_irq_teardown(pcie);
+-- 
+2.53.0
+

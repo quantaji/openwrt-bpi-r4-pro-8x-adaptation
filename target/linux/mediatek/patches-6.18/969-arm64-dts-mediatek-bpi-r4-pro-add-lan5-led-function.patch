@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 18 Aug 2026 00:00:00 -0700
+Subject: [PATCH] arm64: dts: mediatek: set BPI-R4 Pro lan5 LED function
+
+The integrated PHY0 LED is wired to the yellow activity LED of the
+R4 Pro lan5 port. Give it the standard LAN function so the LED class
+name is complete and OpenWrt can bind its netdev trigger reliably.
+
+The yellow color and lan5 role come from the accepted Linux R4 Pro
+description. The LAN function is corroborated by tested OpenWrt PR
+discussion and the standard MT7988 integrated-PHY LED binding.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ .../boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi       | 1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
+@@ -288,6 +288,7 @@
+ 
+ &gsw_phy0_led0 {
+ 	color = <LED_COLOR_ID_YELLOW>;
++	function = LED_FUNCTION_LAN;
+ 	status = "okay";
+ };
+ 

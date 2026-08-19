@@ -1,0 +1,41 @@
+From f2288803ceb7f341b3fa874058b78b49c4f66d27 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 18 Aug 2026 00:00:00 -0700
+Subject: [PATCH] clk: mediatek: mt7988: fix USB port0 U2 function in 4 PCIe case
+
+Fix the functionality of USB port0 U2 when U2 is enabled without U3.
+In this case, the USB PIPE clock can be disabled, causing USB port0 U2
+to stop detecting devices attached after clk_unused_disable.
+
+Keep both MT7988 USB PIPE clocks enabled during system operation.
+
+Adapted from MediaTek commit f2288803ceb7 ("fix USB port0 U2").
+The original subject was
+"[][openwrt-24][mt7988][clk][fix USB port0 U2 function in 4 PCIe case]".
+The original author is developer <developer@mediatek.com>, dated Wed,
+4 Jun 2025 15:24:35 +0800. The source repository is:
+https://git01.mediatek.com/openwrt/feeds/mtk-openwrt-feeds.git
+
+[codex: Convert the MediaTek feed's inner OpenWrt patch to Linux 6.18
+patch format and refresh context only; the code change is unchanged.]
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/clk/mediatek/clk-mt7988-infracfg.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+--- a/drivers/clk/mediatek/clk-mt7988-infracfg.c
++++ b/drivers/clk/mediatek/clk-mt7988-infracfg.c
+@@ -223,8 +223,9 @@ static const struct mtk_gate infra_clks[
+ 			  CLK_IS_CRITICAL),
+ 	GATE_INFRA3_FLAGS(CLK_INFRA_USB_FRMCNT_CK_P1, "infra_usb_frmcnt_ck_p1", "usb_frmcnt_p1_sel",
+ 			  9, CLK_IS_CRITICAL),
+-	GATE_INFRA3(CLK_INFRA_USB_PIPE, "infra_usb_pipe", "sspxtp_sel", 10),
+-	GATE_INFRA3(CLK_INFRA_USB_PIPE_CK_P1, "infra_usb_pipe_ck_p1", "usb_phy_sel", 11),
++	GATE_INFRA3_FLAGS(CLK_INFRA_USB_PIPE, "infra_usb_pipe", "sspxtp_sel", 10, CLK_IS_CRITICAL),
++	GATE_INFRA3_FLAGS(CLK_INFRA_USB_PIPE_CK_P1, "infra_usb_pipe_ck_p1", "usb_phy_sel", 11,
++			  CLK_IS_CRITICAL),
+ 	GATE_INFRA3(CLK_INFRA_USB_UTMI, "infra_usb_utmi", "top_xtal", 12),
+ 	GATE_INFRA3(CLK_INFRA_USB_UTMI_CK_P1, "infra_usb_utmi_ck_p1", "top_xtal", 13),
+ 	GATE_INFRA3(CLK_INFRA_USB_XHCI, "infra_usb_xhci", "usb_xhci_sel", 14),
+-- 
+2.53.0

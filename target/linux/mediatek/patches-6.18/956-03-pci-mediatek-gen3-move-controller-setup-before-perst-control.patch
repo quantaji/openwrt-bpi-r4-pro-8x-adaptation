@@ -1,0 +1,99 @@
+From cf417e61fc860c496eff37b87e06e8e107d343b5 Mon Sep 17 00:00:00 2001
+From: Chen-Yu Tsai <wenst@chromium.org>
+Date: Tue, 24 Mar 2026 13:19:55 +0800
+Subject: [PATCH] PCI: mediatek-gen3: Move controller setup steps before PERST#
+ control
+
+Setting up the translation windows and enabling MSI involve only the
+controller, not the link or any downstream device. These can be done before
+the device is enabled.
+
+Move these steps before the existing PERST# control and waiting for the
+link to come up. This provides a cleaner separation of controller vs device
+setup. This also allows the later commits that split out PERST# control and
+add device power control to have cleaner teardown.
+
+This change only moves code. No functional change is expected.
+
+Suggested-by: Bjorn Helgaas <helgaas@kernel.org>
+Signed-off-by: Chen-Yu Tsai <wenst@chromium.org>
+Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
+[bhelgaas: commit log]
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Reviewed-by: Bartosz Golaszewski <bartosz.golaszewski@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260324052002.4072430-4-wenst@chromium.org
+---
+ drivers/pci/controller/pcie-mediatek-gen3.c | 50 ++++++++++-----------
+ 1 file changed, 25 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/pci/controller/pcie-mediatek-gen3.c b/drivers/pci/controller/pcie-mediatek-gen3.c
+index 04ae195d36c2..1b6290f2c360 100644
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -464,6 +464,31 @@ static int mtk_pcie_startup_port(struct mtk_gen3_pcie *pcie)
+ 	val |= PCIE_DISABLE_DVFSRC_VLT_REQ;
+ 	writel_relaxed(val, pcie->base + PCIE_MISC_CTRL_REG);
+ 
++	mtk_pcie_enable_msi(pcie);
++
++	/* Set PCIe translation windows */
++	resource_list_for_each_entry(entry, &host->windows) {
++		struct resource *res = entry->res;
++		unsigned long type = resource_type(res);
++		resource_size_t cpu_addr;
++		resource_size_t pci_addr;
++		resource_size_t size;
++
++		if (type == IORESOURCE_IO)
++			cpu_addr = pci_pio_to_address(res->start);
++		else if (type == IORESOURCE_MEM)
++			cpu_addr = res->start;
++		else
++			continue;
++
++		pci_addr = res->start - entry->offset;
++		size = resource_size(res);
++		err = mtk_pcie_set_trans_table(pcie, cpu_addr, pci_addr, size,
++					       type, &table_index);
++		if (err)
++			return err;
++	}
++
+ 	/*
+ 	 * Airoha EN7581 has a hw bug asserting/releasing PCIE_PE_RSTB signal
+ 	 * causing occasional PCIe link down. In order to overcome the issue,
+@@ -510,31 +535,6 @@ static int mtk_pcie_startup_port(struct mtk_gen3_pcie *pcie)
+ 		return err;
+ 	}
+ 
+-	mtk_pcie_enable_msi(pcie);
+-
+-	/* Set PCIe translation windows */
+-	resource_list_for_each_entry(entry, &host->windows) {
+-		struct resource *res = entry->res;
+-		unsigned long type = resource_type(res);
+-		resource_size_t cpu_addr;
+-		resource_size_t pci_addr;
+-		resource_size_t size;
+-
+-		if (type == IORESOURCE_IO)
+-			cpu_addr = pci_pio_to_address(res->start);
+-		else if (type == IORESOURCE_MEM)
+-			cpu_addr = res->start;
+-		else
+-			continue;
+-
+-		pci_addr = res->start - entry->offset;
+-		size = resource_size(res);
+-		err = mtk_pcie_set_trans_table(pcie, cpu_addr, pci_addr, size,
+-					       type, &table_index);
+-		if (err)
+-			return err;
+-	}
+-
+ 	return 0;
+ }
+ 
+-- 
+2.53.0
+
