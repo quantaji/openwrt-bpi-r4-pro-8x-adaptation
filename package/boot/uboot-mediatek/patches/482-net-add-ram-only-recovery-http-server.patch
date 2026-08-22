@@ -1,0 +1,766 @@
+From 5aa97a7cb0921f3cd4e178fecbad21ba4299ea29 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 21 Aug 2026 21:34:45 -0700
+Subject: [PATCH] net: add RAM-only recovery HTTP server
+
+Serve one upload page, receive an application/octet-stream body directly into the approved RAM window, and wait for an acknowledged boot request. The transport does not validate FIT contents or write persistent storage.
+
+The receive structure was informed by hanwckf/bl-mt798x PR 82 and Yuzhii0718/bl-mt798x-dhcpd; this implementation is independently written for bounded RAM-only recovery.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ include/net-legacy.h        |   2 +-
+ include/net/recovery_http.h |  23 ++
+ net/Makefile                |   1 +
+ net/net.c                   |   9 +
+ net/recovery_http.c         | 650 ++++++++++++++++++++++++++++++++++++
+ 5 files changed, 684 insertions(+), 1 deletion(-)
+ create mode 100644 include/net/recovery_http.h
+ create mode 100644 net/recovery_http.c
+
+diff --git a/include/net-legacy.h b/include/net-legacy.h
+index d3b122c..b6f61e2 100644
+--- a/include/net-legacy.h
++++ b/include/net-legacy.h
+@@ -303,7 +303,7 @@ extern int		net_restart_wrap;	/* Tried all network devices */
+ enum proto_t {
+ 	BOOTP, RARP, ARP, TFTPGET, DHCP, DHCP6, PING, PING6, DNS, NFS, CDP,
+ 	NETCONS, SNTP, TFTPSRV, TFTPPUT, LINKLOCAL, FASTBOOT_UDP, FASTBOOT_TCP,
+-	WOL, UDP, NCSI, WGET, RS
++	WOL, UDP, NCSI, WGET, RECOVERY_HTTP, RS
+ };
+ 
+ /* Indicates whether the file name was specified on the command line */
+diff --git a/include/net/recovery_http.h b/include/net/recovery_http.h
+new file mode 100644
+index 0000000..8f93361
+--- /dev/null
++++ b/include/net/recovery_http.h
+@@ -0,0 +1,23 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef __NET_RECOVERY_HTTP_H__
++#define __NET_RECOVERY_HTTP_H__
++
++#include <linux/types.h>
++
++struct recovery_http_request {
++	ulong load_addr;
++	ulong max_size;
++	ulong load_limit;
++	const char *initial_status;
++	void (*set_receiving)(bool receiving);
++};
++
++struct recovery_http_result {
++	ulong received_size;
++};
++
++int recovery_http_run(const struct recovery_http_request *request,
++		      struct recovery_http_result *result);
++void recovery_http_start_server(void);
++
++#endif
+diff --git a/net/Makefile b/net/Makefile
+index ceac6de..765e6ff 100644
+--- a/net/Makefile
++++ b/net/Makefile
+@@ -28,6 +28,7 @@ obj-$(CONFIG_$(PHASE_)TCP_FUNCTION_FASTBOOT)  += fastboot_tcp.o
+ obj-$(CONFIG_CMD_WOL)  += wol.o
+ obj-$(CONFIG_PROT_UDP) += udp.o
+ obj-$(CONFIG_PROT_TCP) += tcp.o
++obj-$(CONFIG_CMD_RECOVERY_WEB) += recovery_http.o
+ obj-$(CONFIG_WGET) += wget.o
+ 
+ # Disable this warning as it is triggered by:
+diff --git a/net/net.c b/net/net.c
+index 61c5a6e..e158fa1 100644
+--- a/net/net.c
++++ b/net/net.c
+@@ -96,6 +96,7 @@
+ #include <net/fastboot_udp.h>
+ #include <net/fastboot_tcp.h>
+ #include <net/ncsi.h>
++#include <net/recovery_http.h>
+ #if defined(CONFIG_CMD_PCAP)
+ #include <net/pcap.h>
+ #endif
+@@ -508,6 +509,11 @@ restart:
+ 			fastboot_tcp_start_server();
+ 			break;
+ #endif
++#if CONFIG_IS_ENABLED(CMD_RECOVERY_WEB)
++		case RECOVERY_HTTP:
++			recovery_http_start_server();
++			break;
++#endif
+ #if defined(CONFIG_CMD_DHCP)
+ 		case DHCP:
+ 			bootp_reset();
+@@ -1509,6 +1515,9 @@ common:
+ 	case NETCONS:
+ 	case FASTBOOT_UDP:
+ 	case FASTBOOT_TCP:
++#if CONFIG_IS_ENABLED(CMD_RECOVERY_WEB)
++	case RECOVERY_HTTP:
++#endif
+ 	case TFTPSRV:
+ 		if (IS_ENABLED(CONFIG_IPV6) && use_ip6) {
+ 			if (!memcmp(&net_link_local_ip6, &net_null_addr_ip6,
+diff --git a/net/recovery_http.c b/net/recovery_http.c
+new file mode 100644
+index 0000000..344bad5
+--- /dev/null
++++ b/net/recovery_http.c
+@@ -0,0 +1,650 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Copyright (C) 2026 OpenAI
++ */
++
++#include <mapmem.h>
++#include <net.h>
++#include <net/recovery_http.h>
++#include <net/tcp.h>
++#include <linux/errno.h>
++#include <linux/string.h>
++
++#define RECOVERY_HTTP_PORT		80
++#define RECOVERY_HTTP_HEADER_SIZE	4096
++#define RECOVERY_HTTP_BODY_SIZE		4096
++#define RECOVERY_HTTP_RESPONSE_SIZE	256
++
++enum recovery_http_request_kind {
++	RECOVERY_HTTP_REQUEST_NONE,
++	RECOVERY_HTTP_REQUEST_PAGE,
++	RECOVERY_HTTP_REQUEST_UPLOAD,
++	RECOVERY_HTTP_REQUEST_BOOT,
++};
++
++struct recovery_http_connection {
++	enum recovery_http_request_kind kind;
++
++	char header[RECOVERY_HTTP_HEADER_SIZE + 1];
++	u32 header_length;
++	bool header_parsed;
++
++	ulong content_length;
++	bool receiving;
++
++	char response_header[RECOVERY_HTTP_RESPONSE_SIZE];
++	char response_body[RECOVERY_HTTP_BODY_SIZE];
++	u32 response_header_length;
++	u32 response_body_length;
++	bool response_ready;
++	bool response_acked;
++	bool boot_after_close;
++};
++
++struct recovery_http_server {
++	struct recovery_http_request request;
++	struct recovery_http_result *result;
++	struct recovery_http_connection connection;
++
++	ulong uploaded_size;
++	bool upload_valid;
++};
++
++static struct recovery_http_server recovery_http;
++
++static const char recovery_http_page[] =
++	"<!doctype html>\n"
++	"<html><head><meta charset=utf-8>\n"
++	"<meta name=viewport content=\"width=device-width,initial-scale=1\">\n"
++	"<title>BPI-R4 Pro 8X Web Rescue</title><style>\n"
++	":root{color-scheme:dark}*{box-sizing:border-box}\n"
++	"body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;\n"
++	"background:#0d0f10;color:#f2f2f2;font:16px system-ui,sans-serif}\n"
++	"main{width:min(100%%,620px);padding:32px;background:#171a1c;\n"
++	"border:1px solid #303438;border-radius:16px}\n"
++	".eyebrow{margin:0 0 8px;color:#f5b942;font-size:12px;font-weight:700;letter-spacing:.16em}\n"
++	"h1{margin:0;font-size:34px}.lead,.hint{color:#a7adb2}.lead{margin:10px 0 24px}\n"
++	".notice{padding:14px 16px;background:#211c12;border:1px solid #5a481f;\n"
++	"border-radius:10px;color:#ffd166}.notice span{display:block;margin-top:4px;color:#a7adb2}\n"
++	".step{display:grid;grid-template-columns:32px 1fr;gap:12px;margin-top:24px}\n"
++	".number{display:grid;place-items:center;width:28px;height:28px;border-radius:50%%;\n"
++	"background:#2a2518;color:#ffd166;font-weight:700}\n"
++	"h2{margin:2px 0 4px;font-size:17px}.hint{margin:0;font-size:14px}\n"
++	"input{width:100%%;margin:14px 0 10px;padding:12px;background:#101214;color:#f2f2f2;\n"
++	"border:1px solid #303438;border-radius:9px}\n"
++	"button{width:100%%;padding:12px;background:#f5b942;color:#171a1c;border:0;\n"
++	"border-radius:9px;font:inherit;font-weight:700}\n"
++	"button:hover:not(:disabled){background:#ffd166}\n"
++	"button:disabled{background:#292c2e;color:#72777b}\n"
++	"progress{width:100%%;height:7px;margin-top:12px;accent-color:#f5b942}\n"
++	".status{margin:14px 0 10px;padding:12px 14px;border-radius:9px;font-size:14px}\n"
++	".waiting{background:#101214;color:#a7adb2}.ready{background:#163225;color:#72d29a}\n"
++	".error{background:#3b1919;color:#ffaaaa}\n"
++	"</style></head><body>\n"
++	"<main><header><p class=eyebrow>BPI-R4 PRO 8X</p><h1>Web Rescue</h1>\n"
++	"<p class=lead>Boot a recovery image directly in RAM.</p></header>\n"
++	"<div class=notice><strong>RAM-only recovery</strong>\n"
++	"<span>No storage will be modified by this page.</span></div>\n"
++	"<div class=step><span class=number>1</span><div><h2>Select image</h2>\n"
++	"<p class=hint>Choose a BPI-R4 Pro 8X initramfs-recovery .itb image, "
++	"up to 128 MiB.</p></div></div>\n"
++	"<input id=file type=file accept=.itb,application/octet-stream>\n"
++	"<button onclick=upload()>Upload recovery</button>\n"
++	"<progress id=progress value=0 max=100></progress>\n"
++	"<div class=step><span class=number>2</span><div><h2>Boot recovery</h2>\n"
++	"<p class=hint>Start the uploaded image from memory.</p></div></div>\n"
++	"<div id=status class=\"status %s\">%s</div>\n"
++	"<button onclick=boot() %s>Boot recovery</button>\n"
++	"<script>\n"
++	"const state=document.getElementById('status');\n"
++	"const file=document.getElementById('file');\n"
++	"const progress=document.getElementById('progress');\n"
++	"function upload(){\n"
++	"let f=file.files[0];\n"
++	"if(!f){state.className='status error';\n"
++	"state.textContent='Select a recovery image first.';return}\n"
++	"let x=new XMLHttpRequest();\n"
++	"x.open('POST','/upload');\n"
++	"x.setRequestHeader('Content-Type','application/octet-stream');\n"
++	"x.upload.onprogress=e=>{if(e.lengthComputable){let p=Math.round(e.loaded*100/e.total);\n"
++	"progress.value=p;state.className='status waiting';\n"
++	"state.textContent='Uploading recovery image... '+p+'%%'}};\n"
++	"x.onload=()=>{state.textContent=x.responseText;if(x.status==200)location.reload();\n"
++	"else state.className='status error'};\n"
++	"x.onerror=()=>{state.className='status error';state.textContent='Upload failed.'};\n"
++	"x.send(f)}\n"
++	"function reloadWhenReady(){\n"
++	"let x=new XMLHttpRequest();\n"
++	"x.open('GET','/');\n"
++	"x.timeout=1000;\n"
++	"x.onload=()=>location.reload();\n"
++	"x.onerror=x.ontimeout=()=>setTimeout(reloadWhenReady,500);\n"
++	"x.send()}\n"
++	"function boot(){\n"
++	"let x=new XMLHttpRequest();\n"
++	"x.open('POST','/boot');\n"
++	"x.onload=()=>{\n"
++	"state.textContent=x.responseText;\n"
++	"if(x.status==200)setTimeout(reloadWhenReady,500);\n"
++	"else state.className='status error'};\n"
++	"x.onerror=()=>{state.className='status error';state.textContent='Boot request failed.'};\n"
++	"x.send()}\n"
++	"</script></main></body></html>\n";
++
++static int recovery_http_find_header_end(const char *header, u32 length)
++{
++	u32 offset;
++
++	for (offset = 0; offset + 3 < length; offset++) {
++		if (!memcmp(header + offset, "\r\n\r\n", 4))
++			return offset + 4;
++	}
++
++	return -ENOENT;
++}
++
++static int recovery_http_parse_request(struct recovery_http_connection *connection)
++{
++	char *line = connection->header;
++	char *line_end;
++	char *value;
++	char *value_end;
++	ulong content_length = 0;
++	bool content_length_seen = false;
++	bool content_type_seen = false;
++
++	line_end = strstr(line, "\r\n");
++	if (!line_end)
++		return -EINVAL;
++	*line_end = '\0';
++
++	if (!strcmp(line, "GET / HTTP/1.0") ||
++	    !strcmp(line, "GET / HTTP/1.1")) {
++		connection->kind = RECOVERY_HTTP_REQUEST_PAGE;
++	} else if (!strcmp(line, "POST /upload HTTP/1.0") ||
++		   !strcmp(line, "POST /upload HTTP/1.1")) {
++		connection->kind = RECOVERY_HTTP_REQUEST_UPLOAD;
++	} else if (!strcmp(line, "POST /boot HTTP/1.0") ||
++		   !strcmp(line, "POST /boot HTTP/1.1")) {
++		connection->kind = RECOVERY_HTTP_REQUEST_BOOT;
++	} else if (!strncmp(line, "GET ", 4) ||
++		   !strncmp(line, "POST ", 5)) {
++		return -ENOENT;
++	} else {
++		return -ENOSYS;
++	}
++
++	line = line_end + 2;
++	while (line < connection->header + connection->header_length) {
++		line_end = strstr(line, "\r\n");
++		if (!line_end)
++			return -EINVAL;
++		*line_end = '\0';
++		if (!*line)
++			break;
++
++		if (!strncasecmp(line, "Content-Length:", 15)) {
++			if (content_length_seen)
++				return -EINVAL;
++			content_length_seen = true;
++			value = line + 15;
++			while (*value == ' ' || *value == '\t')
++				value++;
++			if (*value < '0' || *value > '9')
++				return -EINVAL;
++
++			content_length = 0;
++			while (*value >= '0' && *value <= '9') {
++				ulong digit = *value - '0';
++
++				if (content_length > (~0UL - digit) / 10)
++					return -EOVERFLOW;
++				content_length = content_length * 10 + digit;
++				value++;
++			}
++			while (*value == ' ' || *value == '\t')
++				value++;
++			if (*value)
++				return -EINVAL;
++		} else if (!strncasecmp(line, "Content-Type:", 13)) {
++			if (content_type_seen)
++				return -EINVAL;
++			content_type_seen = true;
++			value = line + 13;
++			while (*value == ' ' || *value == '\t')
++				value++;
++			value_end = value + strlen(value);
++			while (value_end > value &&
++			       (value_end[-1] == ' ' || value_end[-1] == '\t'))
++				*--value_end = '\0';
++			if (strcasecmp(value, "application/octet-stream"))
++				return -EOPNOTSUPP;
++		} else if (!strncasecmp(line, "Transfer-Encoding:", 18)) {
++			return -EPROTO;
++		}
++
++		line = line_end + 2;
++	}
++
++	connection->content_length = content_length;
++	if (connection->kind == RECOVERY_HTTP_REQUEST_UPLOAD) {
++		if (!content_length_seen || !content_length)
++			return -EINVAL;
++		if (!content_type_seen)
++			return -EOPNOTSUPP;
++		if (content_length > recovery_http.request.max_size ||
++		    content_length > recovery_http.request.load_limit -
++				     recovery_http.request.load_addr)
++			return -EFBIG;
++	} else if (content_length_seen && content_length) {
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int recovery_http_store_body(ulong offset, const void *data, ulong size)
++{
++	const struct recovery_http_request *request = &recovery_http.request;
++	struct recovery_http_connection *connection = &recovery_http.connection;
++	ulong address;
++	void *mapped;
++
++	if (offset > connection->content_length ||
++	    size > connection->content_length - offset)
++		return -EFBIG;
++	if (offset > request->max_size || size > request->max_size - offset)
++		return -EFBIG;
++
++	address = request->load_addr + offset;
++	if (address < request->load_addr || address > request->load_limit ||
++	    size > request->load_limit - address)
++		return -EOVERFLOW;
++
++	mapped = map_sysmem(address, size);
++	memcpy(mapped, data, size);
++	unmap_sysmem(mapped);
++
++	return 0;
++}
++
++static int recovery_http_queue_response(struct recovery_http_connection *connection,
++					const char *status, const char *content_type,
++		const char *body, bool boot_after_close)
++{
++	size_t body_length = strlen(body);
++	int length;
++
++	if (body_length >= sizeof(connection->response_body))
++		return -ENOSPC;
++	memmove(connection->response_body, body, body_length + 1);
++	connection->response_body_length = body_length;
++
++	length = snprintf(connection->response_header,
++			  sizeof(connection->response_header),
++			  "HTTP/1.1 %s\r\n"
++			  "Content-Type: %s\r\n"
++			  "Content-Length: %u\r\n"
++			  "Connection: close\r\n"
++			  "\r\n",
++			  status, content_type,
++			  connection->response_body_length);
++	if (length < 0 || length >= sizeof(connection->response_header))
++		return -ENOSPC;
++
++	connection->response_header_length = length;
++	connection->response_ready = true;
++	connection->response_acked = false;
++	connection->boot_after_close = boot_after_close;
++
++	return 0;
++}
++
++static int recovery_http_rx(struct tcp_stream *tcp, u32 rx_offs,
++			    void *data, int length)
++{
++	struct recovery_http_connection *connection = tcp->priv;
++	u64 stream_end;
++	u32 body_start;
++	u32 data_offset;
++	u32 body_offset;
++	u32 body_length;
++
++	if (length <= 0)
++		return length;
++	if (connection->response_ready)
++		return length;
++
++	stream_end = (u64)rx_offs + length;
++	if (!connection->header_parsed) {
++		if (stream_end > RECOVERY_HTTP_HEADER_SIZE)
++			return 0;
++		memcpy(connection->header + rx_offs, data, length);
++		return length;
++	}
++
++	if (connection->kind != RECOVERY_HTTP_REQUEST_UPLOAD)
++		return -EPROTO;
++
++	body_start = connection->header_length;
++	if (stream_end <= body_start)
++		return length;
++
++	data_offset = rx_offs < body_start ? body_start - rx_offs : 0;
++	body_offset = rx_offs + data_offset - body_start;
++	body_length = length - data_offset;
++	if (recovery_http_store_body(body_offset,
++				     (const char *)data + data_offset,
++				     body_length))
++		return -EFBIG;
++
++	return length;
++}
++
++static int recovery_http_tx(struct tcp_stream *tcp, u32 tx_offs,
++			    void *data, int max_length)
++{
++	struct recovery_http_connection *connection = tcp->priv;
++	u32 total_length;
++	u32 copied = 0;
++	u32 length;
++
++	if (!connection->response_ready || max_length <= 0)
++		return 0;
++
++	total_length = connection->response_header_length +
++		       connection->response_body_length;
++	if (tx_offs >= total_length)
++		return 0;
++
++	if (tx_offs < connection->response_header_length) {
++		length = min_t(u32, max_length,
++			       connection->response_header_length - tx_offs);
++		memcpy(data, connection->response_header + tx_offs, length);
++		copied += length;
++		tx_offs += length;
++		max_length -= length;
++	}
++
++	if (max_length && tx_offs >= connection->response_header_length) {
++		u32 body_offset = tx_offs - connection->response_header_length;
++
++		length = min_t(u32, max_length,
++			       connection->response_body_length - body_offset);
++		memcpy((char *)data + copied,
++		       connection->response_body + body_offset, length);
++		copied += length;
++	}
++
++	return copied;
++}
++
++static void recovery_http_on_rcv_nxt_update(struct tcp_stream *tcp,
++					    u32 received)
++{
++	struct recovery_http_connection *connection = tcp->priv;
++	const char *status;
++	const char *status_class;
++	const char *message;
++	char page_status[96];
++	int header_end;
++	int length;
++	int ret;
++	ulong body_received;
++
++	if (connection->response_ready)
++		return;
++
++	if (!connection->header_parsed) {
++		if (received > RECOVERY_HTTP_HEADER_SIZE) {
++			tcp_stream_reset(tcp);
++			return;
++		}
++		connection->header[received] = '\0';
++		header_end = recovery_http_find_header_end(connection->header,
++							   received);
++		if (header_end < 0) {
++			if (received == RECOVERY_HTTP_HEADER_SIZE) {
++				connection->header_parsed = true;
++				ret = recovery_http_queue_response(connection,
++								   "431 Request Header Fields Too Large",
++					"text/plain",
++					"Request header is too large\n", false);
++				if (ret)
++					tcp_stream_reset(tcp);
++			}
++			return;
++		}
++
++		connection->header_length = header_end;
++		connection->header_parsed = true;
++		ret = recovery_http_parse_request(connection);
++		if (ret) {
++			status = "400 Bad Request";
++			message = "Invalid request\n";
++			if (ret == -ENOENT) {
++				status = "404 Not Found";
++				message = "Not found\n";
++			} else if (ret == -ENOSYS) {
++				status = "405 Method Not Allowed";
++				message = "Method not allowed\n";
++			} else if (ret == -EFBIG || ret == -EOVERFLOW) {
++				status = "413 Content Too Large";
++				message = "Recovery image is too large\n";
++			} else if (ret == -EOPNOTSUPP) {
++				status = "415 Unsupported Media Type";
++				message = "Use application/octet-stream\n";
++			}
++
++			ret = recovery_http_queue_response(connection, status,
++							   "text/plain", message,
++							   false);
++			if (ret)
++				tcp_stream_reset(tcp);
++			return;
++		}
++
++		if (connection->kind == RECOVERY_HTTP_REQUEST_PAGE) {
++			if (recovery_http.upload_valid) {
++				ret = snprintf(page_status, sizeof(page_status),
++					       "Recovery image ready: %lu bytes.",
++					       recovery_http.uploaded_size);
++				if (ret < 0 || ret >= (int)sizeof(page_status)) {
++					tcp_stream_reset(tcp);
++					return;
++				}
++				status_class = "ready";
++				status = "";
++			} else {
++				message = recovery_http.request.initial_status;
++				if (!message || !*message) {
++					message = "No complete recovery image has been uploaded.";
++					status_class = "waiting";
++				} else {
++					status_class = "error";
++				}
++
++				strlcpy(page_status, message, sizeof(page_status));
++				status = "disabled";
++			}
++
++			length = snprintf(connection->response_body,
++					  sizeof(connection->response_body),
++					  recovery_http_page, status_class,
++					  page_status, status);
++			if (length < 0 ||
++			    length >= sizeof(connection->response_body)) {
++				tcp_stream_reset(tcp);
++				return;
++			}
++			ret = recovery_http_queue_response(connection, "200 OK",
++							   "text/html; charset=utf-8",
++							   connection->response_body,
++							   false);
++			if (ret)
++				tcp_stream_reset(tcp);
++			return;
++		}
++
++		if (connection->kind == RECOVERY_HTTP_REQUEST_BOOT) {
++			if (!recovery_http.upload_valid) {
++				ret = recovery_http_queue_response(connection,
++								   "409 Conflict", "text/plain",
++					"No complete recovery image is available\n",
++					false);
++				if (ret)
++					tcp_stream_reset(tcp);
++				return;
++			}
++
++			if (recovery_http.request.set_receiving)
++				recovery_http.request.set_receiving(true);
++			ret = recovery_http_queue_response(connection, "200 OK",
++							   "text/plain",
++				"Booting recovery image\n", true);
++			if (ret) {
++				if (recovery_http.request.set_receiving)
++					recovery_http.request.set_receiving(false);
++				tcp_stream_reset(tcp);
++			}
++			return;
++		}
++
++		recovery_http.upload_valid = false;
++		recovery_http.uploaded_size = 0;
++		connection->receiving = true;
++		if (recovery_http.request.set_receiving)
++			recovery_http.request.set_receiving(true);
++
++		body_received = received - connection->header_length;
++		if (body_received &&
++		    recovery_http_store_body(0,
++					     connection->header + connection->header_length,
++			body_received)) {
++			tcp_stream_reset(tcp);
++			return;
++		}
++	}
++
++	if (connection->kind != RECOVERY_HTTP_REQUEST_UPLOAD)
++		return;
++
++	body_received = received - connection->header_length;
++	if (body_received != connection->content_length)
++		return;
++
++	connection->receiving = false;
++	recovery_http.uploaded_size = connection->content_length;
++	recovery_http.upload_valid = true;
++	if (recovery_http.request.set_receiving)
++		recovery_http.request.set_receiving(false);
++
++	length = snprintf(connection->response_body,
++			  sizeof(connection->response_body),
++			  "Received %lu bytes\n", recovery_http.uploaded_size);
++	if (length < 0 || length >= sizeof(connection->response_body)) {
++		tcp_stream_reset(tcp);
++		return;
++	}
++
++	ret = recovery_http_queue_response(connection, "200 OK", "text/plain",
++					   connection->response_body, false);
++	if (ret)
++		tcp_stream_reset(tcp);
++}
++
++static void recovery_http_on_snd_una_update(struct tcp_stream *tcp,
++					    u32 acknowledged)
++{
++	struct recovery_http_connection *connection = tcp->priv;
++	u32 response_length;
++
++	response_length = connection->response_header_length +
++			  connection->response_body_length;
++	if (!connection->response_ready || acknowledged < response_length)
++		return;
++
++	connection->response_acked = true;
++	tcp_stream_close(tcp);
++}
++
++static void recovery_http_on_closed(struct tcp_stream *tcp)
++{
++	struct recovery_http_connection *connection = tcp->priv;
++
++	if (connection->receiving) {
++		recovery_http.upload_valid = false;
++		recovery_http.uploaded_size = 0;
++		if (recovery_http.request.set_receiving)
++			recovery_http.request.set_receiving(false);
++	}
++
++	if (connection->boot_after_close) {
++		if (connection->response_acked &&
++		    tcp_stream_get_status(tcp) == TCP_ERR_OK &&
++		    recovery_http.upload_valid) {
++			recovery_http.result->received_size =
++				recovery_http.uploaded_size;
++			net_set_state(NETLOOP_SUCCESS);
++		} else if (recovery_http.request.set_receiving) {
++			recovery_http.request.set_receiving(false);
++		}
++	}
++
++	memset(connection, 0, sizeof(*connection));
++}
++
++static int recovery_http_on_create(struct tcp_stream *tcp)
++{
++	struct recovery_http_connection *connection;
++
++	if (tcp->lport != RECOVERY_HTTP_PORT)
++		return 0;
++
++	connection = &recovery_http.connection;
++	memset(connection, 0, sizeof(*connection));
++	tcp->priv = connection;
++	tcp->rx = recovery_http_rx;
++	tcp->tx = recovery_http_tx;
++	tcp->on_rcv_nxt_update = recovery_http_on_rcv_nxt_update;
++	tcp->on_snd_una_update = recovery_http_on_snd_una_update;
++	tcp->on_closed = recovery_http_on_closed;
++
++	return 1;
++}
++
++void recovery_http_start_server(void)
++{
++	memset(net_server_ethaddr, 0, sizeof(net_server_ethaddr));
++	tcp_stream_set_on_create_handler(recovery_http_on_create);
++	printf("Web Rescue listening on http://%pI4/\n", &net_ip);
++}
++
++int recovery_http_run(const struct recovery_http_request *request,
++		      struct recovery_http_result *result)
++{
++	int ret;
++
++	if (result)
++		result->received_size = 0;
++	if (!request || !result || !request->load_addr || !request->max_size ||
++	    request->load_limit <= request->load_addr ||
++	    request->max_size > request->load_limit - request->load_addr)
++		return -EINVAL;
++
++	memset(&recovery_http, 0, sizeof(recovery_http));
++	recovery_http.request = *request;
++	recovery_http.result = result;
++
++	tcp_init();
++	ret = net_loop(RECOVERY_HTTP);
++	tcp_init();
++	tcp_stream_set_on_create_handler(NULL);
++
++	if (ret < 0)
++		return ret;
++	if (!result->received_size)
++		return -EIO;
++
++	return 0;
++}
+-- 
+2.53.0

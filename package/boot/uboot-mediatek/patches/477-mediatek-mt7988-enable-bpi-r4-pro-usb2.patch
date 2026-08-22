@@ -1,0 +1,136 @@
+From: Codex <codex@openai.com>
+Date: Thu, 20 Aug 2026 00:00:00 -0700
+Subject: [PATCH] arm: mediatek: enable BPI-R4 Pro USB 2.0 in U-Boot
+
+The BPI-R4 Pro back USB Type-A port is connected to the MT7988
+ssusb0 controller through its USB 2.0 XS-PHY.  Add the missing legacy
+U-Boot SoC descriptions and enable that controller for the shared R4 Pro
+board description.
+
+Use only the USB 2.0 PHY on ssusb0.  Its USB 3.0 SerDes is shared with
+PCIe2 and must not be claimed by the USB controller.  Keep the independent
+ssusb1 controller and its USB 2.0/USB 3.0 T-PHYs unchanged.
+
+Enable the MediaTek XS-PHY driver in all three BPI-R4 Pro 8X U-Boot
+configurations.  Use the real MT7988 USB clocks already implemented by
+the U-Boot clock driver instead of extending the legacy dummy-clock use.
+
+This adapts accepted upstream hardware descriptions to the legacy
+arch/arm/dts tree selected by the current OpenWrt U-Boot 2026.07 build.
+These descriptions are also imported into U-Boot's dts/upstream tree.
+
+The controller data follows Linux commit 09346afaba0a ("arm64: dts: mediatek: mt7988: add XHCI controllers").
+Its original author is Rafał Miłecki <rafal@milecki.pl>.
+
+The XS-PHY connection follows Linux commit 2400b24dfece ("arm64: dts: mediatek: mt7988: Add xsphy for ssusb0/pcie2").
+Its original author is Frank Wunderlich <frank-w@public-files.de>.
+
+The board connection follows Linux commit f397471a6a8c ("arm64: dts: mediatek: mt7988: Add devicetree for BananaPi R4 Pro").
+Its original author is Frank Wunderlich <frank-w@public-files.de>.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+
+diff --git a/arch/arm/dts/mt7988.dtsi b/arch/arm/dts/mt7988.dtsi
+index e0e8f2bdbd9f5e599cfe1aa7b78286ecb04c30a8..74645ded7b2579c90dc9965f7a53812b2cbeedd5 100644
+--- a/arch/arm/dts/mt7988.dtsi
++++ b/arch/arm/dts/mt7988.dtsi
+@@ -190,6 +190,25 @@
+ 		bootph-all;
+ 	};
+ 
++	ssusb0: usb@11190000 {
++		compatible = "mediatek,mt7988-xhci",
++			     "mediatek,mtk-xhci";
++		reg = <0 0x11190000 0 0x2e00>,
++		      <0 0x11193e00 0 0x0100>;
++		reg-names = "mac", "ippc";
++		interrupts = <GIC_SPI 173 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&infracfg CLK_INFRA_USB_SYS>,
++			 <&infracfg CLK_INFRA_USB_REF>,
++			 <&infracfg CLK_INFRA_66M_USB_HCK>,
++			 <&infracfg CLK_INFRA_133M_USB_HCK>,
++			 <&infracfg CLK_INFRA_USB_XHCI>;
++		clock-names = "sys_ck", "ref_ck", "mcu_ck",
++			      "dma_ck", "xhci_ck";
++		phys = <&xphyu2port0 PHY_TYPE_USB2>,
++		       <&xphyu3port0 PHY_TYPE_USB3>;
++		status = "disabled";
++	};
++
+ 	xhci1: xhci@11200000 {
+ 		compatible = "mediatek,mt7988-xhci",
+ 			     "mediatek,mtk-xhci";
+@@ -394,6 +413,13 @@
+ 		ranges;
+ 		status = "disabled";
+ 
++		xphyu2port0: usb-phy@11e10000 {
++			reg = <0 0x11e10000 0 0x400>;
++			clocks = <&infracfg CLK_INFRA_USB_UTMI>;
++			clock-names = "ref";
++			#phy-cells = <1>;
++		};
++
+ 		xphyu3port0: usb-phy@11e13000 {
+ 			reg = <0 0x11e13400 0 0x500>;
+ 			clocks = <&dummy_clk>;
+diff --git a/arch/arm/dts/mt7988a-bananapi-bpi-r4-pro.dtsi b/arch/arm/dts/mt7988a-bananapi-bpi-r4-pro.dtsi
+index b2abc36c3695910471f45d5a4e18dcbd487098cc..40eaae73e25f90cf58657ca3501f5ee31fda7527 100644
+--- a/arch/arm/dts/mt7988a-bananapi-bpi-r4-pro.dtsi
++++ b/arch/arm/dts/mt7988a-bananapi-bpi-r4-pro.dtsi
+@@ -190,6 +190,18 @@
+ 	};
+ };
+ 
++/* back USB */
++&ssusb0 {
++	/* Use U2P only because U3P SerDes is shared with PCIe2. */
++	phys = <&xphyu2port0 PHY_TYPE_USB2>;
++	mediatek,u3p-dis-msk = <1>;
++	status = "okay";
++};
++
++&xphy {
++	status = "okay";
++};
++
+ &pwm {
+ 	pinctrl-names = "default";
+ 	pinctrl-0 = <&pwm_pins>;
+diff --git a/configs/mt7988a_bananapi_bpi-r4-pro-8x-emmc_defconfig b/configs/mt7988a_bananapi_bpi-r4-pro-8x-emmc_defconfig
+index 38b1c58c33afff2c68e0a0593dda3f035ebe2e4f..ee8d9be9d48ab95a07f0be1a0602f8248291ba6a 100644
+--- a/configs/mt7988a_bananapi_bpi-r4-pro-8x-emmc_defconfig
++++ b/configs/mt7988a_bananapi_bpi-r4-pro-8x-emmc_defconfig
+@@ -124,6 +124,7 @@ CONFIG_MEDIATEK_ETH=y
+ CONFIG_PCIE_MEDIATEK=y
+ CONFIG_PHY=y
+ CONFIG_PHY_MTK_TPHY=y
++CONFIG_PHY_MTK_XSPHY=y
+ CONFIG_PINCTRL=y
+ CONFIG_PINCONF=y
+ CONFIG_PINCTRL_MT7988=y
+diff --git a/configs/mt7988a_bananapi_bpi-r4-pro-8x-sdmmc_defconfig b/configs/mt7988a_bananapi_bpi-r4-pro-8x-sdmmc_defconfig
+index 868f02d7330a7f521fb854ced97f69325aca7a34..6bc0461301693c3f585094b693e4299e46e0042b 100644
+--- a/configs/mt7988a_bananapi_bpi-r4-pro-8x-sdmmc_defconfig
++++ b/configs/mt7988a_bananapi_bpi-r4-pro-8x-sdmmc_defconfig
+@@ -125,6 +125,7 @@ CONFIG_MEDIATEK_ETH=y
+ CONFIG_PCIE_MEDIATEK=y
+ CONFIG_PHY=y
+ CONFIG_PHY_MTK_TPHY=y
++CONFIG_PHY_MTK_XSPHY=y
+ CONFIG_PINCTRL=y
+ CONFIG_PINCONF=y
+ CONFIG_PINCTRL_MT7988=y
+diff --git a/configs/mt7988a_bananapi_bpi-r4-pro-8x-snand_defconfig b/configs/mt7988a_bananapi_bpi-r4-pro-8x-snand_defconfig
+index bf40238171460d13768e9dddd1618a22713062a4..f8920bb8d4dc12b92018e90a07a1ca471a217149 100644
+--- a/configs/mt7988a_bananapi_bpi-r4-pro-8x-snand_defconfig
++++ b/configs/mt7988a_bananapi_bpi-r4-pro-8x-snand_defconfig
+@@ -124,6 +124,7 @@ CONFIG_MEDIATEK_ETH=y
+ CONFIG_PCIE_MEDIATEK=y
+ CONFIG_PHY=y
+ CONFIG_PHY_MTK_TPHY=y
++CONFIG_PHY_MTK_XSPHY=y
+ CONFIG_PINCTRL=y
+ CONFIG_PINCONF=y
+ CONFIG_PINCTRL_MT7988=y

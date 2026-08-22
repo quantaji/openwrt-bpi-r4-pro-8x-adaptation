@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Thu, 20 Aug 2026 00:00:00 -0700
+Subject: [PATCH] arm64: dts: mediatek: add BPI-R4 Pro system LED aliases
+
+Linux upstream describes the red front-panel LED as the fault indicator
+and the blue front-panel LED as the activity indicator. Wire those LEDs
+to OpenWrt's standard system-state aliases so the generic diagnostic LED
+handling can use them.
+
+The LEDs are connected through a PCA9555 GPIO expander behind a PCA9548
+I2C mux, so they register after preinit when those drivers are modular.
+A board-specific boot service reapplies the regular preinit indication
+after the normal kmodloader pass has completed.
+
+Use the blue activity LED for boot and upgrade activity, and leave it off
+after a healthy startup. Reserve the red fault LED for failsafe. The green
+power LED remains controlled by the board power circuit.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ .../boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi       | 3 +++
+ 1 file changed, 3 insertions(+)
+
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
+@@ -24,6 +24,9 @@
+ 		i2c4 = &imux1_sfp1;
+ 		i2c5 = &imux2_sfp2;
+ 		i2c6 = &imux3_wifi;
++		led-boot = &led_blue;
++		led-failsafe = &led_red;
++		led-upgrade = &led_blue;
+ 	};
+ 
+ 	chosen {
+-- 
+2.53.0

@@ -1,0 +1,308 @@
+From 1d42228f4f99fa0ee76a5491aa58fce314f981cf Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 21 Aug 2026 21:34:45 -0700
+Subject: [PATCH] cmd: add bounded USB recovery source
+
+Enumerate USB mass storage deterministically, probe FAT and ext filesystems, and load one exact recovery image into the configured bounded RAM window. Source selection and FIT validation remain in the board recovery policy.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ cmd/Kconfig        |  10 ++
+ cmd/Makefile       |   1 +
+ cmd/recovery_usb.c | 251 +++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 262 insertions(+)
+ create mode 100644 cmd/recovery_usb.c
+
+diff --git a/cmd/Kconfig b/cmd/Kconfig
+index 04b3e0c..c02f565 100644
+--- a/cmd/Kconfig
++++ b/cmd/Kconfig
+@@ -1842,6 +1842,16 @@ config CMD_USB
+ 	help
+ 	  USB support.
+ 
++config CMD_RECOVERY_USB
++	bool "recovery_usb"
++	depends on BLK
++	depends on CMD_USB && USB_STORAGE
++	depends on PARTITIONS
++	depends on FS_FAT && FS_EXT4
++	help
++	  Probe FAT or ext filesystems on USB storage for the configured
++	  recovery FIT and load a selected candidate into bounded RAM.
++
+ config CMD_USB_SDP
+ 	bool "sdp"
+ 	depends on USB_GADGET_DOWNLOAD
+diff --git a/cmd/Makefile b/cmd/Makefile
+index 3400637..8f649db 100644
+--- a/cmd/Makefile
++++ b/cmd/Makefile
+@@ -206,6 +206,7 @@ obj-$(CONFIG_CMD_WDT) += wdt.o
+ obj-$(CONFIG_CMD_LZMADEC) += lzmadec.o
+ obj-$(CONFIG_CMD_UFS) += ufs.o
+ obj-$(CONFIG_CMD_USB) += usb.o disk.o
++obj-$(CONFIG_CMD_RECOVERY_USB) += recovery_usb.o
+ obj-$(CONFIG_CMD_VIDCONSOLE) += video.o
+ 
+ obj-$(CONFIG_CMD_FASTBOOT) += fastboot.o
+diff --git a/cmd/recovery_usb.c b/cmd/recovery_usb.c
+new file mode 100644
+index 0000000..794671f
+--- /dev/null
++++ b/cmd/recovery_usb.c
+@@ -0,0 +1,251 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Copyright (C) 2026 OpenAI
++ */
++
++#include <blk.h>
++#include <command.h>
++#include <dm.h>
++#include <env.h>
++#include <fs.h>
++#include <part.h>
++#include <usb.h>
++#include <linux/errno.h>
++#include <linux/string.h>
++
++struct usb_recovery_candidate {
++	int devnum;
++	int part;
++	loff_t size;
++	bool valid;
++};
++
++static struct usb_recovery_candidate usb_candidate;
++
++static int usb_recovery_find_candidate(bool restart)
++{
++	struct disk_partition info;
++	struct blk_desc *desc;
++	const char *filename;
++	loff_t file_size;
++	ulong loadaddr;
++	ulong max_bytes;
++	ulong limit;
++	int after_devnum;
++	int after_part;
++	int max_devnum;
++	int first_part;
++	int last_part;
++	int fs_type;
++	int devnum;
++	int part;
++	int ret;
++	bool has_partitions;
++
++	if (restart) {
++		after_devnum = -1;
++		after_part = -1;
++		usb_candidate.valid = false;
++
++		ret = usb_stop();
++		if (ret)
++			return ret;
++
++		ret = usb_init();
++		if (ret)
++			return ret;
++
++		if (usb_stor_scan(1) < 0)
++			return -ENODEV;
++	} else {
++		if (!usb_candidate.valid)
++			return -ENOENT;
++
++		after_devnum = usb_candidate.devnum;
++		after_part = usb_candidate.part;
++		usb_candidate.valid = false;
++	}
++
++	filename = env_get("recovery_filename");
++	loadaddr = env_get_hex("loadaddr", 0);
++	max_bytes = env_get_hex("recovery_max_bytes", 0);
++	limit = env_get_hex("recovery_limit", 0);
++
++	if (!filename || !*filename || !loadaddr || !max_bytes ||
++	    limit <= loadaddr || max_bytes > limit - loadaddr)
++		return -EINVAL;
++
++	max_devnum = blk_find_max_devnum(UCLASS_USB);
++	if (max_devnum < 0)
++		return max_devnum;
++
++	for (devnum = 0; devnum <= max_devnum; devnum++) {
++		if (blk_get_desc(UCLASS_USB, devnum, &desc))
++			continue;
++
++		has_partitions = false;
++
++		for (part = 1; part <= MAX_SEARCH_PARTITIONS; part++) {
++			if (!part_get_info(desc, part, &info))
++				has_partitions = true;
++		}
++
++		first_part = has_partitions ? 1 : 0;
++		last_part = has_partitions ? MAX_SEARCH_PARTITIONS : 0;
++
++		for (part = first_part; part <= last_part; part++) {
++			if (part && part_get_info(desc, part, &info))
++				continue;
++
++			if (devnum < after_devnum ||
++			    (devnum == after_devnum && part <= after_part))
++				continue;
++
++			ret = fs_set_blk_dev_with_part(desc, part);
++			if (ret)
++				continue;
++
++			fs_type = fs_get_type();
++			if (fs_type != FS_TYPE_FAT &&
++			    fs_type != FS_TYPE_EXT) {
++				fs_close();
++				continue;
++			}
++
++			ret = fs_size(filename, &file_size);
++			if (ret)
++				continue;
++
++			if (file_size <= 0 ||
++			    (u64)file_size > max_bytes ||
++			    (u64)file_size > limit - loadaddr) {
++				printf("Ignoring USB recovery image on %d:%d: "
++				       "invalid size %lld\n",
++				       devnum, part, (long long)file_size);
++				continue;
++			}
++
++			usb_candidate.devnum = devnum;
++			usb_candidate.part = part;
++			usb_candidate.size = file_size;
++			usb_candidate.valid = true;
++
++			return 0;
++		}
++	}
++
++	return -ENOENT;
++}
++
++static int usb_recovery_load_candidate(void)
++{
++	struct blk_desc *desc;
++	const char *filename;
++	loff_t bytes_read;
++	loff_t file_size;
++	ulong loadaddr;
++	ulong max_bytes;
++	ulong limit;
++	int fs_type;
++	int ret;
++
++	ret = env_set("filesize", NULL);
++	if (ret)
++		return ret;
++
++	if (!usb_candidate.valid)
++		return -ENOENT;
++
++	filename = env_get("recovery_filename");
++	loadaddr = env_get_hex("loadaddr", 0);
++	max_bytes = env_get_hex("recovery_max_bytes", 0);
++	limit = env_get_hex("recovery_limit", 0);
++
++	if (!filename || !*filename || !loadaddr || !max_bytes ||
++	    limit <= loadaddr || max_bytes > limit - loadaddr)
++		return -EINVAL;
++
++	ret = blk_get_desc(UCLASS_USB, usb_candidate.devnum, &desc);
++	if (ret)
++		return ret;
++
++	ret = fs_set_blk_dev_with_part(desc, usb_candidate.part);
++	if (ret)
++		return ret;
++
++	fs_type = fs_get_type();
++	if (fs_type != FS_TYPE_FAT && fs_type != FS_TYPE_EXT) {
++		fs_close();
++		return -EOPNOTSUPP;
++	}
++
++	ret = fs_size(filename, &file_size);
++	if (ret)
++		return ret;
++
++	if (file_size != usb_candidate.size)
++		return -ESTALE;
++
++	if (file_size <= 0 ||
++	    (u64)file_size > max_bytes ||
++	    (u64)file_size > limit - loadaddr)
++		return -EFBIG;
++
++	ret = fs_set_blk_dev_with_part(desc, usb_candidate.part);
++	if (ret)
++		return ret;
++
++	ret = fs_read(filename, loadaddr, 0, file_size, &bytes_read);
++	if (ret)
++		return ret;
++
++	if (bytes_read != file_size)
++		return -EIO;
++
++	ret = env_set_hex("filesize", (ulong)bytes_read);
++	if (ret)
++		return ret;
++
++	return 0;
++}
++
++static int do_recovery_usb(struct cmd_tbl *cmdtp, int flag, int argc,
++			   char *const argv[])
++{
++	int ret;
++
++	if (argc != 2)
++		return CMD_RET_USAGE;
++
++	if (!strcmp(argv[1], "probe"))
++		ret = usb_recovery_find_candidate(true);
++	else if (!strcmp(argv[1], "next"))
++		ret = usb_recovery_find_candidate(false);
++	else if (!strcmp(argv[1], "load"))
++		ret = usb_recovery_load_candidate();
++	else
++		return CMD_RET_USAGE;
++
++	if (ret)
++		return CMD_RET_FAILURE;
++
++	if (!strcmp(argv[1], "load")) {
++		printf("Loaded USB recovery image from %d:%d, %llx bytes\n",
++		       usb_candidate.devnum, usb_candidate.part,
++		       (unsigned long long)usb_candidate.size);
++	} else {
++		printf("USB recovery candidate %d:%d, %llx bytes\n",
++		       usb_candidate.devnum, usb_candidate.part,
++		       (unsigned long long)usb_candidate.size);
++	}
++
++	return CMD_RET_SUCCESS;
++}
++
++U_BOOT_CMD(
++	recovery_usb, 2, 0, do_recovery_usb,
++	"probe and load a recovery FIT from USB storage",
++	"probe - enumerate USB storage and select the first candidate\n"
++	"recovery_usb next - select the next candidate\n"
++	"recovery_usb load - load the selected candidate into RAM"
++);
+-- 
+2.53.0
+

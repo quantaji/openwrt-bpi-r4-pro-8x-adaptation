@@ -1,0 +1,16 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+
+START=11
+
+# Re-run the regular preinit indication after kmodloader has loaded the
+# I2C mux and GPIO expander drivers used by the front-panel system LEDs.
+
+boot() {
+	case $(board_name) in
+	bananapi,bpi-r4-pro-8x)
+		. /etc/diag.sh
+		set_led_state preinit_regular
+		;;
+	esac
+}

@@ -1,0 +1,133 @@
+From f0069fe9e8aca7b1d9dfe5adf58ace437fa7727f Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 21 Aug 2026 21:34:45 -0700
+Subject: [PATCH] cmd: add recovery Web Rescue source
+
+Expose the RAM-only recovery HTTP service as recovery_web and return the exact completed upload length to the common board validator.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ cmd/Kconfig        | 10 ++++++
+ cmd/Makefile       |  1 +
+ cmd/recovery_web.c | 76 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 87 insertions(+)
+ create mode 100644 cmd/recovery_web.c
+
+diff --git a/cmd/Kconfig b/cmd/Kconfig
+index fe61315..91b5e6e 100644
+--- a/cmd/Kconfig
++++ b/cmd/Kconfig
+@@ -1859,6 +1859,16 @@ config CMD_RECOVERY_TFTP
+ 	  Probe or load one TFTP recovery image into a bounded RAM window.
+ 	  Image validation and booting are handled by the recovery caller.
+ 
++config CMD_RECOVERY_WEB
++	bool "recovery_web"
++	depends on CMD_NET && NET_LEGACY
++	depends on USE_IPADDR && USE_NETMASK
++	select PROT_TCP
++	select PROT_TCP_SACK
++	help
++	  Serve one bounded recovery FIT from RAM over HTTP.
++	  Image validation and booting remain in the common recovery path.
++
+ config CMD_USB_SDP
+ 	bool "sdp"
+ 	depends on USB_GADGET_DOWNLOAD
+diff --git a/cmd/Makefile b/cmd/Makefile
+index 344c08a..a16ecd3 100644
+--- a/cmd/Makefile
++++ b/cmd/Makefile
+@@ -208,6 +208,7 @@ obj-$(CONFIG_CMD_UFS) += ufs.o
+ obj-$(CONFIG_CMD_USB) += usb.o disk.o
+ obj-$(CONFIG_CMD_RECOVERY_USB) += recovery_usb.o
+ obj-$(CONFIG_CMD_RECOVERY_TFTP) += recovery_tftp.o
++obj-$(CONFIG_CMD_RECOVERY_WEB) += recovery_web.o
+ obj-$(CONFIG_CMD_VIDCONSOLE) += video.o
+ 
+ obj-$(CONFIG_CMD_FASTBOOT) += fastboot.o
+diff --git a/cmd/recovery_web.c b/cmd/recovery_web.c
+new file mode 100644
+index 0000000..7dc8bc3
+--- /dev/null
++++ b/cmd/recovery_web.c
+@@ -0,0 +1,76 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Copyright (C) 2026 OpenAI
++ */
++
++#include <command.h>
++#include <env.h>
++#include <net.h>
++#include <net/recovery_http.h>
++#include <linux/errno.h>
++#include <linux/string.h>
++
++static void recovery_web_set_receiving(bool receiving)
++{
++	run_command(receiving ? "run led_work" : "run led_wait", 0);
++}
++
++static int do_recovery_web(struct cmd_tbl *cmdtp, int flag, int argc,
++			   char *const argv[])
++{
++	struct recovery_http_request request;
++	struct recovery_http_result result;
++	struct in_addr saved_ip;
++	struct in_addr saved_netmask;
++	ulong loadaddr;
++	ulong max_size;
++	ulong load_limit;
++	int ret;
++
++	if (argc != 1)
++		return CMD_RET_USAGE;
++
++	if (env_set("filesize", NULL))
++		return CMD_RET_FAILURE;
++
++	loadaddr = env_get_hex("loadaddr", 0);
++	max_size = env_get_hex("recovery_max_bytes", 0);
++	load_limit = env_get_hex("recovery_limit", 0);
++	if (!loadaddr || !max_size || load_limit <= loadaddr ||
++	    max_size > load_limit - loadaddr)
++		return CMD_RET_FAILURE;
++
++	memset(&request, 0, sizeof(request));
++	memset(&result, 0, sizeof(result));
++	request.load_addr = loadaddr;
++	request.max_size = max_size;
++	request.load_limit = load_limit;
++	request.initial_status = env_get("recovery_web_status");
++	request.set_receiving = recovery_web_set_receiving;
++
++	saved_ip = net_ip;
++	saved_netmask = net_netmask;
++	net_ip = string_to_ip(CONFIG_IPADDR);
++	net_netmask = string_to_ip(CONFIG_NETMASK);
++
++	if (!net_ip.s_addr || !net_netmask.s_addr)
++		ret = -EINVAL;
++	else
++		ret = recovery_http_run(&request, &result);
++
++	net_ip = saved_ip;
++	net_netmask = saved_netmask;
++
++	if (ret || !result.received_size)
++		return CMD_RET_FAILURE;
++
++	if (env_set_hex("filesize", result.received_size))
++		return CMD_RET_FAILURE;
++
++	return CMD_RET_SUCCESS;
++}
++
++U_BOOT_CMD(recovery_web, 1, 0, do_recovery_web,
++	   "receive and confirm a bounded recovery image over HTTP",
++	   ""
++);
+-- 
+2.53.0
+

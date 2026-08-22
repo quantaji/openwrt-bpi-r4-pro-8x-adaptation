@@ -1,0 +1,495 @@
+From 5debfc647ca1a50880b65f41cf18ee9fdcda5a20 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 21 Aug 2026 21:34:45 -0700
+Subject: [PATCH] net: tftp: add bounded recovery operations
+
+Add probe-only discovery, progress-based timeout handling, checked RAM writes, and an explicit recovery transfer interface while leaving ordinary TFTP behavior unchanged.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ include/net/tftp.h |  34 ++++++
+ net/tftp.c         | 284 +++++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 307 insertions(+), 11 deletions(-)
+
+diff --git a/include/net/tftp.h b/include/net/tftp.h
+index c7e1481..bba36ef 100644
+--- a/include/net/tftp.h
++++ b/include/net/tftp.h
+@@ -10,6 +10,8 @@
+ #ifndef __TFTP_H__
+ #define __TFTP_H__
+ 
++#include <linux/types.h>
++
+ /**********************************************************************/
+ /*
+  *	Global functions and variables.
+@@ -25,6 +27,38 @@ void tftp_start_server(void);	/* Wait for incoming TFTP put */
+ extern ulong tftp_timeout_ms;
+ extern int tftp_timeout_count_max;
+ 
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++#ifdef CONFIG_TFTP_FILE_NAME_MAX_LEN
++#define TFTP_RECOVERY_FILENAME_SIZE CONFIG_TFTP_FILE_NAME_MAX_LEN
++#else
++#define TFTP_RECOVERY_FILENAME_SIZE 128
++#endif
++
++enum tftp_recovery_operation {
++	TFTP_RECOVERY_PROBE,
++	TFTP_RECOVERY_LOAD,
++};
++
++struct tftp_recovery_request {
++	const char *filename;
++	ulong load_addr;
++	ulong max_size;
++	ulong load_limit;
++	bool expected_size_valid;
++	ulong expected_size;
++};
++
++struct tftp_recovery_result {
++	bool advertised_size_valid;
++	ulong advertised_size;
++	ulong received_size;
++};
++
++int tftp_recovery_run(enum tftp_recovery_operation operation,
++		      const struct tftp_recovery_request *request,
++		      struct tftp_recovery_result *result);
++#endif
++
+ /**********************************************************************/
+ 
+ #endif /* __TFTP_H__ */
+diff --git a/net/tftp.c b/net/tftp.c
+index beb9d08..ad44ae8 100644
+--- a/net/tftp.c
++++ b/net/tftp.c
+@@ -13,10 +13,12 @@
+ #include <led.h>
+ #include <lmb.h>
+ #include <log.h>
++#include <malloc.h>
+ #include <mapmem.h>
+ #include <net.h>
+ #include <net6.h>
+ #include <net/tftp.h>
++#include <linux/errno.h>
+ #include "bootp.h"
+ 
+ /*
+@@ -101,6 +103,17 @@ static ushort	tftp_windowsize;
+ static ushort	tftp_next_ack;
+ /* Last nack block we send */
+ static ushort	tftp_last_nack;
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++struct tftp_recovery_context {
++	enum tftp_recovery_operation operation;
++	const struct tftp_recovery_request *request;
++	struct tftp_recovery_result *result;
++	bool timer_armed;
++};
++
++static struct tftp_recovery_context *tftp_recovery;
++static bool tftp_tsize_valid;
++#endif
+ #ifdef CMD_TFTPPUT
+ /* 1 if writing, else 0 */
+ static int	tftp_put_active;
+@@ -158,12 +171,43 @@ static unsigned short tftp_window_size_option = TFTP_WINDOWSIZE;
+ 
+ static inline int store_block(int block, uchar *src, unsigned int len)
+ {
+-	ulong offset = block * tftp_block_size + tftp_block_wrap_offset -
+-			tftp_block_size;
+-	ulong newsize = offset + len;
+-	ulong store_addr = tftp_load_addr + offset;
++	ulong offset;
++	ulong newsize;
++	ulong store_addr;
+ 	void *ptr;
+ 
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++	if (tftp_recovery) {
++		u64 recovery_offset;
++
++		recovery_offset = (u64)block * tftp_block_size +
++				  tftp_block_wrap_offset;
++		if (recovery_offset < tftp_block_size)
++			return -EOVERFLOW;
++
++		recovery_offset -= tftp_block_size;
++		if (recovery_offset > tftp_recovery->request->max_size ||
++		    len > tftp_recovery->request->max_size - recovery_offset)
++			return -EFBIG;
++
++		if (tftp_recovery->request->load_limit <= tftp_load_addr ||
++		    recovery_offset >
++			tftp_recovery->request->load_limit - tftp_load_addr ||
++		    len > tftp_recovery->request->load_limit -
++			tftp_load_addr - recovery_offset)
++			return -EFBIG;
++
++		offset = recovery_offset;
++	} else
++#endif
++	{
++		offset = block * tftp_block_size + tftp_block_wrap_offset -
++			 tftp_block_size;
++	}
++
++	newsize = offset + len;
++	store_addr = tftp_load_addr + offset;
++
+ 	if (CONFIG_IS_ENABLED(LMB)) {
+ 		if (store_addr < tftp_load_addr ||
+ 		    lmb_read_check(store_addr, len)) {
+@@ -222,6 +266,38 @@ static int load_block(unsigned block, uchar *dst, unsigned len)
+ static void tftp_send(void);
+ static void tftp_timeout_handler(void);
+ 
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++static int tftp_recovery_check_size(ulong size)
++{
++	const struct tftp_recovery_request *request;
++
++	request = tftp_recovery->request;
++	if (!size || size > request->max_size)
++		return -EFBIG;
++
++	if (request->load_limit <= request->load_addr ||
++	    size > request->load_limit - request->load_addr)
++		return -EFBIG;
++
++	return 0;
++}
++
++static void tftp_recovery_arm_timeout(void)
++{
++	net_set_timeout_handler(TIMEOUT, tftp_timeout_handler);
++	tftp_recovery->timer_armed = true;
++}
++
++static void tftp_recovery_arp_handler(uchar *pkt, unsigned dest,
++				      struct in_addr sip, unsigned src,
++				      unsigned len)
++{
++	if (tftp_recovery && tftp_state == STATE_SEND_RRQ &&
++	    !tftp_recovery->timer_armed)
++		tftp_recovery_arm_timeout();
++}
++#endif
++
+ /**********************************************************************/
+ 
+ static void show_block_marker(void)
+@@ -258,6 +334,14 @@ static void show_block_marker(void)
+  */
+ static void restart(const char *msg)
+ {
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++	if (tftp_recovery) {
++		printf("\n%s\n", msg);
++		net_set_state(NETLOOP_FAIL);
++		return;
++	}
++#endif
++
+ 	printf("\n%s; starting again\n", msg);
+ 	net_start_again();
+ }
+@@ -317,6 +401,7 @@ static void tftp_send(void)
+ 	uchar *pkt;
+ 	uchar *xp;
+ 	int len = 0;
++	__maybe_unused int ret = 0;
+ 	ushort *s;
+ 	bool err_pkt = false;
+ 
+@@ -436,8 +521,14 @@ static void tftp_send(void)
+ 				     tftp_remote_port,
+ 				     tftp_our_port, len);
+ 	else
+-		net_send_udp_packet(net_server_ethaddr, tftp_remote_ip,
+-				    tftp_remote_port, tftp_our_port, len);
++		ret = net_send_udp_packet(net_server_ethaddr, tftp_remote_ip,
++					  tftp_remote_port, tftp_our_port, len);
++
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++	if (tftp_recovery && tftp_state == STATE_SEND_RRQ &&
++	    !tftp_recovery->timer_armed && !ret)
++		tftp_recovery_arm_timeout();
++#endif
+ 
+ 	if (err_pkt)
+ 		net_set_state(NETLOOP_FAIL);
+@@ -570,6 +661,9 @@ static void tftp_handler(uchar *pkt, unsigned dest, struct in_addr sip,
+ 			if (strcasecmp((char *)pkt + i, "tsize") == 0) {
+ 				tftp_tsize = dectoul((char *)pkt + i + 6,
+ 						     NULL);
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++				tftp_tsize_valid = true;
++#endif
+ 				debug("size = %s, %u\n",
+ 				      (char *)pkt + i + 6, tftp_tsize);
+ 			}
+@@ -584,6 +678,36 @@ static void tftp_handler(uchar *pkt, unsigned dest, struct in_addr sip,
+ 
+ 		tftp_next_ack = tftp_windowsize;
+ 
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++		if (tftp_recovery && tftp_state == STATE_OACK) {
++			if (tftp_tsize_valid &&
++			    tftp_recovery_check_size(tftp_tsize)) {
++				net_set_state(NETLOOP_FAIL);
++				break;
++			}
++
++			if (tftp_recovery->operation == TFTP_RECOVERY_LOAD &&
++			    tftp_recovery->request->expected_size_valid &&
++			    (!tftp_tsize_valid ||
++			     tftp_tsize !=
++				tftp_recovery->request->expected_size)) {
++				net_set_state(NETLOOP_FAIL);
++				break;
++			}
++
++			if (tftp_recovery->operation == TFTP_RECOVERY_PROBE) {
++				tftp_recovery->result->advertised_size_valid =
++					tftp_tsize_valid;
++				tftp_recovery->result->advertised_size =
++					tftp_tsize_valid ? tftp_tsize : 0;
++				net_set_state(NETLOOP_SUCCESS);
++				break;
++			}
++
++			tftp_recovery_arm_timeout();
++		}
++#endif
++
+ #ifdef CMD_TFTPPUT
+ 		if (tftp_put_active && tftp_state == STATE_OACK) {
+ 			/* Get ready to send the first block */
+@@ -625,6 +749,21 @@ static void tftp_handler(uchar *pkt, unsigned dest, struct in_addr sip,
+ 			break;
+ 		}
+ 
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++		if (tftp_recovery && len > tftp_block_size) {
++			net_set_state(NETLOOP_FAIL);
++			break;
++		}
++
++		if (tftp_recovery &&
++		    tftp_recovery->operation == TFTP_RECOVERY_PROBE) {
++			tftp_recovery->result->advertised_size_valid = false;
++			tftp_recovery->result->advertised_size = 0;
++			net_set_state(NETLOOP_SUCCESS);
++			break;
++		}
++#endif
++
+ 		tftp_cur_block++;
+ 		tftp_cur_block %= TFTP_SEQUENCE_SIZE;
+ 
+@@ -645,6 +784,11 @@ static void tftp_handler(uchar *pkt, unsigned dest, struct in_addr sip,
+ 				printf("First block is not block 1 (%ld)\n",
+ 				       tftp_cur_block);
+ 				puts("Starting again\n\n");
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++				if (tftp_recovery)
++					net_set_state(NETLOOP_FAIL);
++				else
++#endif
+ 				net_start_again();
+ 				break;
+ 			}
+@@ -657,8 +801,16 @@ static void tftp_handler(uchar *pkt, unsigned dest, struct in_addr sip,
+ 
+ 		update_block_number();
+ 		tftp_prev_block = tftp_cur_block;
+-		timeout_count_max = tftp_timeout_count_max;
+-		net_set_timeout_handler(timeout_ms, tftp_timeout_handler);
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++		if (tftp_recovery) {
++			tftp_recovery_arm_timeout();
++		} else
++#endif
++		{
++			timeout_count_max = tftp_timeout_count_max;
++			net_set_timeout_handler(timeout_ms,
++						tftp_timeout_handler);
++		}
+ 
+ 		if (store_block(tftp_cur_block, pkt + 2, len)) {
+ 			eth_halt_state_only();
+@@ -668,8 +820,26 @@ static void tftp_handler(uchar *pkt, unsigned dest, struct in_addr sip,
+ 		timeout_count = 0;
+ 
+ 		if (len < tftp_block_size) {
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++			if (tftp_recovery) {
++				if (!net_boot_file_size ||
++				    (tftp_recovery->request->expected_size_valid &&
++				     net_boot_file_size !=
++					tftp_recovery->request->expected_size)) {
++					net_set_state(NETLOOP_FAIL);
++					break;
++				}
++
++				tftp_recovery->result->received_size =
++					net_boot_file_size;
++			}
++#endif
+ 			tftp_send();
+ 			tftp_complete();
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++			if (tftp_recovery)
++				net_boot_file_size = 0;
++#endif
+ 			break;
+ 		}
+ 
+@@ -700,8 +870,15 @@ static void tftp_handler(uchar *pkt, unsigned dest, struct in_addr sip,
+ 		case TFTP_ERR_UNKNOWN_TRANSFER_ID:
+ 		case TFTP_ERR_FILE_ALREADY_EXISTS:
+ 		default:
+-			puts("Starting again\n\n");
+-			net_start_again();
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++			if (tftp_recovery) {
++				net_set_state(NETLOOP_FAIL);
++			} else
++#endif
++			{
++				puts("Starting again\n\n");
++				net_start_again();
++			}
+ 			break;
+ 		}
+ 		break;
+@@ -710,6 +887,14 @@ static void tftp_handler(uchar *pkt, unsigned dest, struct in_addr sip,
+ 
+ static void tftp_timeout_handler(void)
+ {
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++	if (tftp_recovery) {
++		puts("\nTFTP recovery timeout\n");
++		net_set_state(NETLOOP_FAIL);
++		return;
++	}
++#endif
++
+ 	if (++timeout_count > timeout_count_max) {
+ 		restart("Retry count exceeded");
+ 	} else {
+@@ -809,6 +994,11 @@ void tftp_start(enum proto_t protocol)
+ 		}
+ 	}
+ 
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++	if (tftp_recovery)
++		timeout_ms = TIMEOUT;
++#endif
++
+ 	sanitize_tftp_block_size_option(protocol);
+ 
+ 	debug("TFTP blocksize = %i, TFTP windowsize = %d timeout = %ld ms\n",
+@@ -915,7 +1105,12 @@ void tftp_start(enum proto_t protocol)
+ 	time_start = get_timer(0);
+ 	timeout_count_max = tftp_timeout_count_max;
+ 
+-	net_set_timeout_handler(timeout_ms, tftp_timeout_handler);
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++	if (tftp_recovery)
++		net_set_arp_handler(tftp_recovery_arp_handler);
++	else
++#endif
++		net_set_timeout_handler(timeout_ms, tftp_timeout_handler);
+ 	net_set_udp_handler(tftp_handler);
+ #ifdef CMD_TFTPPUT
+ 	net_set_icmp_handler(icmp_handler);
+@@ -942,11 +1137,78 @@ void tftp_start(enum proto_t protocol)
+ #ifdef CONFIG_TFTP_TSIZE
+ 	tftp_tsize = 0;
+ 	tftp_tsize_num_hash = 0;
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++	tftp_tsize_valid = false;
++#endif
+ #endif
+ 
+ 	tftp_send();
+ }
+ 
++#ifdef CONFIG_CMD_RECOVERY_TFTP
++int tftp_recovery_run(enum tftp_recovery_operation operation,
++		      const struct tftp_recovery_request *request,
++		      struct tftp_recovery_result *result)
++{
++	struct tftp_recovery_context context;
++	const char *netretry;
++	char *saved_netretry;
++	int restore_ret;
++	int ret;
++
++	if (tftp_recovery || !request || !result ||
++	    (operation != TFTP_RECOVERY_PROBE &&
++	     operation != TFTP_RECOVERY_LOAD) ||
++	    !request->filename || !*request->filename ||
++	    strnlen(request->filename, MAX_LEN) >= MAX_LEN ||
++	    !request->load_addr || !request->max_size ||
++	    request->load_limit <= request->load_addr ||
++	    request->max_size >
++		request->load_limit - request->load_addr)
++		return -EINVAL;
++
++	if (request->expected_size_valid &&
++	    (!request->expected_size ||
++	     request->expected_size > request->max_size ||
++	     request->expected_size >
++		request->load_limit - request->load_addr))
++		return -EFBIG;
++
++	memset(result, 0, sizeof(*result));
++	context.operation = operation;
++	context.request = request;
++	context.result = result;
++	context.timer_armed = false;
++	netretry = env_get("netretry");
++	saved_netretry = netretry ? strdup(netretry) : NULL;
++	if (netretry && !saved_netretry)
++		return -ENOMEM;
++
++	ret = env_set("netretry", "no");
++	if (ret) {
++		free(saved_netretry);
++		return ret;
++	}
++
++	image_load_addr = request->load_addr;
++	net_boot_file_name_explicit = true;
++	copy_filename(net_boot_file_name, request->filename,
++		      sizeof(net_boot_file_name));
++	if (IS_ENABLED(CONFIG_IPV6))
++		use_ip6 = false;
++
++	tftp_recovery = &context;
++	ret = net_loop(TFTPGET);
++	tftp_recovery = NULL;
++	restore_ret = env_set("netretry", saved_netretry);
++	free(saved_netretry);
++	if (restore_ret)
++		return restore_ret;
++
++	return ret;
++}
++#endif
++
+ #ifdef CONFIG_CMD_TFTPSRV
+ void tftp_start_server(void)
+ {
+-- 
+2.53.0
+

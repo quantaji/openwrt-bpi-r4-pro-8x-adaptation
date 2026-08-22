@@ -1,0 +1,715 @@
+From f83394c6828d146d9fb9e17913251a498a5deced Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 21 Aug 2026 21:34:45 -0700
+Subject: [PATCH] env: integrate BPI-R4 Pro recovery policy
+
+Enable and connect the final Production, USB, TFTP, Local, Web Rescue, button, persistent-crash, LED, and automatic recovery behavior across SD, eMMC, and SPI-NAND.
+
+Probe USB, TFTP, and Local before selecting the fixed USB to TFTP to Local priority. Keep automatic and selected-source modes waiting indefinitely and route every loaded image through the common bounded validator.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ ...988a_bananapi_bpi-r4-pro-8x-emmc_defconfig |   8 +
+ ...88a_bananapi_bpi-r4-pro-8x-sdmmc_defconfig |   8 +
+ ...88a_bananapi_bpi-r4-pro-8x-snand_defconfig |   8 +
+ defenvs/bananapi_bpi-r4-pro-8x_emmc_env       | 157 ++++++++++++++++-
+ defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env      | 165 ++++++++++++++++--
+ defenvs/bananapi_bpi-r4-pro-8x_snand_env      | 157 ++++++++++++++++-
+ 6 files changed, 491 insertions(+), 12 deletions(-)
+
+diff --git a/configs/mt7988a_bananapi_bpi-r4-pro-8x-emmc_defconfig b/configs/mt7988a_bananapi_bpi-r4-pro-8x-emmc_defconfig
+index d8c394c..8b36e77 100644
+--- a/configs/mt7988a_bananapi_bpi-r4-pro-8x-emmc_defconfig
++++ b/configs/mt7988a_bananapi_bpi-r4-pro-8x-emmc_defconfig
+@@ -19,10 +19,12 @@ CONFIG_ENV_OFFSET_REDUND=0x440000
+ CONFIG_PCI=y
+ CONFIG_DEBUG_UART=y
+ CONFIG_AHCI=y
++CONFIG_BUTTON_CMD=y
+ CONFIG_FIT=y
+ CONFIG_BOOTDELAY=30
+ CONFIG_AUTOBOOT_KEYED=y
+ CONFIG_AUTOBOOT_MENU_SHOW=y
++CONFIG_USE_PREBOOT=y
+ CONFIG_OF_SYSTEM_SETUP=y
+ CONFIG_DEFAULT_FDT_FILE="mediatek/mt7988a-bpi-r4-pro-8x-emmc.dtb"
+ CONFIG_SYS_CBSIZE=512
+@@ -53,6 +55,9 @@ CONFIG_CMD_PART=y
+ CONFIG_CMD_PCI=y
+ CONFIG_CMD_SF_TEST=y
+ CONFIG_CMD_USB=y
++CONFIG_CMD_RECOVERY_USB=y
++CONFIG_CMD_RECOVERY_TFTP=y
++CONFIG_CMD_RECOVERY_WEB=y
+ CONFIG_CMD_TFTPSRV=y
+ CONFIG_CMD_RARP=y
+ CONFIG_CMD_CDP=y
+@@ -93,8 +98,11 @@ CONFIG_I2C_MUX=y
+ CONFIG_I2C_MUX_PCA954x=y
+ CONFIG_USE_IPADDR=y
+ CONFIG_IPADDR="192.168.1.1"
++CONFIG_USE_NETMASK=y
++CONFIG_NETMASK="255.255.255.0"
+ CONFIG_USE_SERVERIP=y
+ CONFIG_SERVERIP="192.168.1.254"
++CONFIG_TFTP_TSIZE=y
+ CONFIG_NET_RANDOM_ETHADDR=y
+ CONFIG_SCSI_AHCI=y
+ CONFIG_AHCI_PCI=y
+diff --git a/configs/mt7988a_bananapi_bpi-r4-pro-8x-sdmmc_defconfig b/configs/mt7988a_bananapi_bpi-r4-pro-8x-sdmmc_defconfig
+index 7a375d2..8b6ca46 100644
+--- a/configs/mt7988a_bananapi_bpi-r4-pro-8x-sdmmc_defconfig
++++ b/configs/mt7988a_bananapi_bpi-r4-pro-8x-sdmmc_defconfig
+@@ -19,10 +19,12 @@ CONFIG_ENV_OFFSET_REDUND=0x440000
+ CONFIG_PCI=y
+ CONFIG_DEBUG_UART=y
+ CONFIG_AHCI=y
++CONFIG_BUTTON_CMD=y
+ CONFIG_FIT=y
+ CONFIG_BOOTDELAY=30
+ CONFIG_AUTOBOOT_KEYED=y
+ CONFIG_AUTOBOOT_MENU_SHOW=y
++CONFIG_USE_PREBOOT=y
+ CONFIG_OF_SYSTEM_SETUP=y
+ CONFIG_DEFAULT_FDT_FILE="mediatek/mt7988a-bpi-r4-pro-8x-sd.dtb"
+ CONFIG_SYS_CBSIZE=512
+@@ -53,6 +55,9 @@ CONFIG_CMD_PART=y
+ CONFIG_CMD_PCI=y
+ CONFIG_CMD_SF_TEST=y
+ CONFIG_CMD_USB=y
++CONFIG_CMD_RECOVERY_USB=y
++CONFIG_CMD_RECOVERY_TFTP=y
++CONFIG_CMD_RECOVERY_WEB=y
+ CONFIG_CMD_TFTPSRV=y
+ CONFIG_CMD_RARP=y
+ CONFIG_CMD_CDP=y
+@@ -94,8 +99,11 @@ CONFIG_I2C_MUX=y
+ CONFIG_I2C_MUX_PCA954x=y
+ CONFIG_USE_IPADDR=y
+ CONFIG_IPADDR="192.168.1.1"
++CONFIG_USE_NETMASK=y
++CONFIG_NETMASK="255.255.255.0"
+ CONFIG_USE_SERVERIP=y
+ CONFIG_SERVERIP="192.168.1.254"
++CONFIG_TFTP_TSIZE=y
+ CONFIG_NET_RANDOM_ETHADDR=y
+ CONFIG_SCSI_AHCI=y
+ CONFIG_AHCI_PCI=y
+diff --git a/configs/mt7988a_bananapi_bpi-r4-pro-8x-snand_defconfig b/configs/mt7988a_bananapi_bpi-r4-pro-8x-snand_defconfig
+index dcd16b4..9bceecf 100644
+--- a/configs/mt7988a_bananapi_bpi-r4-pro-8x-snand_defconfig
++++ b/configs/mt7988a_bananapi_bpi-r4-pro-8x-snand_defconfig
+@@ -16,10 +16,12 @@ CONFIG_DEBUG_UART_CLOCK=40000000
+ CONFIG_PCI=y
+ CONFIG_DEBUG_UART=y
+ CONFIG_AHCI=y
++CONFIG_BUTTON_CMD=y
+ CONFIG_FIT=y
+ CONFIG_BOOTDELAY=30
+ CONFIG_AUTOBOOT_KEYED=y
+ CONFIG_AUTOBOOT_MENU_SHOW=y
++CONFIG_USE_PREBOOT=y
+ CONFIG_OF_SYSTEM_SETUP=y
+ CONFIG_DEFAULT_FDT_FILE="mediatek/mt7988a-bpi-r4-pro-8x-emmc.dtb"
+ CONFIG_SYS_CBSIZE=512
+@@ -50,6 +52,9 @@ CONFIG_CMD_PART=y
+ CONFIG_CMD_PCI=y
+ CONFIG_CMD_SF_TEST=y
+ CONFIG_CMD_USB=y
++CONFIG_CMD_RECOVERY_USB=y
++CONFIG_CMD_RECOVERY_TFTP=y
++CONFIG_CMD_RECOVERY_WEB=y
+ CONFIG_CMD_TFTPSRV=y
+ CONFIG_CMD_RARP=y
+ CONFIG_CMD_CDP=y
+@@ -93,8 +98,11 @@ CONFIG_I2C_MUX=y
+ CONFIG_I2C_MUX_PCA954x=y
+ CONFIG_USE_IPADDR=y
+ CONFIG_IPADDR="192.168.1.1"
++CONFIG_USE_NETMASK=y
++CONFIG_NETMASK="255.255.255.0"
+ CONFIG_USE_SERVERIP=y
+ CONFIG_SERVERIP="192.168.1.254"
++CONFIG_TFTP_TSIZE=y
+ CONFIG_NET_RANDOM_ETHADDR=y
+ CONFIG_SCSI_AHCI=y
+ CONFIG_AHCI_PCI=y
+diff --git a/defenvs/bananapi_bpi-r4-pro-8x_emmc_env b/defenvs/bananapi_bpi-r4-pro-8x_emmc_env
+index 3768c21..fa3a242 100644
+--- a/defenvs/bananapi_bpi-r4-pro-8x_emmc_env
++++ b/defenvs/bananapi_bpi-r4-pro-8x_emmc_env
+@@ -1,4 +1,7 @@
+ loadaddr=0x50000000
++ipaddr=192.168.1.1
++serverip=192.168.1.254
++netmask=255.255.255.0
+ recovery_filename=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-initramfs-recovery.itb
+ recovery_max_bytes=0x08000000
+ recovery_max_blocks=0x40000
+@@ -8,7 +11,42 @@ bootconf=config-mt7988a-bananapi-bpi-r4-pro-8x
+ bootconf_emmc=mt7988a-bananapi-bpi-r4-pro-emmc
+ bootconf_extra=mt7988a-bananapi-bpi-r4-pro-cn13#mt7988a-bananapi-bpi-r4-pro-cn14
+ bootdelay=3
+-bootcmd=echo M01 compile skeleton only: boot validation deferred
++bootmenu_default=0
++bootmenu_delay=3
++bootmenu_title=      [0;34m( ( ( [1;39mOpenWrt[0;34m ) ) )[0m  BPI-R4 Pro 8X  [0;36m[eMMC][0m
++bootmenu_0=Boot production system from eMMC.=run boot_production; run led_fault; run boot_recovery_auto
++bootmenu_1=Boot recovery image from local eMMC.=if run check_recovery_config; then run boot_recovery_local; run led_wait; bootmenu; else run led_terminal; fi
++bootmenu_2=Boot recovery image from USB.=run boot_recovery_usb
++bootmenu_3=Boot recovery image from TFTP.=run boot_recovery_tftp
++bootmenu_4=Boot recovery image uploaded through Web Rescue.=if run check_recovery_config; then run boot_recovery_web; else run led_terminal; fi
++bootmenu_5=Reboot.=reset
++led_idle=led blue:activity off; led red:fault off
++led_wait=led blue:activity blink 2000
++led_work=led blue:activity blink 400
++led_fault=led red:fault on
++led_terminal=led blue:activity off; led red:fault on
++preboot=run led_idle; run led_wait
++button_cmd_0_name=reset
++button_cmd_0=run boot_recovery_auto
++button_cmd_1_name=wps
++button_cmd_1=if run check_recovery_config; then \
++		run boot_recovery_web; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
++bootcmd=if pstore check; then \
++		run led_fault; \
++		run boot_recovery_auto; \
++	else \
++		run boot_production; \
++		run led_fault; \
++		run boot_recovery_auto; \
++	fi
++boot_production=run led_work; \
++	run emmc_read_production && \
++	iminfo ${loadaddr} && \
++	bootm ${loadaddr}#${bootconf}#${bootconf_emmc}#${bootconf_extra}
+ boot_recovery_local=if run read_recovery; then \
+ 		if run boot_loaded_recovery; then \
+ 			true; \
+@@ -19,6 +57,25 @@ boot_recovery_local=if run read_recovery; then \
+ 	else \
+ 		false; \
+ 	fi
++boot_recovery_web=run led_wait; \
++	echo; \
++	echo "[1;36mWeb Rescue[0m"; \
++	echo; \
++	echo "  Interface: LAN5"; \
++	echo; \
++	echo "[0;33mWaiting for recovery image upload...[0m"; \
++	while true; do \
++		if recovery_web; then \
++			run led_work; \
++			if run boot_loaded_recovery; then \
++				true; \
++			else \
++				setenv recovery_web_status Recovery image was rejected by U-Boot validation.; \
++				run led_fault; \
++			fi; \
++		fi; \
++		run led_wait; \
++	done
+ check_recovery_config=env exists loadaddr && \
+ 	env exists recovery_filename && \
+ 	env exists recovery_max_bytes && \
+@@ -36,6 +93,104 @@ probe_recovery_local=mmc dev 0 && \
+ 	part start mmc 0 ${part_recovery} recovery_probe_addr && \
+ 	part size mmc 0 ${part_recovery} recovery_probe_size && \
+ 	itest.q ${recovery_probe_size} -ge 0x100
++boot_recovery_usb_candidates=while true; do \
++		run led_work; \
++		if recovery_usb load; then \
++			if run boot_loaded_recovery; then \
++				true; \
++			else \
++				run led_fault; \
++			fi; \
++		fi; \
++		run led_wait; \
++		if recovery_usb next; then \
++			true; \
++		else \
++			break; \
++		fi; \
++	done
++boot_recovery_usb=if run check_recovery_config; then \
++		echo; \
++		echo "[1;36mUSB Recovery[0m"; \
++		echo; \
++		echo "  Image: ${recovery_filename}"; \
++		echo "  Location: root directory"; \
++		echo "  Filesystems: FAT or ext"; \
++		echo; \
++		echo "[0;33mWaiting for recovery image...[0m"; \
++		while true; do \
++			run led_wait; \
++			if recovery_usb probe; then \
++				run boot_recovery_usb_candidates; \
++			fi; \
++		done; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
++boot_recovery_tftp=if run check_recovery_config; then \
++		echo; \
++		echo "[1;36mTFTP Recovery[0m"; \
++		echo; \
++		echo "  Interface: LAN5"; \
++		echo "  Device address: ${ipaddr}"; \
++		echo "  Server address: ${serverip}"; \
++		echo "  Image: ${recovery_filename}"; \
++		echo; \
++		echo "[0;33mWaiting for TFTP server...[0m"; \
++		while true; do \
++			run led_wait; \
++			if recovery_tftp probe; then \
++				run led_work; \
++				if recovery_tftp load; then \
++					if run boot_loaded_recovery; then \
++						true; \
++					else \
++						run led_fault; \
++					fi; \
++				fi; \
++			fi; \
++		done; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
++boot_recovery_auto=if run check_recovery_config; then \
++		while true; do \
++			setenv recovery_usb_ready; \
++			setenv recovery_tftp_ready; \
++			setenv recovery_local_ready; \
++			run led_wait; \
++			if recovery_usb probe; then \
++				setenv recovery_usb_ready 1; \
++			fi; \
++			if recovery_tftp probe; then \
++				setenv recovery_tftp_ready 1; \
++			fi; \
++			if run probe_recovery_local; then \
++				setenv recovery_local_ready 1; \
++			fi; \
++			if env exists recovery_usb_ready; then \
++				run boot_recovery_usb_candidates; \
++			fi; \
++			if env exists recovery_tftp_ready; then \
++				run led_work; \
++				if recovery_tftp load; then \
++					if run boot_loaded_recovery; then \
++						true; \
++					else \
++						run led_fault; \
++					fi; \
++				fi; \
++			fi; \
++			if env exists recovery_local_ready; then \
++				run boot_recovery_local; \
++			fi; \
++		done; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
+ boot_loaded_recovery=env exists filesize && \
+ 	itest.q ${filesize} -ge 0x28 && \
+ 	itest.q ${filesize} -le ${recovery_max_bytes} && \
+diff --git a/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
+index 246da53..b34cbe3 100644
+--- a/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
++++ b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
+@@ -1,4 +1,7 @@
+ loadaddr=0x50000000
++ipaddr=192.168.1.1
++serverip=192.168.1.254
++netmask=255.255.255.0
+ recovery_filename=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-initramfs-recovery.itb
+ recovery_max_bytes=0x08000000
+ recovery_max_blocks=0x40000
+@@ -10,15 +13,41 @@ bootconf_extra=mt7988a-bananapi-bpi-r4-pro-cn13#mt7988a-bananapi-bpi-r4-pro-cn14
+ bootdelay=0
+ bootmenu_default=0
+ bootmenu_delay=0
+-bootmenu_title=      OpenWrt [SD card]
++bootmenu_title=      [0;34m( ( ( [1;39mOpenWrt[0;34m ) ) )[0m  BPI-R4 Pro 8X  [0;36m[SD card][0m
+ bootmenu_0=Initialize environment.=run _firstboot
+-bootmenu_0d=Run default boot command.=run bootcmd
+-bootmenu_1=Boot production system from SD card.=run boot_production
+-bootmenu_2=Boot recovery system from SD card.=run boot_recovery
+-bootcmd=if pstore check ; then run boot_recovery ; else run boot_sdmmc ; fi
+-boot_sdmmc=run boot_production ; run boot_recovery
+-boot_production=run sdmmc_read_production && iminfo $loadaddr && bootm $loadaddr#$bootconf#$bootconf_sd#$bootconf_extra
+-boot_recovery=run sdmmc_read_recovery && bootm $loadaddr#$bootconf#$bootconf_sd#$bootconf_extra
++bootmenu_0d=Boot production system from SD card.=run boot_production; run led_fault; run boot_recovery_auto
++bootmenu_1=Boot recovery image from local SD card.=if run check_recovery_config; then run boot_recovery_local; run led_wait; bootmenu; else run led_terminal; fi
++bootmenu_2=Boot recovery image from USB.=run boot_recovery_usb
++bootmenu_3=Boot recovery image from TFTP.=run boot_recovery_tftp
++bootmenu_4=Boot recovery image uploaded through Web Rescue.=if run check_recovery_config; then run boot_recovery_web; else run led_terminal; fi
++bootmenu_5=Reboot.=reset
++led_idle=led blue:activity off; led red:fault off
++led_wait=led blue:activity blink 2000
++led_work=led blue:activity blink 400
++led_fault=led red:fault on
++led_terminal=led blue:activity off; led red:fault on
++preboot=run led_idle; run led_wait
++button_cmd_0_name=reset
++button_cmd_0=run boot_recovery_auto
++button_cmd_1_name=wps
++button_cmd_1=if run check_recovery_config; then \
++		run boot_recovery_web; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
++bootcmd=if pstore check; then \
++		run led_fault; \
++		run boot_recovery_auto; \
++	else \
++		run boot_production; \
++		run led_fault; \
++		run boot_recovery_auto; \
++	fi
++boot_production=run led_work; \
++	run sdmmc_read_production && \
++	iminfo ${loadaddr} && \
++	bootm ${loadaddr}#${bootconf}#${bootconf_sd}#${bootconf_extra}
+ boot_recovery_local=if run read_recovery; then \
+ 		if run boot_loaded_recovery; then \
+ 			true; \
+@@ -29,6 +58,25 @@ boot_recovery_local=if run read_recovery; then \
+ 	else \
+ 		false; \
+ 	fi
++boot_recovery_web=run led_wait; \
++	echo; \
++	echo "[1;36mWeb Rescue[0m"; \
++	echo; \
++	echo "  Interface: LAN5"; \
++	echo; \
++	echo "[0;33mWaiting for recovery image upload...[0m"; \
++	while true; do \
++		if recovery_web; then \
++			run led_work; \
++			if run boot_loaded_recovery; then \
++				true; \
++			else \
++				setenv recovery_web_status Recovery image was rejected by U-Boot validation.; \
++				run led_fault; \
++			fi; \
++		fi; \
++		run led_wait; \
++	done
+ check_recovery_config=env exists loadaddr && \
+ 	env exists recovery_filename && \
+ 	env exists recovery_max_bytes && \
+@@ -46,6 +94,104 @@ probe_recovery_local=mmc dev 0 && \
+ 	part start mmc 0 ${part_recovery} recovery_probe_addr && \
+ 	part size mmc 0 ${part_recovery} recovery_probe_size && \
+ 	itest.q ${recovery_probe_size} -ge 0x100
++boot_recovery_usb_candidates=while true; do \
++		run led_work; \
++		if recovery_usb load; then \
++			if run boot_loaded_recovery; then \
++				true; \
++			else \
++				run led_fault; \
++			fi; \
++		fi; \
++		run led_wait; \
++		if recovery_usb next; then \
++			true; \
++		else \
++			break; \
++		fi; \
++	done
++boot_recovery_usb=if run check_recovery_config; then \
++		echo; \
++		echo "[1;36mUSB Recovery[0m"; \
++		echo; \
++		echo "  Image: ${recovery_filename}"; \
++		echo "  Location: root directory"; \
++		echo "  Filesystems: FAT or ext"; \
++		echo; \
++		echo "[0;33mWaiting for recovery image...[0m"; \
++		while true; do \
++			run led_wait; \
++			if recovery_usb probe; then \
++				run boot_recovery_usb_candidates; \
++			fi; \
++		done; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
++boot_recovery_tftp=if run check_recovery_config; then \
++		echo; \
++		echo "[1;36mTFTP Recovery[0m"; \
++		echo; \
++		echo "  Interface: LAN5"; \
++		echo "  Device address: ${ipaddr}"; \
++		echo "  Server address: ${serverip}"; \
++		echo "  Image: ${recovery_filename}"; \
++		echo; \
++		echo "[0;33mWaiting for TFTP server...[0m"; \
++		while true; do \
++			run led_wait; \
++			if recovery_tftp probe; then \
++				run led_work; \
++				if recovery_tftp load; then \
++					if run boot_loaded_recovery; then \
++						true; \
++					else \
++						run led_fault; \
++					fi; \
++				fi; \
++			fi; \
++		done; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
++boot_recovery_auto=if run check_recovery_config; then \
++		while true; do \
++			setenv recovery_usb_ready; \
++			setenv recovery_tftp_ready; \
++			setenv recovery_local_ready; \
++			run led_wait; \
++			if recovery_usb probe; then \
++				setenv recovery_usb_ready 1; \
++			fi; \
++			if recovery_tftp probe; then \
++				setenv recovery_tftp_ready 1; \
++			fi; \
++			if run probe_recovery_local; then \
++				setenv recovery_local_ready 1; \
++			fi; \
++			if env exists recovery_usb_ready; then \
++				run boot_recovery_usb_candidates; \
++			fi; \
++			if env exists recovery_tftp_ready; then \
++				run led_work; \
++				if recovery_tftp load; then \
++					if run boot_loaded_recovery; then \
++						true; \
++					else \
++						run led_fault; \
++					fi; \
++				fi; \
++			fi; \
++			if env exists recovery_local_ready; then \
++				run boot_recovery_local; \
++			fi; \
++		done; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
+ boot_loaded_recovery=env exists filesize && \
+ 	itest.q ${filesize} -ge 0x28 && \
+ 	itest.q ${filesize} -le ${recovery_max_bytes} && \
+@@ -73,8 +219,7 @@ mmc_read_recovery=run led_work; \
+ 	setexpr filesize ${recovery_blocks} * 0x200
+ part_default=production
+ part_recovery=recovery
+-sdmmc_read_production=part start mmc 0 $part_default part_addr && part size mmc 0 $part_default part_size && run mmc_read_vol
+-sdmmc_read_recovery=part start mmc 0 $part_recovery part_addr && part size mmc 0 $part_recovery part_size && run mmc_read_vol
++sdmmc_read_production=mmc dev 0 && mmc rescan && part start mmc 0 ${part_default} part_addr && part size mmc 0 ${part_default} part_size && run mmc_read_vol
+ read_recovery=mmc dev 0 && \
+ 	mmc rescan && \
+ 	part start mmc 0 ${part_recovery} part_addr && \
+diff --git a/defenvs/bananapi_bpi-r4-pro-8x_snand_env b/defenvs/bananapi_bpi-r4-pro-8x_snand_env
+index 6e9bbc6..bfb39b5 100644
+--- a/defenvs/bananapi_bpi-r4-pro-8x_snand_env
++++ b/defenvs/bananapi_bpi-r4-pro-8x_snand_env
+@@ -1,4 +1,7 @@
+ loadaddr=0x50000000
++ipaddr=192.168.1.1
++serverip=192.168.1.254
++netmask=255.255.255.0
+ recovery_filename=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-initramfs-recovery.itb
+ recovery_max_bytes=0x08000000
+ recovery_limit=0x58000000
+@@ -7,7 +10,42 @@ bootconf=config-mt7988a-bananapi-bpi-r4-pro-8x
+ bootconf_emmc=mt7988a-bananapi-bpi-r4-pro-emmc
+ bootconf_extra=mt7988a-bananapi-bpi-r4-pro-cn13#mt7988a-bananapi-bpi-r4-pro-cn14
+ bootdelay=3
+-bootcmd=echo M01 compile skeleton only: boot validation deferred
++bootmenu_default=0
++bootmenu_delay=3
++bootmenu_title=      [0;34m( ( ( [1;39mOpenWrt[0;34m ) ) )[0m  BPI-R4 Pro 8X  [0;36m[SPI-NAND][0m
++bootmenu_0=Boot production system from SPI-NAND.=run boot_production; run led_fault; run boot_recovery_auto
++bootmenu_1=Boot recovery image from local SPI-NAND.=if run check_recovery_config; then run boot_recovery_local; run led_wait; bootmenu; else run led_terminal; fi
++bootmenu_2=Boot recovery image from USB.=run boot_recovery_usb
++bootmenu_3=Boot recovery image from TFTP.=run boot_recovery_tftp
++bootmenu_4=Boot recovery image uploaded through Web Rescue.=if run check_recovery_config; then run boot_recovery_web; else run led_terminal; fi
++bootmenu_5=Reboot.=reset
++led_idle=led blue:activity off; led red:fault off
++led_wait=led blue:activity blink 2000
++led_work=led blue:activity blink 400
++led_fault=led red:fault on
++led_terminal=led blue:activity off; led red:fault on
++preboot=run led_idle; run led_wait
++button_cmd_0_name=reset
++button_cmd_0=run boot_recovery_auto
++button_cmd_1_name=wps
++button_cmd_1=if run check_recovery_config; then \
++		run boot_recovery_web; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
++bootcmd=if pstore check; then \
++		run led_fault; \
++		run boot_recovery_auto; \
++	else \
++		run boot_production; \
++		run led_fault; \
++		run boot_recovery_auto; \
++	fi
++boot_production=run led_work; \
++	ubi part ubi && \
++	run ubi_read_production && \
++	bootm ${loadaddr}#${bootconf}#${bootconf_emmc}#${bootconf_extra}
+ boot_recovery_local=if run read_recovery; then \
+ 		if run boot_loaded_recovery; then \
+ 			true; \
+@@ -18,6 +56,25 @@ boot_recovery_local=if run read_recovery; then \
+ 	else \
+ 		false; \
+ 	fi
++boot_recovery_web=run led_wait; \
++	echo; \
++	echo "[1;36mWeb Rescue[0m"; \
++	echo; \
++	echo "  Interface: LAN5"; \
++	echo; \
++	echo "[0;33mWaiting for recovery image upload...[0m"; \
++	while true; do \
++		if recovery_web; then \
++			run led_work; \
++			if run boot_loaded_recovery; then \
++				true; \
++			else \
++				setenv recovery_web_status Recovery image was rejected by U-Boot validation.; \
++				run led_fault; \
++			fi; \
++		fi; \
++		run led_wait; \
++	done
+ check_recovery_config=env exists loadaddr && \
+ 	env exists recovery_filename && \
+ 	env exists recovery_max_bytes && \
+@@ -30,6 +87,104 @@ check_recovery_config=env exists loadaddr && \
+ 	itest.q ${recovery_limit} -eq 0x58000000
+ probe_recovery_local=ubi part ubi && \
+ 	ubi check recovery
++boot_recovery_usb_candidates=while true; do \
++		run led_work; \
++		if recovery_usb load; then \
++			if run boot_loaded_recovery; then \
++				true; \
++			else \
++				run led_fault; \
++			fi; \
++		fi; \
++		run led_wait; \
++		if recovery_usb next; then \
++			true; \
++		else \
++			break; \
++		fi; \
++	done
++boot_recovery_usb=if run check_recovery_config; then \
++		echo; \
++		echo "[1;36mUSB Recovery[0m"; \
++		echo; \
++		echo "  Image: ${recovery_filename}"; \
++		echo "  Location: root directory"; \
++		echo "  Filesystems: FAT or ext"; \
++		echo; \
++		echo "[0;33mWaiting for recovery image...[0m"; \
++		while true; do \
++			run led_wait; \
++			if recovery_usb probe; then \
++				run boot_recovery_usb_candidates; \
++			fi; \
++		done; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
++boot_recovery_tftp=if run check_recovery_config; then \
++		echo; \
++		echo "[1;36mTFTP Recovery[0m"; \
++		echo; \
++		echo "  Interface: LAN5"; \
++		echo "  Device address: ${ipaddr}"; \
++		echo "  Server address: ${serverip}"; \
++		echo "  Image: ${recovery_filename}"; \
++		echo; \
++		echo "[0;33mWaiting for TFTP server...[0m"; \
++		while true; do \
++			run led_wait; \
++			if recovery_tftp probe; then \
++				run led_work; \
++				if recovery_tftp load; then \
++					if run boot_loaded_recovery; then \
++						true; \
++					else \
++						run led_fault; \
++					fi; \
++				fi; \
++			fi; \
++		done; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
++boot_recovery_auto=if run check_recovery_config; then \
++		while true; do \
++			setenv recovery_usb_ready; \
++			setenv recovery_tftp_ready; \
++			setenv recovery_local_ready; \
++			run led_wait; \
++			if recovery_usb probe; then \
++				setenv recovery_usb_ready 1; \
++			fi; \
++			if recovery_tftp probe; then \
++				setenv recovery_tftp_ready 1; \
++			fi; \
++			if run probe_recovery_local; then \
++				setenv recovery_local_ready 1; \
++			fi; \
++			if env exists recovery_usb_ready; then \
++				run boot_recovery_usb_candidates; \
++			fi; \
++			if env exists recovery_tftp_ready; then \
++				run led_work; \
++				if recovery_tftp load; then \
++					if run boot_loaded_recovery; then \
++						true; \
++					else \
++						run led_fault; \
++					fi; \
++				fi; \
++			fi; \
++			if env exists recovery_local_ready; then \
++				run boot_recovery_local; \
++			fi; \
++		done; \
++	else \
++		run led_terminal; \
++		false; \
++	fi
+ boot_loaded_recovery=env exists filesize && \
+ 	itest.q ${filesize} -ge 0x28 && \
+ 	itest.q ${filesize} -le ${recovery_max_bytes} && \
+-- 
+2.53.0

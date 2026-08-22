@@ -1,0 +1,133 @@
+From: Frank Wunderlich <frank-w@public-files.de>
+Date: Tue, 27 Jan 2026 00:00:00 +0200
+Subject: [PATCH] arm64: dts: mediatek: mt7988a-bpi-r4-pro: add FIT
+ partition descriptions
+
+Add the OpenWrt partition descriptions used to locate U-Boot environments
+and production FIT images on SD, eMMC, and SPI-NAND.
+
+This adapts OpenWrt PR #21083 to the current Linux upstream BPI-R4 Pro
+storage topology. It preserves the SD description already used by M02,
+adds the matching eMMC GPT description, and adds U-Boot environment and
+FIT volume references inside the existing SPI-NAND UBI partition.
+
+The PR's common-DTS bootargs are intentionally omitted because boot
+selection belongs to M10.3. The Linux upstream raw SPI-NAND layout remains
+unchanged: BL2 occupies 0-2 MiB and UBI occupies 2-256 MiB, without a
+separate Factory partition.
+
+Original-OpenWrt-Commit: 77ccc1b2ba9b6c607931c45f47d3d7d5a7d89a7d
+Original-Patch: target/linux/mediatek/patches-6.18/192-arm64-dts-mediatek-mt7988a-bpi-r4-pro-add-fit-partitions.patch
+Signed-off-by: Frank Wunderlich <frank-w@public-files.de>
+Signed-off-by: Codex <codex@openai.com>
+---
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-emmc.dtso b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-emmc.dtso
+index 5ed2f0a..d5247d7 100644
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-emmc.dtso
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-emmc.dtso
+@@ -29,5 +29,29 @@
+ 	#address-cells = <1>;
+ 	#size-cells = <0>;
+ 	status = "okay";
++
++	card@0 {
++		compatible = "mmc-card";
++		reg = <0>;
++
++		partitions {
++			compatible = "gpt-partitions";
++
++			block-partition-env {
++				partname = "ubootenv";
++
++				nvmem-layout {
++					compatible = "u-boot,env-layout";
++				};
++			};
++
++			emmc_rootfs: block-partition-production {
++				partname = "production";
++			};
++		};
++	};
+ };
+ 
++&{/chosen} {
++	rootdisk-emmc = <&emmc_rootfs>;
++};
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso
+index 1ec1a9f..e0b05de 100644
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro-sd.dtso
+@@ -27,5 +27,29 @@
+ 	#address-cells = <1>;
+ 	#size-cells = <0>;
+ 	status = "okay";
++
++	card@0 {
++		compatible = "mmc-card";
++		reg = <0>;
++
++		partitions {
++			compatible = "gpt-partitions";
++
++			block-partition-env {
++				partname = "ubootenv";
++
++				nvmem-layout {
++					compatible = "u-boot,env-layout";
++				};
++			};
++
++			sd_rootfs: block-partition-production {
++				partname = "production";
++			};
++		};
++	};
+ };
+ 
++&{/chosen} {
++	rootdisk-sd = <&sd_rootfs>;
++};
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
+index 1eeb721..972b803 100644
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dtsi
+@@ -28,6 +28,7 @@
+ 
+ 	chosen {
+ 		stdout-path = &serial0;
++		rootdisk-spim-nand = <&ubi_rootfs>;
+ 	};
+ 
+ 	fan: pwm-fan {
+@@ -490,6 +491,28 @@
+ 			compatible = "linux,ubi";
+ 			reg = <0x200000 0xfe00000>;
+ 			label = "ubi";
++
++			volumes {
++				ubi-volume-ubootenv {
++					volname = "ubootenv";
++
++					nvmem-layout {
++						compatible = "u-boot,env-redundant-bool-layout";
++					};
++				};
++
++				ubi-volume-ubootenv2 {
++					volname = "ubootenv2";
++
++					nvmem-layout {
++						compatible = "u-boot,env-redundant-bool-layout";
++					};
++				};
++
++				ubi_rootfs: ubi-volume-fit {
++					volname = "fit";
++				};
++			};
+ 		};
+ 	};
+ };

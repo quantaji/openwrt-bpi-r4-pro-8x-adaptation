@@ -1,0 +1,209 @@
+From 3c4b2da473cab5023b296d40d48406fb6600c78e Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 21 Aug 2026 21:34:45 -0700
+Subject: [PATCH] cmd: add bounded TFTP recovery source
+
+Read the bounded recovery configuration from the environment and expose probe and load operations through the recovery_tftp command. FIT validation remains in the common board path.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ cmd/Kconfig         |   7 ++
+ cmd/Makefile        |   1 +
+ cmd/recovery_tftp.c | 155 ++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 163 insertions(+)
+ create mode 100644 cmd/recovery_tftp.c
+
+diff --git a/cmd/Kconfig b/cmd/Kconfig
+index c02f565..fe61315 100644
+--- a/cmd/Kconfig
++++ b/cmd/Kconfig
+@@ -1852,6 +1852,13 @@ config CMD_RECOVERY_USB
+ 	  Probe FAT or ext filesystems on USB storage for the configured
+ 	  recovery FIT and load a selected candidate into bounded RAM.
+ 
++config CMD_RECOVERY_TFTP
++	bool "recovery_tftp"
++	depends on CMD_TFTPBOOT && TFTP_TSIZE
++	help
++	  Probe or load one TFTP recovery image into a bounded RAM window.
++	  Image validation and booting are handled by the recovery caller.
++
+ config CMD_USB_SDP
+ 	bool "sdp"
+ 	depends on USB_GADGET_DOWNLOAD
+diff --git a/cmd/Makefile b/cmd/Makefile
+index 8f649db..344c08a 100644
+--- a/cmd/Makefile
++++ b/cmd/Makefile
+@@ -207,6 +207,7 @@ obj-$(CONFIG_CMD_LZMADEC) += lzmadec.o
+ obj-$(CONFIG_CMD_UFS) += ufs.o
+ obj-$(CONFIG_CMD_USB) += usb.o disk.o
+ obj-$(CONFIG_CMD_RECOVERY_USB) += recovery_usb.o
++obj-$(CONFIG_CMD_RECOVERY_TFTP) += recovery_tftp.o
+ obj-$(CONFIG_CMD_VIDCONSOLE) += video.o
+ 
+ obj-$(CONFIG_CMD_FASTBOOT) += fastboot.o
+diff --git a/cmd/recovery_tftp.c b/cmd/recovery_tftp.c
+new file mode 100644
+index 0000000..21efedd
+--- /dev/null
++++ b/cmd/recovery_tftp.c
+@@ -0,0 +1,155 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Copyright (C) 2026 OpenAI
++ */
++
++#include <command.h>
++#include <env.h>
++#include <net.h>
++#include <net/tftp.h>
++#include <linux/errno.h>
++#include <linux/string.h>
++
++struct recovery_tftp_config {
++	struct in_addr ipaddr;
++	struct in_addr serverip;
++	struct in_addr netmask;
++	char filename[TFTP_RECOVERY_FILENAME_SIZE];
++	ulong loadaddr;
++	ulong max_bytes;
++	ulong limit;
++};
++
++struct recovery_tftp_candidate {
++	struct recovery_tftp_config config;
++	bool size_known;
++	ulong size;
++	bool valid;
++};
++
++static struct recovery_tftp_candidate tftp_candidate;
++
++static int recovery_tftp_read_config(struct recovery_tftp_config *config)
++{
++	const char *filename;
++	const char *ipaddr;
++	const char *serverip;
++	const char *netmask;
++
++	ipaddr = env_get("ipaddr");
++	serverip = env_get("serverip");
++	netmask = env_get("netmask");
++	filename = env_get("recovery_filename");
++	if (!ipaddr || !serverip || !netmask || !filename || !*filename)
++		return -EINVAL;
++
++	config->ipaddr = string_to_ip(ipaddr);
++	config->serverip = string_to_ip(serverip);
++	config->netmask = string_to_ip(netmask);
++	if (!config->ipaddr.s_addr || !config->serverip.s_addr ||
++	    !config->netmask.s_addr)
++		return -EINVAL;
++
++	if ((config->ipaddr.s_addr & config->netmask.s_addr) !=
++	    (config->serverip.s_addr & config->netmask.s_addr))
++		return -ENETUNREACH;
++
++	if (strnlen(filename, sizeof(config->filename)) >=
++	    sizeof(config->filename))
++		return -ENAMETOOLONG;
++	strlcpy(config->filename, filename, sizeof(config->filename));
++
++	config->loadaddr = env_get_hex("loadaddr", 0);
++	config->max_bytes = env_get_hex("recovery_max_bytes", 0);
++	config->limit = env_get_hex("recovery_limit", 0);
++	if (!config->loadaddr || !config->max_bytes ||
++	    config->limit <= config->loadaddr ||
++	    config->max_bytes > config->limit - config->loadaddr)
++		return -EINVAL;
++
++	return 0;
++}
++
++static bool recovery_tftp_same_config(
++		const struct recovery_tftp_config *left,
++		const struct recovery_tftp_config *right)
++{
++	return left->ipaddr.s_addr == right->ipaddr.s_addr &&
++	       left->serverip.s_addr == right->serverip.s_addr &&
++	       left->netmask.s_addr == right->netmask.s_addr &&
++	       left->loadaddr == right->loadaddr &&
++	       left->max_bytes == right->max_bytes &&
++	       left->limit == right->limit &&
++	       !strcmp(left->filename, right->filename);
++}
++
++static int do_recovery_tftp(struct cmd_tbl *cmdtp, int flag, int argc,
++			    char *const argv[])
++{
++	struct tftp_recovery_request request;
++	struct tftp_recovery_result result;
++	struct recovery_tftp_config config;
++	bool probe;
++	int ret;
++
++	if (argc != 2)
++		return CMD_RET_USAGE;
++
++	if (!strcmp(argv[1], "probe")) {
++		probe = true;
++		tftp_candidate.valid = false;
++	} else if (!strcmp(argv[1], "load")) {
++		probe = false;
++		ret = env_set("filesize", NULL);
++		if (ret)
++			return CMD_RET_FAILURE;
++	} else {
++		return CMD_RET_USAGE;
++	}
++
++	ret = recovery_tftp_read_config(&config);
++	if (ret)
++		return CMD_RET_FAILURE;
++
++	memset(&request, 0, sizeof(request));
++	request.filename = config.filename;
++	request.load_addr = config.loadaddr;
++	request.max_size = config.max_bytes;
++	request.load_limit = config.limit;
++
++	if (probe) {
++		ret = tftp_recovery_run(TFTP_RECOVERY_PROBE, &request,
++					 &result);
++		if (ret)
++			return CMD_RET_FAILURE;
++
++		tftp_candidate.config = config;
++		tftp_candidate.size_known = result.advertised_size_valid;
++		tftp_candidate.size = result.advertised_size;
++		tftp_candidate.valid = true;
++		return CMD_RET_SUCCESS;
++	}
++
++	if (!tftp_candidate.valid ||
++	    !recovery_tftp_same_config(&config, &tftp_candidate.config))
++		return CMD_RET_FAILURE;
++
++	request.expected_size_valid = tftp_candidate.size_known;
++	request.expected_size = tftp_candidate.size;
++	ret = tftp_recovery_run(TFTP_RECOVERY_LOAD, &request, &result);
++	if (ret || !result.received_size)
++		return CMD_RET_FAILURE;
++
++	ret = env_set_hex("filesize", result.received_size);
++	if (ret)
++		return CMD_RET_FAILURE;
++
++	return CMD_RET_SUCCESS;
++}
++
++U_BOOT_CMD(
++	recovery_tftp, 2, 0, do_recovery_tftp,
++	"probe or load a bounded recovery image via TFTP",
++	"probe\n"
++	"recovery_tftp load"
++);
+-- 
+2.53.0
+

@@ -1,0 +1,246 @@
+From d59467388bfc8e425eac40f1d5dcfe6d073343fa Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 21 Aug 2026 21:34:45 -0700
+Subject: [PATCH] env: add BPI-R4 Pro local recovery foundation
+
+Add the final bounded FIT validator and the SD, eMMC, and SPI-NAND local recovery probes and readers in one patch. Keep the three storage implementations independent while sharing one safety contract.
+
+This patch does not activate external recovery sources or replace the existing boot policy.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ defenvs/bananapi_bpi-r4-pro-8x_emmc_env  | 69 +++++++++++++++++++++++
+ defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env | 70 ++++++++++++++++++++++--
+ defenvs/bananapi_bpi-r4-pro-8x_snand_env | 50 +++++++++++++++++
+ 3 files changed, 184 insertions(+), 5 deletions(-)
+
+diff --git a/defenvs/bananapi_bpi-r4-pro-8x_emmc_env b/defenvs/bananapi_bpi-r4-pro-8x_emmc_env
+index 3405eba..3768c21 100644
+--- a/defenvs/bananapi_bpi-r4-pro-8x_emmc_env
++++ b/defenvs/bananapi_bpi-r4-pro-8x_emmc_env
+@@ -1,2 +1,71 @@
++loadaddr=0x50000000
++recovery_filename=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-initramfs-recovery.itb
++recovery_max_bytes=0x08000000
++recovery_max_blocks=0x40000
++recovery_limit=0x58000000
++bootargs=console=ttyS0,115200n1 pci=pcie_bus_perf root=/dev/fit0 rootwait
++bootconf=config-mt7988a-bananapi-bpi-r4-pro-8x
++bootconf_emmc=mt7988a-bananapi-bpi-r4-pro-emmc
++bootconf_extra=mt7988a-bananapi-bpi-r4-pro-cn13#mt7988a-bananapi-bpi-r4-pro-cn14
+ bootdelay=3
+ bootcmd=echo M01 compile skeleton only: boot validation deferred
++boot_recovery_local=if run read_recovery; then \
++		if run boot_loaded_recovery; then \
++			true; \
++		else \
++			run led_fault; \
++			false; \
++		fi; \
++	else \
++		false; \
++	fi
++check_recovery_config=env exists loadaddr && \
++	env exists recovery_filename && \
++	env exists recovery_max_bytes && \
++	env exists recovery_max_blocks && \
++	env exists recovery_limit && \
++	env exists bootconf && \
++	env exists bootconf_emmc && \
++	env exists bootconf_extra && \
++	itest.q ${loadaddr} -eq 0x50000000 && \
++	itest.q ${recovery_max_bytes} -eq 0x08000000 && \
++	itest.q ${recovery_max_blocks} -eq 0x40000 && \
++	itest.q ${recovery_limit} -eq 0x58000000
++probe_recovery_local=mmc dev 0 && \
++	mmc rescan && \
++	part start mmc 0 ${part_recovery} recovery_probe_addr && \
++	part size mmc 0 ${part_recovery} recovery_probe_size && \
++	itest.q ${recovery_probe_size} -ge 0x100
++boot_loaded_recovery=env exists filesize && \
++	itest.q ${filesize} -ge 0x28 && \
++	itest.q ${filesize} -le ${recovery_max_bytes} && \
++	imsz ${loadaddr} fit_size && \
++	itest.q ${fit_size} -ge 0x28 && \
++	itest.q ${fit_size} -le ${filesize} && \
++	setexpr fit_end ${loadaddr} + ${fit_size} && \
++	itest.q ${fit_end} -ge ${loadaddr} && \
++	itest.q ${fit_end} -le ${recovery_limit} && \
++	setenv verify yes && \
++	iminfo ${loadaddr} && \
++	bootm ${loadaddr}#${bootconf}#${bootconf_emmc}#${bootconf_extra}
++mmc_read_vol=mmc read $loadaddr $part_addr 0x100 && imszb $loadaddr image_size && test 0x$image_size -le 0x$part_size && mmc read $loadaddr 0x$part_addr 0x$image_size && setexpr filesize $image_size * 0x200
++mmc_read_recovery=run led_work; \
++	setenv filesize; \
++	setenv fit_size; \
++	setenv fit_end; \
++	setenv recovery_blocks; \
++	itest.q ${part_size} -ge 0x100 && \
++	mmc read ${loadaddr} ${part_addr} 0x100 && \
++	imszb ${loadaddr} recovery_blocks && \
++	itest.q ${recovery_blocks} -le ${part_size} && \
++	itest.q ${recovery_blocks} -le ${recovery_max_blocks} && \
++	mmc read ${loadaddr} ${part_addr} ${recovery_blocks} && \
++	setexpr filesize ${recovery_blocks} * 0x200
++part_default=production
++part_recovery=recovery
++emmc_read_production=mmc dev 0 && mmc rescan && part start mmc 0 ${part_default} part_addr && part size mmc 0 ${part_default} part_size && run mmc_read_vol
++read_recovery=mmc dev 0 && \
++	mmc rescan && \
++	part start mmc 0 ${part_recovery} part_addr && \
++	part size mmc 0 ${part_recovery} part_size && \
++	run mmc_read_recovery
+diff --git a/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
+index c129a4a..246da53 100644
+--- a/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
++++ b/defenvs/bananapi_bpi-r4-pro-8x_sdmmc_env
+@@ -1,3 +1,12 @@
++loadaddr=0x50000000
++recovery_filename=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-initramfs-recovery.itb
++recovery_max_bytes=0x08000000
++recovery_max_blocks=0x40000
++recovery_limit=0x58000000
++bootargs=console=ttyS0,115200n1 pci=pcie_bus_perf root=/dev/fit0 rootwait
++bootconf=config-mt7988a-bananapi-bpi-r4-pro-8x
++bootconf_sd=mt7988a-bananapi-bpi-r4-pro-sd
++bootconf_extra=mt7988a-bananapi-bpi-r4-pro-cn13#mt7988a-bananapi-bpi-r4-pro-cn14
+ bootdelay=0
+ bootmenu_default=0
+ bootmenu_delay=0
+@@ -6,20 +15,71 @@ bootmenu_0=Initialize environment.=run _firstboot
+ bootmenu_0d=Run default boot command.=run bootcmd
+ bootmenu_1=Boot production system from SD card.=run boot_production
+ bootmenu_2=Boot recovery system from SD card.=run boot_recovery
+-loadaddr=0x50000000
+-bootargs=console=ttyS0,115200n1 pci=pcie_bus_perf root=/dev/fit0 rootwait
+-bootconf=config-mt7988a-bananapi-bpi-r4-pro-8x
+-bootconf_sd=mt7988a-bananapi-bpi-r4-pro-sd
+-bootconf_extra=mt7988a-bananapi-bpi-r4-pro-cn13#mt7988a-bananapi-bpi-r4-pro-cn14
+ bootcmd=if pstore check ; then run boot_recovery ; else run boot_sdmmc ; fi
+ boot_sdmmc=run boot_production ; run boot_recovery
+ boot_production=run sdmmc_read_production && iminfo $loadaddr && bootm $loadaddr#$bootconf#$bootconf_sd#$bootconf_extra
+ boot_recovery=run sdmmc_read_recovery && bootm $loadaddr#$bootconf#$bootconf_sd#$bootconf_extra
++boot_recovery_local=if run read_recovery; then \
++		if run boot_loaded_recovery; then \
++			true; \
++		else \
++			run led_fault; \
++			false; \
++		fi; \
++	else \
++		false; \
++	fi
++check_recovery_config=env exists loadaddr && \
++	env exists recovery_filename && \
++	env exists recovery_max_bytes && \
++	env exists recovery_max_blocks && \
++	env exists recovery_limit && \
++	env exists bootconf && \
++	env exists bootconf_sd && \
++	env exists bootconf_extra && \
++	itest.q ${loadaddr} -eq 0x50000000 && \
++	itest.q ${recovery_max_bytes} -eq 0x08000000 && \
++	itest.q ${recovery_max_blocks} -eq 0x40000 && \
++	itest.q ${recovery_limit} -eq 0x58000000
++probe_recovery_local=mmc dev 0 && \
++	mmc rescan && \
++	part start mmc 0 ${part_recovery} recovery_probe_addr && \
++	part size mmc 0 ${part_recovery} recovery_probe_size && \
++	itest.q ${recovery_probe_size} -ge 0x100
++boot_loaded_recovery=env exists filesize && \
++	itest.q ${filesize} -ge 0x28 && \
++	itest.q ${filesize} -le ${recovery_max_bytes} && \
++	imsz ${loadaddr} fit_size && \
++	itest.q ${fit_size} -ge 0x28 && \
++	itest.q ${fit_size} -le ${filesize} && \
++	setexpr fit_end ${loadaddr} + ${fit_size} && \
++	itest.q ${fit_end} -ge ${loadaddr} && \
++	itest.q ${fit_end} -le ${recovery_limit} && \
++	setenv verify yes && \
++	iminfo ${loadaddr} && \
++	bootm ${loadaddr}#${bootconf}#${bootconf_sd}#${bootconf_extra}
+ mmc_read_vol=mmc read $loadaddr $part_addr 0x100 && imszb $loadaddr image_size && test 0x$image_size -le 0x$part_size && mmc read $loadaddr 0x$part_addr 0x$image_size && setexpr filesize $image_size * 0x200
++mmc_read_recovery=run led_work; \
++	setenv filesize; \
++	setenv fit_size; \
++	setenv fit_end; \
++	setenv recovery_blocks; \
++	itest.q ${part_size} -ge 0x100 && \
++	mmc read ${loadaddr} ${part_addr} 0x100 && \
++	imszb ${loadaddr} recovery_blocks && \
++	itest.q ${recovery_blocks} -le ${part_size} && \
++	itest.q ${recovery_blocks} -le ${recovery_max_blocks} && \
++	mmc read ${loadaddr} ${part_addr} ${recovery_blocks} && \
++	setexpr filesize ${recovery_blocks} * 0x200
+ part_default=production
+ part_recovery=recovery
+ sdmmc_read_production=part start mmc 0 $part_default part_addr && part size mmc 0 $part_default part_size && run mmc_read_vol
+ sdmmc_read_recovery=part start mmc 0 $part_recovery part_addr && part size mmc 0 $part_recovery part_size && run mmc_read_vol
++read_recovery=mmc dev 0 && \
++	mmc rescan && \
++	part start mmc 0 ${part_recovery} part_addr && \
++	part size mmc 0 ${part_recovery} part_size && \
++	run mmc_read_recovery
+ _init_env=setenv _init_env ; saveenv ; saveenv
+ _firstboot=setenv _firstboot ; run _switch_to_menu ; run _init_env ; run bootcmd
+ _switch_to_menu=setenv _switch_to_menu ; setenv bootdelay 3 ; setenv bootmenu_delay 3 ; setenv bootmenu_0 $bootmenu_0d ; setenv bootmenu_0d
+diff --git a/defenvs/bananapi_bpi-r4-pro-8x_snand_env b/defenvs/bananapi_bpi-r4-pro-8x_snand_env
+index 3405eba..6e9bbc6 100644
+--- a/defenvs/bananapi_bpi-r4-pro-8x_snand_env
++++ b/defenvs/bananapi_bpi-r4-pro-8x_snand_env
+@@ -1,2 +1,52 @@
++loadaddr=0x50000000
++recovery_filename=openwrt-mediatek-filogic-bananapi_bpi-r4-pro-8x-initramfs-recovery.itb
++recovery_max_bytes=0x08000000
++recovery_limit=0x58000000
++bootargs=console=ttyS0,115200n1 pci=pcie_bus_perf root=/dev/fit0 rootwait ubi.block=0,fit
++bootconf=config-mt7988a-bananapi-bpi-r4-pro-8x
++bootconf_emmc=mt7988a-bananapi-bpi-r4-pro-emmc
++bootconf_extra=mt7988a-bananapi-bpi-r4-pro-cn13#mt7988a-bananapi-bpi-r4-pro-cn14
+ bootdelay=3
+ bootcmd=echo M01 compile skeleton only: boot validation deferred
++boot_recovery_local=if run read_recovery; then \
++		if run boot_loaded_recovery; then \
++			true; \
++		else \
++			run led_fault; \
++			false; \
++		fi; \
++	else \
++		false; \
++	fi
++check_recovery_config=env exists loadaddr && \
++	env exists recovery_filename && \
++	env exists recovery_max_bytes && \
++	env exists recovery_limit && \
++	env exists bootconf && \
++	env exists bootconf_emmc && \
++	env exists bootconf_extra && \
++	itest.q ${loadaddr} -eq 0x50000000 && \
++	itest.q ${recovery_max_bytes} -eq 0x08000000 && \
++	itest.q ${recovery_limit} -eq 0x58000000
++probe_recovery_local=ubi part ubi && \
++	ubi check recovery
++boot_loaded_recovery=env exists filesize && \
++	itest.q ${filesize} -ge 0x28 && \
++	itest.q ${filesize} -le ${recovery_max_bytes} && \
++	imsz ${loadaddr} fit_size && \
++	itest.q ${fit_size} -ge 0x28 && \
++	itest.q ${fit_size} -le ${filesize} && \
++	setexpr fit_end ${loadaddr} + ${fit_size} && \
++	itest.q ${fit_end} -ge ${loadaddr} && \
++	itest.q ${fit_end} -le ${recovery_limit} && \
++	setenv verify yes && \
++	iminfo ${loadaddr} && \
++	bootm ${loadaddr}#${bootconf}#${bootconf_emmc}#${bootconf_extra}
++ubi_read_production=ubi read ${loadaddr} fit && iminfo ${loadaddr}
++read_recovery=run led_work; \
++	setenv filesize; \
++	setenv fit_size; \
++	setenv fit_end; \
++	ubi part ubi && \
++	ubi check recovery && \
++	ubi read ${loadaddr} recovery ${recovery_max_bytes}
+-- 
+2.53.0
+
