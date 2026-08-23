@@ -1,0 +1,72 @@
+From b63af5e2c20cc9d2d510c5ff38d48114582d410d Mon Sep 17 00:00:00 2001
+From: Weijie Gao <weijie.gao@mediatek.com>
+Date: Wed, 20 May 2026 16:27:30 +0800
+Subject: [PATCH] cmd: ubi: use void * for buf parameter in ubi_volume_read
+
+Use void * to avoid explicit type casting as what ubi_volume_write has done
+already.
+
+Reviewed-by: Simon Glass <sjg@chromium.org>
+Signed-off-by: Weijie Gao <weijie.gao@mediatek.com>
+---
+ cmd/ubi.c           | 4 ++--
+ env/ubi.c           | 4 ++--
+ include/ubi_uboot.h | 2 +-
+ 3 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/cmd/ubi.c b/cmd/ubi.c
+index f75ceff11e..8e3cfaaddb 100644
+--- a/cmd/ubi.c
++++ b/cmd/ubi.c
+@@ -505,7 +505,7 @@ int ubi_volume_write(const char *volume, const void *buf, loff_t offset,
+ 	return ret;
+ }
+ 
+-int ubi_volume_read(const char *volume, char *buf, loff_t offset, size_t size)
++int ubi_volume_read(const char *volume, void *buf, loff_t offset, size_t size)
+ {
+ 	int err, lnum, off, len, tbuf_size;
+ 	void *tbuf;
+@@ -877,7 +877,7 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 		}
+ 
+ 		if (argc == 3) {
+-			return ubi_volume_read(argv[3], (char *)addr, 0, size);
++			return ubi_volume_read(argv[3], (void *)addr, 0, size);
+ 		}
+ 	}
+ 
+diff --git a/env/ubi.c b/env/ubi.c
+index e9865b45eb..46970ba754 100644
+--- a/env/ubi.c
++++ b/env/ubi.c
+@@ -132,14 +132,14 @@ static int env_ubi_load(void)
+ 		return -EIO;
+ 	}
+ 
+-	read1_fail = ubi_volume_read(CONFIG_ENV_UBI_VOLUME, (void *)tmp_env1, 0,
++	read1_fail = ubi_volume_read(CONFIG_ENV_UBI_VOLUME, tmp_env1, 0,
+ 				     CONFIG_ENV_SIZE);
+ 	if (read1_fail)
+ 		printf("\n** Unable to read env from %s:%s **\n",
+ 		       CONFIG_ENV_UBI_PART, CONFIG_ENV_UBI_VOLUME);
+ 
+ 	read2_fail = ubi_volume_read(CONFIG_ENV_UBI_VOLUME_REDUND,
+-				     (void *)tmp_env2, 0, CONFIG_ENV_SIZE);
++				     tmp_env2, 0, CONFIG_ENV_SIZE);
+ 	if (read2_fail)
+ 		printf("\n** Unable to read redundant env from %s:%s **\n",
+ 		       CONFIG_ENV_UBI_PART, CONFIG_ENV_UBI_VOLUME_REDUND);
+diff --git a/include/ubi_uboot.h b/include/ubi_uboot.h
+index a949d1b80d..dd22ec7537 100644
+--- a/include/ubi_uboot.h
++++ b/include/ubi_uboot.h
+@@ -50,7 +50,7 @@ void ubi_exit(void);
+ int ubi_part(const char *part_name, const char *vid_header_offset);
+ int ubi_volume_write(const char *volume, const void *buf, loff_t offset,
+ 		     size_t size);
+-int ubi_volume_read(const char *volume, char *buf, loff_t offset, size_t size);
++int ubi_volume_read(const char *volume, void *buf, loff_t offset, size_t size);
+ 
+ extern struct ubi_device *ubi_devices[];
+ int cmd_ubifs_mount(char *vol_name);

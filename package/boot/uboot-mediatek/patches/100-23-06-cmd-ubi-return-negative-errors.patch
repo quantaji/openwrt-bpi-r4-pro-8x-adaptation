@@ -1,0 +1,344 @@
+From b452246c8d378f8b38ee0a6ed49402b62fe94f7a Mon Sep 17 00:00:00 2001
+From: Weijie Gao <weijie.gao@mediatek.com>
+Date: Wed, 20 May 2026 16:27:35 +0800
+Subject: [PATCH] cmd: ubi: change all positive error return value to negative
+
+Change all return value using errno codes to negative. This makes it
+consistent with the linux ubi layer.
+
+Also, to follow the standard definition of U-Boot command, in the do_ubi()
+command handler, the return value is converted to CMD_RET_FAILURE for error
+returning, and CMD_RET_USAGE for incorrect usage.
+
+Reviewed-by: Simon Glass <sjg@chromium.org>
+Signed-off-by: Weijie Gao <weijie.gao@mediatek.com>
+---
+ cmd/ubi.c | 92 +++++++++++++++++++++++++++++--------------------------
+ 1 file changed, 48 insertions(+), 44 deletions(-)
+
+diff --git a/cmd/ubi.c b/cmd/ubi.c
+index 8d04ff61fb..dd9cc45a97 100644
+--- a/cmd/ubi.c
++++ b/cmd/ubi.c
+@@ -172,7 +172,7 @@ static int ubi_check(const char *name)
+ static int verify_mkvol_req(const struct ubi_device *ubi,
+ 			    const struct ubi_mkvol_req *req)
+ {
+-	int n, err = EINVAL;
++	int n, err = -EINVAL;
+ 
+ 	if (req->bytes < 0 || req->alignment < 0 || req->vol_type < 0 ||
+ 	    req->name_len < 0)
+@@ -187,7 +187,7 @@ static int verify_mkvol_req(const struct ubi_device *ubi,
+ 
+ 	if (req->bytes == 0) {
+ 		printf("No space left in UBI device!\n");
+-		err = ENOMEM;
++		err = -ENOMEM;
+ 		goto bad;
+ 	}
+ 
+@@ -204,7 +204,7 @@ static int verify_mkvol_req(const struct ubi_device *ubi,
+ 
+ 	if (req->name_len > UBI_VOL_NAME_MAX) {
+ 		printf("Name too long!\n");
+-		err = ENAMETOOLONG;
++		err = -ENAMETOOLONG;
+ 		goto bad;
+ 	}
+ 
+@@ -269,13 +269,13 @@ static int ubi_remove_vol(const char *volume)
+ 
+ 	vol = ubi_find_volume(volume);
+ 	if (vol == NULL)
+-		return ENODEV;
++		return -ENODEV;
+ 
+ 	printf("Remove UBI volume %s (id %d)\n", vol->name, vol->vol_id);
+ 
+ 	if (ubi->ro_mode) {
+ 		printf("It's read-only mode\n");
+-		err = EROFS;
++		err = -EROFS;
+ 		goto out_err;
+ 	}
+ 
+@@ -311,8 +311,6 @@ static int ubi_remove_vol(const char *volume)
+ 	return 0;
+ out_err:
+ 	ubi_err(ubi, "cannot remove volume %s, error %d", volume, err);
+-	if (err < 0)
+-		err = -err;
+ 	return err;
+ }
+ 
+@@ -326,19 +324,19 @@ static int ubi_rename_vol(const char *oldname, const char *newname)
+ 	vol = ubi_find_volume(oldname);
+ 	if (!vol) {
+ 		printf("%s: volume %s doesn't exist\n", __func__, oldname);
+-		return ENODEV;
++		return -ENODEV;
+ 	}
+ 
+ 	if (!ubi_check(newname)) {
+ 		printf("%s: volume %s already exist\n", __func__, newname);
+-		return EINVAL;
++		return -EINVAL;
+ 	}
+ 
+ 	printf("Rename UBI volume %s to %s\n", oldname, newname);
+ 
+ 	if (ubi->ro_mode) {
+ 		printf("%s: ubi device is in read-only mode\n", __func__);
+-		return EROFS;
++		return -EROFS;
+ 	}
+ 
+ 	rename.new_name_len = strlen(newname);
+@@ -362,17 +360,17 @@ static int ubi_volume_continue_write(const char *volume, const void *buf,
+ 
+ 	vol = ubi_find_volume(volume);
+ 	if (vol == NULL)
+-		return ENODEV;
++		return -ENODEV;
+ 
+ 	if (!vol->updating) {
+ 		printf("UBI volume update was not initiated\n");
+-		return EINVAL;
++		return -EINVAL;
+ 	}
+ 
+ 	err = ubi_more_update_data(ubi, vol, buf, size);
+ 	if (err < 0) {
+ 		printf("Couldnt or partially wrote data\n");
+-		return -err;
++		return err;
+ 	}
+ 
+ 	if (err) {
+@@ -380,7 +378,7 @@ static int ubi_volume_continue_write(const char *volume, const void *buf,
+ 
+ 		err = ubi_check_volume(ubi, vol->vol_id);
+ 		if (err < 0)
+-			return -err;
++			return err;
+ 
+ 		if (err) {
+ 			ubi_warn(ubi, "volume %d on UBI device %d is corrupt",
+@@ -404,18 +402,18 @@ int ubi_volume_begin_write(const char *volume, const void *buf, size_t size,
+ 
+ 	vol = ubi_find_volume(volume);
+ 	if (vol == NULL)
+-		return ENODEV;
++		return -ENODEV;
+ 
+ 	rsvd_bytes = vol->reserved_pebs * (ubi->leb_size - vol->data_pad);
+ 	if (size > rsvd_bytes) {
+ 		printf("size > volume size! Aborting!\n");
+-		return EINVAL;
++		return -EINVAL;
+ 	}
+ 
+ 	err = ubi_start_update(ubi, vol, full_size);
+ 	if (err < 0) {
+ 		printf("Cannot start volume update\n");
+-		return -err;
++		return err;
+ 	}
+ 
+ 	/* The volume is just wiped out */
+@@ -516,15 +514,15 @@ int ubi_volume_read(const char *volume, void *buf, loff_t offset, size_t size)
+ 
+ 	vol = ubi_find_volume(volume);
+ 	if (vol == NULL)
+-		return ENODEV;
++		return -ENODEV;
+ 
+ 	if (vol->updating) {
+ 		printf("updating");
+-		return EBUSY;
++		return -EBUSY;
+ 	}
+ 	if (vol->upd_marker) {
+ 		printf("damaged volume, update marker is set");
+-		return EBADF;
++		return -EBADF;
+ 	}
+ 	if (offp == vol->used_bytes)
+ 		return 0;
+@@ -547,7 +545,7 @@ int ubi_volume_read(const char *volume, void *buf, loff_t offset, size_t size)
+ 	tbuf = malloc_cache_aligned(tbuf_size);
+ 	if (!tbuf) {
+ 		printf("NO MEM\n");
+-		return ENOMEM;
++		return -ENOMEM;
+ 	}
+ 	len = size > tbuf_size ? tbuf_size : size;
+ 
+@@ -563,7 +561,6 @@ int ubi_volume_read(const char *volume, void *buf, loff_t offset, size_t size)
+ 		err = ubi_eba_read_leb(ubi, vol, lnum, tbuf, off, len, 0);
+ 		if (err) {
+ 			printf("read err %x\n", err);
+-			err = -err;
+ 			break;
+ 		}
+ 		off += len;
+@@ -603,13 +600,13 @@ static int ubi_dev_scan(const struct mtd_info *info,
+ 
+ 	err = ubi_mtd_param_parse(ubi_mtd_param_buffer, NULL);
+ 	if (err)
+-		return -err;
++		return err;
+ 
+ 	led_activity_blink();
+ 	err = ubi_init();
+ 	led_activity_off();
+ 	if (err)
+-		return -err;
++		return err;
+ 
+ 	return 0;
+ }
+@@ -621,7 +618,7 @@ static int ubi_set_skip_check(const char *volume, bool skip_check)
+ 
+ 	vol = ubi_find_volume(volume);
+ 	if (!vol)
+-		return ENODEV;
++		return -ENODEV;
+ 
+ 	printf("%sing skip_check on volume %s\n",
+ 	       skip_check ? "Sett" : "Clear", volume);
+@@ -677,7 +674,7 @@ int ubi_part(const char *part_name, const char *vid_header_offset)
+ 	mtd = get_mtd_device_nm(part_name);
+ 	if (IS_ERR(mtd)) {
+ 		printf("Partition %s not found!\n", part_name);
+-		return 1;
++		return -ENODEV;
+ 	}
+ 	put_mtd_device(mtd);
+ 
+@@ -698,6 +695,7 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 	int64_t size;
+ 	ulong addr = 0;
+ 	bool skipcheck = false;
++	int ret;
+ 
+ 	if (argc < 2)
+ 		return CMD_RET_USAGE;
+@@ -712,7 +710,7 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 		if (argc == 2) {
+ 			if (!ubi) {
+ 				printf("Error, no UBI device selected!\n");
+-				return 1;
++				return CMD_RET_FAILURE;
+ 			}
+ 
+ 			printf("Device %d: %s, MTD partition %s\n",
+@@ -726,12 +724,13 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 		if (argc > 3)
+ 			vid_header_offset = argv[3];
+ 
+-		return ubi_part(argv[2], vid_header_offset);
++		ret = ubi_part(argv[2], vid_header_offset);
++		return ret ? CMD_RET_FAILURE : 0;
+ 	}
+ 
+ 	if ((strcmp(argv[1], "part") != 0) && !ubi) {
+ 		printf("Error, no UBI device selected!\n");
+-		return 1;
++		return CMD_RET_FAILURE;
+ 	}
+ 
+ 	if (strcmp(argv[1], "info") == 0) {
+@@ -761,7 +760,7 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 			return ubi_check(argv[2]);
+ 
+ 		printf("Error, no volume name passed\n");
+-		return 1;
++		return CMD_RET_USAGE;
+ 	}
+ 
+ 	if (strncmp(argv[1], "create", 6) == 0) {
+@@ -789,7 +788,7 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 				dynamic = false;
+ 			else if (strncmp(argv[4], "d", 1) != 0) {
+ 				printf("Incorrect type\n");
+-				return 1;
++				return CMD_RET_USAGE;
+ 			}
+ 			argc--;
+ 		}
+@@ -806,34 +805,38 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 		}
+ 		/* E.g., create volume */
+ 		if (argc == 3) {
+-			return ubi_create_vol(argv[2], size, dynamic, id,
+-					      skipcheck);
++			ret = ubi_create_vol(argv[2], size, dynamic, id,
++					     skipcheck);
++			return ret ? CMD_RET_FAILURE : 0;
+ 		}
+ 	}
+ 
+ 	if (strncmp(argv[1], "remove", 6) == 0) {
+ 		/* E.g., remove volume */
+-		if (argc == 3)
+-			return ubi_remove_vol(argv[2]);
++		if (argc == 3) {
++			ret = ubi_remove_vol(argv[2]);
++			return ret ? CMD_RET_FAILURE : 0;
++		}
+ 	}
+ 
+-	if (IS_ENABLED(CONFIG_CMD_UBI_RENAME) && !strncmp(argv[1], "rename", 6))
+-		return ubi_rename_vol(argv[2], argv[3]);
++	if (IS_ENABLED(CONFIG_CMD_UBI_RENAME) && !strncmp(argv[1], "rename", 6)) {
++		ret = ubi_rename_vol(argv[2], argv[3]);
++		return ret ? CMD_RET_FAILURE : 0;
++	}
+ 
+ 	if (strncmp(argv[1], "skipcheck", 9) == 0) {
+ 		/* E.g., change skip_check flag */
+ 		if (argc == 4) {
+ 			skipcheck = strncmp(argv[3], "on", 2) == 0;
+-			return ubi_set_skip_check(argv[2], skipcheck);
++			ret = ubi_set_skip_check(argv[2], skipcheck);
++			return ret ? CMD_RET_FAILURE : 0;
+ 		}
+ 	}
+ 
+ 	if (strncmp(argv[1], "write", 5) == 0) {
+-		int ret;
+-
+ 		if (argc < 5) {
+ 			printf("Please see usage\n");
+-			return 1;
++			return CMD_RET_USAGE;
+ 		}
+ 
+ 		addr = hextoul(argv[2], NULL);
+@@ -858,7 +861,7 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 			       argv[3]);
+ 		}
+ 
+-		return ret;
++		return ret ? CMD_RET_FAILURE : 0;
+ 	}
+ 
+ 	if (strncmp(argv[1], "read", 4) == 0) {
+@@ -877,12 +880,13 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 		}
+ 
+ 		if (argc == 3) {
+-			return ubi_volume_read(argv[3], (void *)addr, 0, size);
++			ret = ubi_volume_read(argv[3], (void *)addr, 0, size);
++			return ret ? CMD_RET_FAILURE : 0;
+ 		}
+ 	}
+ 
+ 	printf("Please see usage\n");
+-	return 1;
++	return CMD_RET_USAGE;
+ }
+ 
+ U_BOOT_CMD(

@@ -1,0 +1,35 @@
+From c719d2627ae67903199045c6072a3370b395b7ef Mon Sep 17 00:00:00 2001
+From: Weijie Gao <weijie.gao@mediatek.com>
+Date: Wed, 20 May 2026 16:27:40 +0800
+Subject: [PATCH] cmd: ubi: allow creating volume with all free spaces in
+ ubi_create_vol
+
+Although the ubi command itself supports creating volume with all
+free spaces, the api ubi_create_vol() does not.
+
+Since negative size is invalid, this patch replaces negative size
+with all free space size in ubi_create_vol().
+
+Reviewed-by: Simon Glass <sjg@chromium.org>
+Signed-off-by: Weijie Gao <weijie.gao@mediatek.com>
+---
+ cmd/ubi.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/cmd/ubi.c b/cmd/ubi.c
+index eea863ac30..2b206141a2 100644
+--- a/cmd/ubi.c
++++ b/cmd/ubi.c
+@@ -226,7 +226,11 @@ int ubi_create_vol(const char *volume, int64_t size, bool dynamic, int vol_id,
+ 
+ 	req.vol_id = vol_id;
+ 	req.alignment = 1;
+-	req.bytes = size;
++
++	if (size < 0)
++		req.bytes = ubi->avail_pebs * ubi->leb_size;
++	else
++		req.bytes = size;
+ 
+ 	strcpy(req.name, volume);
+ 	req.name_len = strlen(volume);

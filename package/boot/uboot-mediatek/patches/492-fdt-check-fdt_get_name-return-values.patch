@@ -1,0 +1,73 @@
+From f3d2ff3f5c3f49216b45a30b4b9a315a1b8d2142 Mon Sep 17 00:00:00 2001
+From: Anton Ivanov <anton@binarly.io>
+Date: Tue, 2 Jun 2026 19:27:52 +0100
+Subject: [PATCH] fdt: Check return value of fdt_get_name() calls
+
+fdt_get_name() can return NULL and set len to a negative error code.
+fdt_find_regions() does not check for this, leading to a potential NULL
+pointer dereference and a buffer out-of-bounds write during signature
+verification of an untrusted FIT. fdt_next_region(), fdt_check_full(),
+and display_fdt_by_regions() also lack validation.
+
+Add NULL checks and propagate the error code from fdt_get_name()
+to the caller.
+
+Signed-off-by: Anton Ivanov <anton@binarly.io>
+Reviewed-by: Simon Glass <sjg@chromium.org>
+---
+ boot/fdt_region.c           | 5 +++++
+ scripts/dtc/libfdt/fdt_ro.c | 3 +++
+ tools/fdtgrep.c             | 3 +++
+ 3 files changed, 11 insertions(+)
+
+diff --git a/boot/fdt_region.c b/boot/fdt_region.c
+index 0a9d47bb2b..dd6e87925b 100644
+--- a/boot/fdt_region.c
++++ b/boot/fdt_region.c
+@@ -88,6 +88,8 @@ int fdt_find_regions(const void *fdt, char * const inc[], int inc_count,
+ 			if (depth == FDT_MAX_DEPTH)
+ 				return -FDT_ERR_BADSTRUCTURE;
+ 			name = fdt_get_name(fdt, offset, &len);
++			if (!name)
++				return len;
+ 
+ 			/* The root node must have an empty name */
+ 			if (!depth && *name)
+@@ -563,6 +565,9 @@ int fdt_next_region(const void *fdt,
+ 			if (p.depth == FDT_MAX_DEPTH)
+ 				return -FDT_ERR_BADSTRUCTURE;
+ 			name = fdt_get_name(fdt, offset, &len);
++			if (!name)
++				return len;
++
+ 			if (p.end - path + 2 + len >= path_len)
+ 				return -FDT_ERR_NOSPACE;
+ 
+diff --git a/scripts/dtc/libfdt/fdt_ro.c b/scripts/dtc/libfdt/fdt_ro.c
+index 3e7e26b439..d7b424c658 100644
+--- a/scripts/dtc/libfdt/fdt_ro.c
++++ b/scripts/dtc/libfdt/fdt_ro.c
+@@ -940,6 +940,9 @@ int fdt_check_full(const void *fdt, size_t bufsize)
+ 				int len;
+ 
+ 				name = fdt_get_name(fdt, offset, &len);
++				if (!name)
++					return len;
++
+ 				if (*name || len)
+ 					return -FDT_ERR_BADLAYOUT;
+ 			}
+diff --git a/tools/fdtgrep.c b/tools/fdtgrep.c
+index b4c041070f..dba7240001 100644
+--- a/tools/fdtgrep.c
++++ b/tools/fdtgrep.c
+@@ -355,6 +355,9 @@ static int display_fdt_by_regions(struct display_info *disp, const void *blob,
+ 
+ 		case FDT_BEGIN_NODE:
+ 			name = fdt_get_name(blob, offset, &len);
++			if (!name)
++				return len;
++
+ 			fprintf(f, "%*s%s {", depth++ * shift, "",
+ 				*name ? name : "/");
+ 			break;

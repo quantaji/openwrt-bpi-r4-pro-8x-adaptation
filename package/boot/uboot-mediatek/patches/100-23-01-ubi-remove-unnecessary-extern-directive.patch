@@ -1,0 +1,38 @@
+From a7d690cf3a7bdc1a56b72094f33a44042b898cfc Mon Sep 17 00:00:00 2001
+From: Weijie Gao <weijie.gao@mediatek.com>
+Date: Wed, 20 May 2026 16:27:25 +0800
+Subject: [PATCH] ubi: remove unnecessary extern directive from function
+ prototypes
+
+The extern directive is unnecessary for function declaration and should be
+removed.
+
+Reviewed-by: Simon Glass <sjg@chromium.org>
+Signed-off-by: Weijie Gao <weijie.gao@mediatek.com>
+---
+ include/ubi_uboot.h | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/include/ubi_uboot.h b/include/ubi_uboot.h
+index ea0db69c72..05fb9634d8 100644
+--- a/include/ubi_uboot.h
++++ b/include/ubi_uboot.h
+@@ -44,12 +44,12 @@
+ #endif
+ 
+ /* functions */
+-extern int ubi_mtd_param_parse(const char *val, struct kernel_param *kp);
+-extern int ubi_init(void);
+-extern void ubi_exit(void);
+-extern int ubi_part(char *part_name, const char *vid_header_offset);
+-extern int ubi_volume_write(char *volume, void *buf, loff_t offset, size_t size);
+-extern int ubi_volume_read(char *volume, char *buf, loff_t offset, size_t size);
++int ubi_mtd_param_parse(const char *val, struct kernel_param *kp);
++int ubi_init(void);
++void ubi_exit(void);
++int ubi_part(char *part_name, const char *vid_header_offset);
++int ubi_volume_write(char *volume, void *buf, loff_t offset, size_t size);
++int ubi_volume_read(char *volume, char *buf, loff_t offset, size_t size);
+ 
+ extern struct ubi_device *ubi_devices[];
+ int cmd_ubifs_mount(char *vol_name);

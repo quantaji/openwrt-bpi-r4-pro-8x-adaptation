@@ -12,9 +12,8 @@ legacy SFP ops based on firmware version.
 This commit is for downstream use only and must not be submitted
 upstream.
 
-Refresh the command-definition context for the retained Linux 6.18
-flash implementation, which deliberately omits the separate MCUboot
-recovery patch, without changing the legacy SFP fallback behavior.
+Refresh the command-definition context after removing the downstream
+flash implementation, without changing the legacy SFP fallback behavior.
 
 Signed-off-by: Daniel Golle <daniel@makrotopia.org>
 Signed-off-by: Codex <codex@openai.com>
@@ -294,9 +293,8 @@ index d83842a..83d0220 100644
  #define MXL862XX_COMMON_CFGGET		(MXL862XX_COMMON_MAGIC + 0x9)
  #define MXL862XX_COMMON_CFGSET		(MXL862XX_COMMON_MAGIC + 0xa)
  #define MXL862XX_COMMON_MONITORPORTCFGSET (MXL862XX_COMMON_MAGIC + 0xe)
-@@ -87,6 +89,7 @@
+@@ -87,5 +89,6 @@
  
- #define SYS_MISC_FW_UPDATE		(SYS_MISC_MAGIC + 0x1)
  #define SYS_MISC_FW_VERSION		(SYS_MISC_MAGIC + 0x2)
 +#define SYS_MISC_SFP_SET		(SYS_MISC_MAGIC + 0xe)
  

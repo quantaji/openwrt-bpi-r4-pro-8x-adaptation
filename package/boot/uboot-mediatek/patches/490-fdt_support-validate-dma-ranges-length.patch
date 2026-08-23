@@ -1,0 +1,44 @@
+From 84e250c0a85a615620a461e0710bb970801fb276 Mon Sep 17 00:00:00 2001
+From: Aristo Chen <aristo.chen@canonical.com>
+Date: Tue, 26 May 2026 02:09:15 +0000
+Subject: [PATCH] fdt_support: validate dma-ranges length in fdt_get_dma_range
+
+fdt_get_dma_range() fetches the dma-ranges property with fdt_getprop()
+and checks only that the length is non-zero before reading one full
+entry from it. The entry size depends on na, pna and ns cells returned
+by count_cells, which come from the parent buses in the devicetree.
+A dma-ranges property shorter than (na + pna + ns) * sizeof(u32) bytes
+causes fdt_read_number() and fdt_translate_dma_address() to read past
+the end of the property within the FDT blob, an out-of-bounds read of
+attacker-influenced data when the OS devicetree is not signature
+verified.
+
+Reject the property when its length is smaller than one full entry and
+return -EINVAL, matching the existing failure paths in this function.
+Use debug() rather than printf() for the rejection text so that
+production builds do not pay any .text or .rodata growth for the new
+diagnostic.
+
+Signed-off-by: Aristo Chen <aristo.chen@canonical.com>
+---
+ boot/fdt_support.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/boot/fdt_support.c b/boot/fdt_support.c
+index bdf651364b..632d5b380d 100644
+--- a/boot/fdt_support.c
++++ b/boot/fdt_support.c
+@@ -1633,6 +1633,13 @@ int fdt_get_dma_range(const void *blob, int node, phys_addr_t *cpu,
+ 		goto out;
+ 	}
+ 
++	if (len < (int)((na + pna + ns) * sizeof(*ranges))) {
++		debug("%s: dma-ranges too short for %s\n", __func__,
++		      fdt_get_name(blob, node, NULL));
++		ret = -EINVAL;
++		goto out;
++	}
++
+ 	*bus = fdt_read_number(ranges, na);
+ 	*cpu = fdt_translate_dma_address(blob, node, ranges + na);
+ 	*size = fdt_read_number(ranges + na + pna, ns);

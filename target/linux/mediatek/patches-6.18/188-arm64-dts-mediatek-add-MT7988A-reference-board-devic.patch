@@ -33,15 +33,14 @@ Available storage options:
 Signed-off-by: Sam Shih <sam.shih@mediatek.com>
 Signed-off-by: Daniel Golle <daniel@makrotopia.org>
 
-Adapted for the BPI-R4 Pro upstream DTS backport by refreshing only the
-MediaTek DTS Makefile context after the new R4 Pro entries are added.
+Adapted for the BPI-R4 Pro upstream DTS backport by anchoring the MediaTek
+DTS Makefile addition between the final R4 Pro DTB and the following MT8167
+entry. No generated target or reference-board behavior changes.
 
 Signed-off-by: Codex <codex@openai.com>
 --- a/arch/arm64/boot/dts/mediatek/Makefile
 +++ b/arch/arm64/boot/dts/mediatek/Makefile
-@@ -63,6 +63,19 @@ mt7988a-bananapi-bpi-r4-pro-8x-sd-cn18-d
- 	mt7988a-bananapi-bpi-r4-pro-8x-sd.dtb \
- 	mt7988a-bananapi-bpi-r4-pro-cn18.dtbo
+@@ -63,2 +63,15 @@ mt7988a-bananapi-bpi-r4-pro-8x-sd-cn18-d
  dtb-$(CONFIG_ARCH_MEDIATEK) += mt7988a-bananapi-bpi-r4-pro-8x-sd-cn18.dtb
 +dtb-$(CONFIG_ARCH_MEDIATEK) += mt7988a-rfb.dtb
 +dtb-$(CONFIG_ARCH_MEDIATEK) += mt7988a-rfb-emmc.dtbo

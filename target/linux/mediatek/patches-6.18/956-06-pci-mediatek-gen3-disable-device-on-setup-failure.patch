@@ -11,6 +11,9 @@ tracking and balancing once pwrctrl API is integrated.
 Power down the device in the error paths of mtk_pcie_startup_port() and
 mtk_pcie_probe().
 
+[Codex: refresh startup error-path context after the PCIe link-training
+delay backport while preserving both changes.]
+
 Signed-off-by: Chen-Yu Tsai <wenst@chromium.org>
 Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
 Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
@@ -18,6 +21,7 @@ Reviewed-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com
 Reviewed-by: Bartosz Golaszewski <bartosz.golaszewski@oss.qualcomm.com>
 Reviewed-by: Manivannan Sadhasivam <mani@kernel.org>
 Link: https://patch.msgid.link/20260324052002.4072430-7-wenst@chromium.org
+Signed-off-by: Codex <codex@openai.com>
 ---
  drivers/pci/controller/pcie-mediatek-gen3.c | 7 ++++++-
  1 file changed, 6 insertions(+), 1 deletion(-)
@@ -26,15 +30,17 @@ diff --git a/drivers/pci/controller/pcie-mediatek-gen3.c b/drivers/pci/controlle
 index 436dbd925181..aa14b021834f 100644
 --- a/drivers/pci/controller/pcie-mediatek-gen3.c
 +++ b/drivers/pci/controller/pcie-mediatek-gen3.c
-@@ -555,10 +555,14 @@ static int mtk_pcie_startup_port(struct mtk_gen3_pcie *pcie)
- 		dev_err(pcie->dev,
- 			"PCIe link down, current LTSSM state: %s (%#x)\n",
- 			ltssm_state, val);
+@@ -556,12 +556,16 @@ static int mtk_pcie_startup_port(struct mtk_gen3_pcie *pcie)
+		dev_err(pcie->dev,
+			"PCIe link down, current LTSSM state: %s (%#x)\n",
+			ltssm_state, val);
 -		return err;
 +		goto err_power_down_device;
- 	}
- 
- 	return 0;
+	}
+
+	pci_host_common_link_train_delay(pcie->max_link_speed);
+
+	return 0;
 +
 +err_power_down_device:
 +	mtk_pcie_devices_power_down(pcie);
@@ -52,4 +58,3 @@ index 436dbd925181..aa14b021834f 100644
  	mtk_pcie_irq_teardown(pcie);
 -- 
 2.53.0
-

@@ -1,0 +1,44 @@
+From 1cc0442ede5444b76356bcba9aaeb11750e97b65 Mon Sep 17 00:00:00 2001
+From: Weijie Gao <weijie.gao@mediatek.com>
+Date: Tue, 26 May 2026 16:37:29 +0800
+Subject: [PATCH] bootmenu: fix incorrect menu quitting logic
+
+The last entry of bootmenu is always set for exiting the menu, and its
+command is set to an empty string.
+
+When user selects to quit the menu, bootmenu will try to run this empty
+command. However run_command() with empty cmd string will return failure,
+and the return value will be overridden to BOOTMENU_RET_FAIL, not the
+expected BOOTMENU_RET_QUIT.
+
+This patch adds a default success value to the cmd_ret variable, and makes
+sure run_command() is called only when the menu command is not empty.
+
+Reviewed-by: Simon Glass <sjg@chromium.org>
+Signed-off-by: Weijie Gao <weijie.gao@mediatek.com>
+---
+ cmd/bootmenu.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/cmd/bootmenu.c b/cmd/bootmenu.c
+index 528afd221d..b55f557940 100644
+--- a/cmd/bootmenu.c
++++ b/cmd/bootmenu.c
+@@ -526,7 +526,7 @@ static void handle_uefi_bootnext(void)
+  */
+ static enum bootmenu_ret bootmenu_show(int uefi, int delay)
+ {
+-	int cmd_ret;
++	int cmd_ret = CMD_RET_SUCCESS;
+ 	int init = 0;
+ 	void *choice = NULL;
+ 	char *title = NULL;
+@@ -628,7 +628,7 @@ cleanup:
+ 		printf(ANSI_CURSOR_POSITION, 1, 1);
+ 	}
+ 
+-	if (title && command) {
++	if (title && command && *command) {
+ 		debug("Starting entry '%s'\n", title);
+ 		free(title);
+ 		if (efi_ret == EFI_SUCCESS)

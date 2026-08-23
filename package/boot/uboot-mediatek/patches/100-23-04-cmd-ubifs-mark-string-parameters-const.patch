@@ -1,0 +1,87 @@
+From d9a9d72e45c12571acb2258d669484eaef235872 Mon Sep 17 00:00:00 2001
+From: Weijie Gao <weijie.gao@mediatek.com>
+Date: Wed, 20 May 2026 16:27:31 +0800
+Subject: [PATCH] cmd: ubifs: mark string parameters with const
+
+File name and volume name should be const as they will not be modified in
+these functions.
+
+Reviewed-by: Simon Glass <sjg@chromium.org>
+Signed-off-by: Weijie Gao <weijie.gao@mediatek.com>
+---
+ cmd/ubifs.c           | 2 +-
+ fs/ubifs/super.c      | 2 +-
+ fs/ubifs/ubifs.c      | 2 +-
+ include/ubi_uboot.h   | 2 +-
+ include/ubifs_uboot.h | 4 ++--
+ 5 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/cmd/ubifs.c b/cmd/ubifs.c
+index 22e95db8ca..81f2d37fc7 100644
+--- a/cmd/ubifs.c
++++ b/cmd/ubifs.c
+@@ -19,7 +19,7 @@
+ static int ubifs_initialized;
+ static int ubifs_mounted;
+ 
+-int cmd_ubifs_mount(char *vol_name)
++int cmd_ubifs_mount(const char *vol_name)
+ {
+ 	int ret;
+ 
+diff --git a/fs/ubifs/super.c b/fs/ubifs/super.c
+index b6004b88f4..9c8974a97a 100644
+--- a/fs/ubifs/super.c
++++ b/fs/ubifs/super.c
+@@ -2694,7 +2694,7 @@ MODULE_VERSION(__stringify(UBIFS_VERSION));
+ MODULE_AUTHOR("Artem Bityutskiy, Adrian Hunter");
+ MODULE_DESCRIPTION("UBIFS - UBI File System");
+ #else
+-int uboot_ubifs_mount(char *vol_name)
++int uboot_ubifs_mount(const char *vol_name)
+ {
+ 	struct dentry *ret;
+ 	int flags;
+diff --git a/fs/ubifs/ubifs.c b/fs/ubifs/ubifs.c
+index 59bc754730..6121fb0b13 100644
+--- a/fs/ubifs/ubifs.c
++++ b/fs/ubifs/ubifs.c
+@@ -991,7 +991,7 @@ void ubifs_close(void)
+ }
+ 
+ /* Compat wrappers for common/cmd_ubifs.c */
+-int ubifs_load(char *filename, unsigned long addr, u32 size)
++int ubifs_load(const char *filename, unsigned long addr, u32 size)
+ {
+ 	loff_t actread;
+ 	int err;
+diff --git a/include/ubi_uboot.h b/include/ubi_uboot.h
+index dd22ec7537..6ebd8a3b61 100644
+--- a/include/ubi_uboot.h
++++ b/include/ubi_uboot.h
+@@ -53,7 +53,7 @@ int ubi_volume_write(const char *volume, const void *buf, loff_t offset,
+ int ubi_volume_read(const char *volume, void *buf, loff_t offset, size_t size);
+ 
+ extern struct ubi_device *ubi_devices[];
+-int cmd_ubifs_mount(char *vol_name);
++int cmd_ubifs_mount(const char *vol_name);
+ int cmd_ubifs_umount(void);
+ 
+ #if IS_ENABLED(CONFIG_UBI_BLOCK)
+diff --git a/include/ubifs_uboot.h b/include/ubifs_uboot.h
+index db8a29e9bb..0877dd84f9 100644
+--- a/include/ubifs_uboot.h
++++ b/include/ubifs_uboot.h
+@@ -18,10 +18,10 @@ struct blk_desc;
+ struct disk_partition;
+ 
+ int ubifs_init(void);
+-int uboot_ubifs_mount(char *vol_name);
++int uboot_ubifs_mount(const char *vol_name);
+ void uboot_ubifs_umount(void);
+ int ubifs_is_mounted(void);
+-int ubifs_load(char *filename, unsigned long addr, u32 size);
++int ubifs_load(const char *filename, unsigned long addr, u32 size);
+ 
+ int ubifs_set_blk_dev(struct blk_desc *rbdd, struct disk_partition *info);
+ int ubifs_ls(const char *dir_name);

@@ -1,0 +1,85 @@
+From 2c84469c8fc854775fab02ec1e0b20df137c41b6 Mon Sep 17 00:00:00 2001
+From: Felix Fietkau <nbd@nbd.name>
+Date: Tue, 18 Aug 2026 12:58:25 +0000
+Subject: [PATCH] wifi: mt76: account non-AQL frames per peer rather than per
+ link
+
+The driver increments wcid->non_aql_packets when a frame goes to the
+hardware queue. The completion path decrements the counter again.
+
+For an MLO peer, the hardware reports the completion on the link that it
+used for the transmission. This link can differ from the link that the
+driver queued the frame on. In that case, the increment and the
+decrement go to different link wcids, and the count drifts upwards until
+it blocks the station.
+
+Keep the count on the wcid of the primary link, like the other peer-wide
+state.
+
+Link: https://patch.msgid.link/20260818125825.395538-5-nbd@nbd.name
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+
+diff --git a/mt76.h b/mt76.h
+index 3693331..0f31d90 100644
+--- a/mt76.h
++++ b/mt76.h
+@@ -1434,6 +1434,13 @@ mtxq_to_txq(struct mt76_txq *mtxq)
+ 	return container_of(ptr, struct ieee80211_txq, drv_priv);
+ }
+ 
++/* peer-wide state uses the wcid of the primary link */
++static inline struct mt76_wcid *
++mt76_wcid_primary(struct mt76_wcid *wcid)
++{
++	return wcid->def_wcid ? wcid->def_wcid : wcid;
++}
++
+ static inline struct ieee80211_sta *
+ wcid_to_sta(struct mt76_wcid *wcid)
+ {
+diff --git a/tx.c b/tx.c
+index b863e44..b11472b 100644
+--- a/tx.c
++++ b/tx.c
+@@ -234,6 +234,8 @@ mt76_tx_check_non_aql(struct mt76_dev *dev, struct mt76_wcid *wcid,
+ 	if (!wcid || info->tx_time_est)
+ 		return;
+ 
++	wcid = mt76_wcid_primary(wcid);
++
+ 	pending = atomic_dec_return(&wcid->non_aql_packets);
+ 	if (pending < 0)
+ 		atomic_cmpxchg(&wcid->non_aql_packets, pending, 0);
+@@ -344,7 +346,8 @@ __mt76_tx_queue_skb(struct mt76_phy *phy, int qid, struct sk_buff *skb,
+ 	if (!non_aql)
+ 		return idx;
+ 
+-	pending = atomic_inc_return(&wcid->non_aql_packets);
++	/* the hardware can report the completion on a different link */
++	pending = atomic_inc_return(&mt76_wcid_primary(wcid)->non_aql_packets);
+ 	if (stop && pending >= MT_MAX_NON_AQL_PKT)
+ 		*stop = true;
+ 
+@@ -506,7 +509,8 @@ mt76_txq_send_burst(struct mt76_phy *phy, struct mt76_queue *q,
+ 			return 0;
+ 	}
+ 
+-	if (atomic_read(&wcid->non_aql_packets) >= MT_MAX_NON_AQL_PKT)
++	if (atomic_read(&mt76_wcid_primary(wcid)->non_aql_packets) >=
++	    MT_MAX_NON_AQL_PKT)
+ 		return 0;
+ 
+ 	skb = mt76_txq_dequeue(phy, mtxq);
+@@ -615,7 +619,8 @@ mt76_txq_schedule_list(struct mt76_phy *phy, enum mt76_txq_id qid)
+ 			continue;
+ 		}
+ 
+-		if (atomic_read(&wcid->non_aql_packets) >= MT_MAX_NON_AQL_PKT)
++		if (atomic_read(&mt76_wcid_primary(wcid)->non_aql_packets) >=
++		    MT_MAX_NON_AQL_PKT)
+ 			continue;
+ 		if (dev->queue_ops->tx_cleanup &&
+ 		    q->queued + 2 * MT_TXQ_FREE_THR >= q->ndesc) {
+-- 
+2.53.0
+

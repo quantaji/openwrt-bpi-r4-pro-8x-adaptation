@@ -15,6 +15,9 @@ add device power control to have cleaner teardown.
 
 This change only moves code. No functional change is expected.
 
+[Codex: refresh the removal context after the PCIe link-training delay
+backport while preserving both changes.]
+
 Suggested-by: Bjorn Helgaas <helgaas@kernel.org>
 Signed-off-by: Chen-Yu Tsai <wenst@chromium.org>
 Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
@@ -22,6 +25,7 @@ Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
 Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
 Reviewed-by: Bartosz Golaszewski <bartosz.golaszewski@oss.qualcomm.com>
 Link: https://patch.msgid.link/20260324052002.4072430-4-wenst@chromium.org
+Signed-off-by: Codex <codex@openai.com>
 ---
  drivers/pci/controller/pcie-mediatek-gen3.c | 50 ++++++++++-----------
  1 file changed, 25 insertions(+), 25 deletions(-)
@@ -62,9 +66,9 @@ index 04ae195d36c2..1b6290f2c360 100644
  	/*
  	 * Airoha EN7581 has a hw bug asserting/releasing PCIE_PE_RSTB signal
  	 * causing occasional PCIe link down. In order to overcome the issue,
-@@ -510,31 +535,6 @@ static int mtk_pcie_startup_port(struct mtk_gen3_pcie *pcie)
- 		return err;
- 	}
+@@ -538,31 +538,6 @@ static int mtk_pcie_startup_port(struct mtk_gen3_pcie *pcie)
+ 
+ 	pci_host_common_link_train_delay(pcie->max_link_speed);
  
 -	mtk_pcie_enable_msi(pcie);
 -
@@ -96,4 +100,3 @@ index 04ae195d36c2..1b6290f2c360 100644
  
 -- 
 2.53.0
-

@@ -1,0 +1,27 @@
+From b752e4417900ae51d4d8fda879a5594db7025698 Mon Sep 17 00:00:00 2001
+From: Graeme Smecher <gsmecher@t0.technology>
+Date: Thu, 6 Aug 2026 13:43:42 -0700
+Subject: [PATCH] net: srand_mac(): fix -ENODEV crash with CONFIG_DM_RNG
+
+The uclass_get_device() return-value check was inverted, resulting in a
+synchronous abort when -ENODEV was returned.
+
+Signed-off-by: Graeme Smecher <gsmecher@t0.technology>
+Reviewed-by: Simon Glass <sjg@chromium.org>
+---
+ net/net_rand.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/net_rand.h b/net/net_rand.h
+index e21dff8569..18ff7b6805 100644
+--- a/net/net_rand.h
++++ b/net/net_rand.h
+@@ -44,7 +44,7 @@ static inline void srand_mac(void)
+ 
+ 	if (CONFIG_IS_ENABLED(DM_RNG)) {
+ 		ret = uclass_get_device(UCLASS_RNG, 0, &devp);
+-		if (ret) {
++		if (!ret) {
+ 			ret = dm_rng_read(devp, &randv, sizeof(randv));
+ 			if (ret < 0)
+ 				randv = 0;

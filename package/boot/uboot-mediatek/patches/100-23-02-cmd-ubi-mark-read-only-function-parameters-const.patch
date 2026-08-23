@@ -1,0 +1,187 @@
+From 065b0ba3b14fd6795626b89d5e8e3daede02475a Mon Sep 17 00:00:00 2001
+From: Weijie Gao <weijie.gao@mediatek.com>
+Date: Wed, 20 May 2026 16:27:28 +0800
+Subject: [PATCH] cmd: ubi: mark read-only function parameters with const
+
+Parameters like part/volume name and buffer for writing are not being
+modified by the callee functions and should be marked const.
+
+Reviewed-by: Simon Glass <sjg@chromium.org>
+Signed-off-by: Weijie Gao <weijie.gao@mediatek.com>
+---
+ cmd/ubi.c           | 41 ++++++++++++++++++++++-------------------
+ include/ubi_uboot.h |  7 ++++---
+ 2 files changed, 26 insertions(+), 22 deletions(-)
+
+diff --git a/cmd/ubi.c b/cmd/ubi.c
+index 93de6f3aea..f75ceff11e 100644
+--- a/cmd/ubi.c
++++ b/cmd/ubi.c
+@@ -39,7 +39,7 @@ static struct ubi_device *ubi;
+ #include <ubifs_uboot.h>
+ #endif
+ 
+-static void display_volume_info(struct ubi_device *ubi)
++static void display_volume_info(const struct ubi_device *ubi)
+ {
+ 	int i;
+ 
+@@ -50,7 +50,7 @@ static void display_volume_info(struct ubi_device *ubi)
+ 	}
+ }
+ 
+-static void display_ubi_info(struct ubi_device *ubi)
++static void display_ubi_info(const struct ubi_device *ubi)
+ {
+ 	ubi_msg("MTD device name:            \"%s\"", ubi->mtd->name);
+ 	ubi_msg("MTD device size:            %llu MiB", ubi->flash_size >> 20);
+@@ -149,12 +149,12 @@ static int ubi_list(const char *var, int numeric)
+ 	return 0;
+ }
+ 
+-static int ubi_check_volumename(const struct ubi_volume *vol, char *name)
++static int ubi_check_volumename(const struct ubi_volume *vol, const char *name)
+ {
+ 	return strcmp(vol->name, name);
+ }
+ 
+-static int ubi_check(char *name)
++static int ubi_check(const char *name)
+ {
+ 	int i;
+ 
+@@ -213,8 +213,8 @@ bad:
+ 	return err;
+ }
+ 
+-static int ubi_create_vol(char *volume, int64_t size, int dynamic, int vol_id,
+-			  bool skipcheck)
++static int ubi_create_vol(const char *volume, int64_t size, int dynamic,
++			  int vol_id, bool skipcheck)
+ {
+ 	struct ubi_mkvol_req req;
+ 	int err;
+@@ -247,7 +247,7 @@ static int ubi_create_vol(char *volume, int64_t size, int dynamic, int vol_id,
+ 	return ubi_create_volume(ubi, &req);
+ }
+ 
+-static struct ubi_volume *ubi_find_volume(char *volume)
++static struct ubi_volume *ubi_find_volume(const char *volume)
+ {
+ 	struct ubi_volume *vol;
+ 	int i;
+@@ -262,7 +262,7 @@ static struct ubi_volume *ubi_find_volume(char *volume)
+ 	return NULL;
+ }
+ 
+-static int ubi_remove_vol(char *volume)
++static int ubi_remove_vol(const char *volume)
+ {
+ 	int err, reserved_pebs, i;
+ 	struct ubi_volume *vol;
+@@ -316,7 +316,7 @@ out_err:
+ 	return err;
+ }
+ 
+-static int ubi_rename_vol(char *oldname, char *newname)
++static int ubi_rename_vol(const char *oldname, const char *newname)
+ {
+ 	struct ubi_volume *vol;
+ 	struct ubi_rename_entry rename;
+@@ -354,7 +354,8 @@ static int ubi_rename_vol(char *oldname, char *newname)
+ 	return ubi_rename_volumes(ubi, &list);
+ }
+ 
+-static int ubi_volume_continue_write(char *volume, void *buf, size_t size)
++static int ubi_volume_continue_write(const char *volume, const void *buf,
++				     size_t size)
+ {
+ 	int err;
+ 	struct ubi_volume *vol;
+@@ -394,8 +395,8 @@ static int ubi_volume_continue_write(char *volume, void *buf, size_t size)
+ 	return 0;
+ }
+ 
+-int ubi_volume_begin_write(char *volume, void *buf, size_t size,
+-	size_t full_size)
++int ubi_volume_begin_write(const char *volume, const void *buf, size_t size,
++			   size_t full_size)
+ {
+ 	int err;
+ 	int rsvd_bytes;
+@@ -424,8 +425,8 @@ int ubi_volume_begin_write(char *volume, void *buf, size_t size,
+ 	return ubi_volume_continue_write(volume, buf, size);
+ }
+ 
+-static int ubi_volume_offset_write(char *volume, void *buf, loff_t offset,
+-				   size_t size)
++static int ubi_volume_offset_write(const char *volume, const void *buf,
++				   loff_t offset, size_t size)
+ {
+ 	int len, tbuf_size, ret;
+ 	u64 lnum;
+@@ -487,7 +488,8 @@ exit:
+ 	return ret;
+ }
+ 
+-int ubi_volume_write(char *volume, void *buf, loff_t offset, size_t size)
++int ubi_volume_write(const char *volume, const void *buf, loff_t offset,
++		     size_t size)
+ {
+ 	int ret;
+ 
+@@ -503,7 +505,7 @@ int ubi_volume_write(char *volume, void *buf, loff_t offset, size_t size)
+ 	return ret;
+ }
+ 
+-int ubi_volume_read(char *volume, char *buf, loff_t offset, size_t size)
++int ubi_volume_read(const char *volume, char *buf, loff_t offset, size_t size)
+ {
+ 	int err, lnum, off, len, tbuf_size;
+ 	void *tbuf;
+@@ -587,7 +589,8 @@ int ubi_volume_read(char *volume, char *buf, loff_t offset, size_t size)
+ 	return err;
+ }
+ 
+-static int ubi_dev_scan(struct mtd_info *info, const char *vid_header_offset)
++static int ubi_dev_scan(const struct mtd_info *info,
++			const char *vid_header_offset)
+ {
+ 	char ubi_mtd_param_buffer[80];
+ 	int err;
+@@ -611,7 +614,7 @@ static int ubi_dev_scan(struct mtd_info *info, const char *vid_header_offset)
+ 	return 0;
+ }
+ 
+-static int ubi_set_skip_check(char *volume, bool skip_check)
++static int ubi_set_skip_check(const char *volume, bool skip_check)
+ {
+ 	struct ubi_vtbl_record vtbl_rec;
+ 	struct ubi_volume *vol;
+@@ -658,7 +661,7 @@ static int ubi_detach(void)
+ 	return 0;
+ }
+ 
+-int ubi_part(char *part_name, const char *vid_header_offset)
++int ubi_part(const char *part_name, const char *vid_header_offset)
+ {
+ 	struct mtd_info *mtd;
+ 	int err;
+diff --git a/include/ubi_uboot.h b/include/ubi_uboot.h
+index 05fb9634d8..a949d1b80d 100644
+--- a/include/ubi_uboot.h
++++ b/include/ubi_uboot.h
+@@ -47,9 +47,10 @@
+ int ubi_mtd_param_parse(const char *val, struct kernel_param *kp);
+ int ubi_init(void);
+ void ubi_exit(void);
+-int ubi_part(char *part_name, const char *vid_header_offset);
+-int ubi_volume_write(char *volume, void *buf, loff_t offset, size_t size);
+-int ubi_volume_read(char *volume, char *buf, loff_t offset, size_t size);
++int ubi_part(const char *part_name, const char *vid_header_offset);
++int ubi_volume_write(const char *volume, const void *buf, loff_t offset,
++		     size_t size);
++int ubi_volume_read(const char *volume, char *buf, loff_t offset, size_t size);
+ 
+ extern struct ubi_device *ubi_devices[];
+ int cmd_ubifs_mount(char *vol_name);

@@ -1,0 +1,50 @@
+From 82d9a2b45b170f0c52ac61e0e3e23f212cd065f0 Mon Sep 17 00:00:00 2001
+From: Pengpeng Hou <pengpeng@iscas.ac.cn>
+Date: Mon, 15 Jun 2026 14:32:32 +0800
+Subject: [PATCH] mtd: nand: ecc-mtk: handle ECC clock enable failures
+
+mtk_ecc_get() gets a reference to the ECC platform device, obtains the
+provider state and then enables the ECC clock before initializing the
+hardware.
+
+The clk_prepare_enable() return value is currently ignored.  If enabling
+the clock fails, the code still touches the ECC registers and returns a
+live ECC handle to the caller.  The provider device reference acquired
+by of_find_device_by_node() is also kept even though the handle setup
+failed.
+
+Propagate the clock enable error and drop the provider device reference
+on that failure path.
+
+Signed-off-by: Pengpeng Hou <pengpeng@iscas.ac.cn>
+Signed-off-by: Miquel Raynal <miquel.raynal@bootlin.com>
+
+diff --git a/drivers/mtd/nand/ecc-mtk.c b/drivers/mtd/nand/ecc-mtk.c
+index c75bb8b80cc1..39be2e3e4ee4 100644
+--- a/drivers/mtd/nand/ecc-mtk.c
++++ b/drivers/mtd/nand/ecc-mtk.c
+@@ -265,6 +265,7 @@ static struct mtk_ecc *mtk_ecc_get(struct device_node *np)
+ {
+ 	struct platform_device *pdev;
+ 	struct mtk_ecc *ecc;
++	int ret;
+ 
+ 	pdev = of_find_device_by_node(np);
+ 	if (!pdev)
+@@ -276,7 +277,12 @@ static struct mtk_ecc *mtk_ecc_get(struct device_node *np)
+ 		return ERR_PTR(-EPROBE_DEFER);
+ 	}
+ 
+-	clk_prepare_enable(ecc->clk);
++	ret = clk_prepare_enable(ecc->clk);
++	if (ret) {
++		put_device(&pdev->dev);
++		return ERR_PTR(ret);
++	}
++
+ 	mtk_ecc_hw_init(ecc);
+ 
+ 	return ecc;
+-- 
+2.53.0
+

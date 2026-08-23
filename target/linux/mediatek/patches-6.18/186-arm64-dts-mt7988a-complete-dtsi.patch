@@ -10,6 +10,9 @@ ssusb0 label change already supplied by commit f397471a6a8c.
 Rebased on commit 0e5d9e529383 by retaining the upstream-disabled internal
 2.5G PHY status as context while adding the downstream LED nodes.
 
+Refresh that hunk to use the stable status and closing-node context so the
+patch applies without fuzz after the complete generic patch stack.
+
 Signed-off-by: Codex <codex@openai.com>
 --- a/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
 +++ b/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
@@ -196,11 +199,8 @@ Signed-off-by: Codex <codex@openai.com>
  				status = "disabled";
  			};
  
-@@ -1001,7 +1127,22 @@
- 				int_2p5g_phy: ethernet-phy@15 {
- 					compatible = "ethernet-phy-ieee802.3-c45";
- 					reg = <15>;
- 					status = "disabled";
+@@ -1004,4 +1130,19 @@
+					status = "disabled";
 +
 +					leds {
 +						#address-cells = <1>;

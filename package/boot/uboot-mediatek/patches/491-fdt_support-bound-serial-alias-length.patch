@@ -1,0 +1,44 @@
+From ca774b94d66332b6bd033369227ac487ad07d5e8 Mon Sep 17 00:00:00 2001
+From: Aristo Chen <aristo.chen@canonical.com>
+Date: Tue, 26 May 2026 02:09:14 +0000
+Subject: [PATCH] fdt_support: bound serialN alias length before copying to
+ stack
+
+fdt_fixup_stdout() reads the path stored in /aliases/serialN with
+fdt_getprop() and then memcpys it into a fixed 256-byte stack buffer.
+The length returned by libfdt is the raw on-disk property size and is
+not bounded by any console-path convention, so an oversized property
+in a malformed or untrusted devicetree overflows the buffer with
+attacker-controlled length and contents. The "/* long enough */"
+comment next to tmp[] codifies an unchecked assumption.
+
+Reject lengths that exceed sizeof(tmp) with a debug-only message and
+return -FDT_ERR_NOSPACE. The fixup runs during fdt_chosen() on every
+booted kernel when CONFIG_OF_STDOUT_VIA_ALIAS is enabled, and when
+the OS devicetree is not signature-verified the property is reachable
+from an attacker-influenced blob. Using debug() rather than printf()
+keeps the rejection text out of production builds so there is no
+.text or .rodata growth on space-constrained targets.
+
+Signed-off-by: Aristo Chen <aristo.chen@canonical.com>
+---
+ boot/fdt_support.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/boot/fdt_support.c b/boot/fdt_support.c
+index 1c215e548d..bdf651364b 100644
+--- a/boot/fdt_support.c
++++ b/boot/fdt_support.c
+@@ -160,6 +160,12 @@ static int fdt_fixup_stdout(void *fdt, int chosenoff)
+ 		goto noalias;
+ 	}
+ 
++	if (len > (int)sizeof(tmp)) {
++		debug("%s: %s alias path too long (%d bytes)\n",
++		      __func__, sername, len);
++		return -FDT_ERR_NOSPACE;
++	}
++
+ 	/* fdt_setprop may break "path" so we copy it to tmp buffer */
+ 	memcpy(tmp, path, len);
+ 

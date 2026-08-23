@@ -1,0 +1,36 @@
+From 6bb220964d608b133a81ac2ff15177a32617ac77 Mon Sep 17 00:00:00 2001
+From: Daniel Golle <daniel@makrotopia.org>
+Date: Sat, 20 Sep 2025 12:57:07 +0100
+Subject: [PATCH] arm64: dts: mediatek: mt7988a: add 'soc-uuid' cell to efuse
+
+The efuse of the MediaTek MT7988 contains a 16-byte unique identifier.
+Add a 'soc-uuid' cell covering those 16 bytes to the nvmem defininition
+of the efuse to allow easy access from userspace, eg. to generate a
+persistent random MAC address on boards like the BananaPi R4 which
+doesn't have any factory-assigned addresses.
+
+Adapt the hunk context to the completed MT7988A DTS, which already adds
+the CPU frequency calibration cell. No functional change.
+
+Reviewed-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+Signed-off-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Signed-off-by: Codex <codex@openai.com>
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a.dtsi b/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
+index 366203a72d6d..93c9f8c3f223 100644
+--- a/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7988a.dtsi
+@@ -714,6 +714,10 @@ efuse@11f50000 {
+ 			#address-cells = <1>;
+ 			#size-cells = <1>;
+ 
++			soc-uuid@140 {
++				reg = <0x140 0x10>;
++			};
++
+			cpufreq_calibration: calib@278 {
+				reg = <0x278 0x1>;
+ 			};
+-- 
+2.53.0

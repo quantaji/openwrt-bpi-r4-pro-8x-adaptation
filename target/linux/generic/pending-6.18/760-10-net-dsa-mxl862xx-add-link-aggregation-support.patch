@@ -29,7 +29,11 @@ changes.  Bridge portmaps use the LAG bridge port ID instead of
 individual member port indices, ensuring correct cross-LAG
 forwarding.
 
+[Codex: refresh the private-structure context after removing the excluded
+MxL flash state; the LAG implementation is unchanged.]
+
 Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+Signed-off-by: Codex <codex@openai.com>
 ---
  drivers/net/dsa/mxl862xx/mxl862xx-api.h |  22 +
  drivers/net/dsa/mxl862xx/mxl862xx-cmd.h |   4 +
@@ -840,12 +844,12 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
   * @stats_work:         periodic work item that polls RMON hardware counters
   *                      and accumulates them into 64-bit per-port stats
   */
-@@ -389,6 +420,8 @@ struct mxl862xx_priv {
- 	bool rescue_ready;
- 	bool rescue_failed;
+@@ -389,5 +420,7 @@ struct mxl862xx_priv {
+ 	u16 vf_block_size;
  	u16 cpu_trap_fid;
 +	u16 lag_bridge_ports[MXL862XX_MAX_LAG_IDS + 1];
 +	u8 trunk_hash;
  	struct delayed_work stats_work;
  };
+ 
  

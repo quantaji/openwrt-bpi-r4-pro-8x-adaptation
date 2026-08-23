@@ -1,0 +1,29 @@
+From 5d7a08125e69630dc1168d3e9ca5626ded3da807 Mon Sep 17 00:00:00 2001
+From: Ruoyu Wang <ruoyuw560@gmail.com>
+Date: Thu, 18 Jun 2026 02:37:49 +0800
+Subject: [PATCH] mtd: spinand: initialize ret in regular page reads
+
+spinand_mtd_regular_page_read() returns ret after iterating over the
+requested pages. If the request contains no data or OOB bytes, the
+iterator does not run and ret is not assigned. Initialize it to 0 for the
+empty request path.
+
+Signed-off-by: Ruoyu Wang <ruoyuw560@gmail.com>
+Signed-off-by: Miquel Raynal <miquel.raynal@bootlin.com>
+
+diff --git a/drivers/mtd/nand/spi/core.c b/drivers/mtd/nand/spi/core.c
+index f86786344d52..74bb5ee83b31 100644
+--- a/drivers/mtd/nand/spi/core.c
++++ b/drivers/mtd/nand/spi/core.c
+@@ -822,7 +822,7 @@ static int spinand_mtd_regular_page_read(struct mtd_info *mtd, loff_t from,
+ 	bool disable_ecc = false;
+ 	bool ecc_failed = false;
+ 	unsigned int retry_mode = 0;
+-	int ret;
++	int ret = 0;
+ 
+ 	old_stats = mtd->ecc_stats;
+ 
+-- 
+2.53.0
+

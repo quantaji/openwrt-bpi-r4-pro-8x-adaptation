@@ -1,0 +1,49 @@
+From d24e3fab6ee23c2d7076b0e5ffe5c7210cc9dae3 Mon Sep 17 00:00:00 2001
+From: Hans Zhang <18255117159@163.com>
+Date: Mon, 18 May 2026 08:42:45 +0800
+Subject: [PATCH] PCI: mediatek-gen3: Add 100 ms delay after link up
+
+The MediaTek Gen3 PCIe host driver lacks the required 100 ms delay after
+link training completes for speeds > 5.0 GT/s, as specified in PCIe r6.0
+sec 6.6.1.
+
+The driver already stores max_link_speed (from the device tree). After
+mtk_pcie_startup_port() successfully brings up the link, call
+pci_host_common_link_train_delay() to comply with the specification.
+
+Adapt the call site to the Linux 6.18.44 implementation of
+mtk_pcie_startup_port(), immediately after successful link polling and
+before MSI and translation-window setup. No functional change.
+
+Signed-off-by: Hans Zhang <18255117159@163.com>
+Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Link: https://patch.msgid.link/20260518004246.1384532-7-18255117159@163.com
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/pci/controller/pcie-mediatek-gen3.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/pci/controller/pcie-mediatek-gen3.c b/drivers/pci/controller/pcie-mediatek-gen3.c
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -29,6 +29,7 @@
+ #include <linux/regmap.h>
+ #include <linux/reset.h>
+ 
++#include "pci-host-common.h"
+ #include "../pci.h"
+ 
+ #define PCIE_BASE_CFG_REG		0x14
+@@ -510,6 +511,8 @@ static int mtk_pcie_startup_port(struct mtk_gen3_pcie *pcie)
+ 		return err;
+ 	}
+ 
++	pci_host_common_link_train_delay(pcie->max_link_speed);
++
+ 	mtk_pcie_enable_msi(pcie);
+ 
+ 	/* Set PCIe translation windows */
+-- 
+2.53.0
+

@@ -1,0 +1,64 @@
+From 4f5f30e77c69ccb981978365fdabe0825f041f88 Mon Sep 17 00:00:00 2001
+From: Peng Fan <peng.fan@nxp.com>
+Date: Mon, 13 Jul 2026 21:32:56 +0800
+Subject: [PATCH] mmc: fix mmc_deinit regression when card is at 1.8V signaling
+
+Commit 906ee6785b1c ("mmc: sd: Handle UHS-I voltage signaling without
+power cycle") added detection of cards already operating at 1.8V
+signaling via mmc_sd_card_using_v18(). This correctly handles the
+warm-reboot scenario in mmc_startup().
+
+However, mmc_deinit() strips ALL UHS capabilities from the card caps
+and calls sd_select_mode_and_width() to downgrade the card before
+kernel handoff. For a card that has switched to 1.8V, uhs_en is
+already true (via OCR_S18R in mmc->ocr), so sd_select_mode_and_width()
+attempts UHS mode selection -- but no UHS modes remain in the filtered
+caps. The non-UHS fallbacks (SD_HS, MMC_LEGACY) are 3.3V speed modes
+which, when selected while signaling at 1.8V, leave the card in an
+inconsistent state it cannot recover from without a power cycle.
+
+Per SD Physical Layer Specification: "Once the card enters 1.8V
+signaling mode, the card cannot be switched to 3.3V signaling without
+power cycle. If the card receives CMD0, card returns to Idle state but
+still works with SDR12 timing."
+
+Fix by using a UHS capability mask that preserves UHS_SDR12 when the
+card is operating at 1.8V. SDR12 is the minimum valid UHS-I mode and
+is always available at 1.8V signaling per the SD specification, so the
+card is left in a consistent (1.8V) state at a low, safe speed.
+
+Fixes: 906ee6785b1c ("mmc: sd: Handle UHS-I voltage signaling without power cycle")
+Reviewed-by: Tanmay Kathpalia <tanmay.kathpalia@altera.com>
+Signed-off-by: Peng Fan <peng.fan@nxp.com>
+---
+ drivers/mmc/mmc.c | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/mmc/mmc.c b/drivers/mmc/mmc.c
+index 5fd12d21f9..135fd83560 100644
+--- a/drivers/mmc/mmc.c
++++ b/drivers/mmc/mmc.c
+@@ -3173,10 +3173,19 @@ int mmc_deinit(struct mmc *mmc)
+ 		return 0;
+ 
+ 	if (IS_SD(mmc)) {
+-		caps_filtered = mmc->card_caps &
+-			~(MMC_CAP(UHS_SDR12) | MMC_CAP(UHS_SDR25) |
+-			  MMC_CAP(UHS_SDR50) | MMC_CAP(UHS_DDR50) |
+-			  MMC_CAP(UHS_SDR104));
++		u32 uhs_mask = UHS_CAPS;
++
++#if CONFIG_IS_ENABLED(MMC_UHS_SUPPORT)
++		/*
++		 * Per SD spec, once a card enters 1.8V signaling it
++		 * cannot revert to 3.3V without a power cycle.
++		 * If the card is operating at 1.8V, keep UHS_SDR12
++		 * as the minimum fallback mode.
++		 */
++		if (mmc_sd_card_using_v18(mmc))
++			uhs_mask &= ~MMC_CAP(UHS_SDR12);
++#endif
++		caps_filtered = mmc->card_caps & ~uhs_mask;
+ 
+ 		return sd_select_mode_and_width(mmc, caps_filtered);
+ 	} else {

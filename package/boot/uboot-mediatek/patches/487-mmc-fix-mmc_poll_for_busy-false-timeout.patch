@@ -1,0 +1,51 @@
+From f23b5e079a93245c01f618022fd76d189070d190 Mon Sep 17 00:00:00 2001
+From: Peng Fan <peng.fan@nxp.com>
+Date: Mon, 13 Jul 2026 21:32:52 +0800
+Subject: [PATCH] mmc: fix mmc_poll_for_busy() false timeout when card is ready
+
+mmc_poll_for_busy() returns a false -ETIMEDOUT if the card becomes
+ready on the exact iteration where timeout_ms reaches 0. The card-ready
+check breaks out of the loop, but then the post-loop check
+"if (timeout_ms <= 0)" fires and returns -ETIMEDOUT despite the card
+being ready.
+
+Fix by returning 0 directly when the card is ready instead of breaking
+out of the loop. The only exit from the loop is now the timeout path,
+so the post-loop code unconditionally returns -ETIMEDOUT.
+
+Reviewed-by: Tanmay Kathpalia <tanmay.kathpalia@altera.com>
+Signed-off-by: Peng Fan <peng.fan@nxp.com>
+---
+ drivers/mmc/mmc.c | 10 +++-------
+ 1 file changed, 3 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/mmc/mmc.c b/drivers/mmc/mmc.c
+index 2e56556065..ef7defcde7 100644
+--- a/drivers/mmc/mmc.c
++++ b/drivers/mmc/mmc.c
+@@ -325,7 +325,7 @@ int mmc_poll_for_busy(struct mmc *mmc, int timeout_ms)
+ 		if ((status & MMC_STATUS_RDY_FOR_DATA) &&
+ 		    (status & MMC_STATUS_CURR_STATE) !=
+ 		     MMC_STATE_PRG)
+-			break;
++			return 0;
+ 
+ 		if (status & MMC_STATUS_MASK) {
+ #if !defined(CONFIG_XPL_BUILD) || defined(CONFIG_SPL_LIBCOMMON_SUPPORT)
+@@ -340,14 +340,10 @@ int mmc_poll_for_busy(struct mmc *mmc, int timeout_ms)
+ 		udelay(1000);
+ 	}
+ 
+-	if (timeout_ms <= 0) {
+ #if !defined(CONFIG_XPL_BUILD) || defined(CONFIG_SPL_LIBCOMMON_SUPPORT)
+-		log_err("Timeout waiting card ready\n");
++	log_err("Timeout waiting card ready\n");
+ #endif
+-		return -ETIMEDOUT;
+-	}
+-
+-	return 0;
++	return -ETIMEDOUT;
+ }
+ 
+ int mmc_set_blocklen(struct mmc *mmc, int len)

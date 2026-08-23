@@ -1,0 +1,41 @@
+From 9d551d78f74846fc4c4f2b369ca7da420e5e1fd6 Mon Sep 17 00:00:00 2001
+From: Francois Berder <fberder@outlook.fr>
+Date: Thu, 21 May 2026 19:50:48 +0200
+Subject: [PATCH] drivers: gpio: Fix dev_read_addr error check
+
+dev_read_addr returns FDT_ADDR_T_NONE (-1) in case of error
+and not 0.
+
+Signed-off-by: Francois Berder <fberder@outlook.fr>
+Reviewed-by: Simon Glass <sjg@chromium.org>
+---
+ drivers/gpio/gpio-fxl6408.c | 2 +-
+ drivers/gpio/pca953x_gpio.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpio/gpio-fxl6408.c b/drivers/gpio/gpio-fxl6408.c
+index c8d2dff5f7..180799139b 100644
+--- a/drivers/gpio/gpio-fxl6408.c
++++ b/drivers/gpio/gpio-fxl6408.c
+@@ -273,7 +273,7 @@ static int fxl6408_probe(struct udevice *dev)
+ 	u32 val32;
+ 
+ 	addr = dev_read_addr(dev);
+-	if (addr == 0)
++	if (addr == FDT_ADDR_T_NONE)
+ 		return -EINVAL;
+ 
+ 	info->addr = addr;
+diff --git a/drivers/gpio/pca953x_gpio.c b/drivers/gpio/pca953x_gpio.c
+index 523ca8473a..965a5fcf30 100644
+--- a/drivers/gpio/pca953x_gpio.c
++++ b/drivers/gpio/pca953x_gpio.c
+@@ -312,7 +312,7 @@ static int pca953x_probe(struct udevice *dev)
+ 	u8 val[MAX_BANK];
+ 
+ 	addr = dev_read_addr(dev);
+-	if (addr == 0)
++	if (addr == FDT_ADDR_T_NONE)
+ 		return -ENODEV;
+ 
+ 	info->addr = addr;

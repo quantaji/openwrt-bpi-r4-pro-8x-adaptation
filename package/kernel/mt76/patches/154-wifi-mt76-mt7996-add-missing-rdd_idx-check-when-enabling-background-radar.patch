@@ -1,0 +1,32 @@
+From 1ece37f8a93a3c2a02914e106b692f5393d59f3e Mon Sep 17 00:00:00 2001
+From: StanleyYP Wang <StanleyYP.Wang@mediatek.com>
+Date: Fri, 17 Jul 2026 03:51:10 +0200
+Subject: [PATCH] wifi: mt76: mt7996: add missing rdd_idx check when enabling
+ background radar
+
+Add the missing rdd idx check (< 0) in
+mt7996_mcu_rdd_background_enable(). mt7996_get_rdd_idx() returns -1
+for phys without 5 GHz support, and the negative index was passed to
+the RDD MCU command unchecked.
+
+Fixes: 1529e335f93d ("wifi: mt76: mt7996: rework radar HWRDD idx")
+Signed-off-by: StanleyYP Wang <StanleyYP.Wang@mediatek.com>
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+
+diff --git a/mt7996/mcu.c b/mt7996/mcu.c
+index b641b9f..9b3a254 100644
+--- a/mt7996/mcu.c
++++ b/mt7996/mcu.c
+@@ -4253,6 +4253,9 @@ int mt7996_mcu_rdd_background_enable(struct mt7996_phy *phy,
+ 	struct mt7996_dev *dev = phy->dev;
+ 	int err, region, rdd_idx = mt7996_get_rdd_idx(phy, true);
+ 
++	if (rdd_idx < 0)
++		return -EINVAL;
++
+ 	if (!chandef) { /* disable offchain */
+ 		err = mt7996_mcu_rdd_cmd(dev, RDD_STOP, rdd_idx, 0);
+ 		if (err)
+-- 
+2.53.0
+

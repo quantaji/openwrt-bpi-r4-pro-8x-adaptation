@@ -1,0 +1,57 @@
+From 29fbf582e75015c031e7965fdd4084af123b9ca2 Mon Sep 17 00:00:00 2001
+From: Hans Zhang <18255117159@163.com>
+Date: Mon, 18 May 2026 08:42:40 +0800
+Subject: [PATCH] PCI: Add pci_host_common_link_train_delay() helper
+
+PCIe r6.0, sec 6.6.1 (Conventional Reset) requires that for a Downstream
+Port supporting Link speeds greater than 5.0 GT/s, software must wait a
+minimum of 100 ms after Link training completes before sending any
+Configuration Request.
+
+Introduce a static inline helper pci_host_common_link_train_delay() that
+checks the given max_link_speed (2 = 5.0 GT/s, 3 = 8.0 GT/s, etc.) and
+calls msleep(100) only when the speed is greater than 5.0 GT/s.
+
+This allows multiple host controller drivers to share the same mandatory
+delay without duplicating the logic.
+
+Signed-off-by: Hans Zhang <18255117159@163.com>
+Signed-off-by: Manivannan Sadhasivam <mani@kernel.org>
+Link: https://patch.msgid.link/20260518004246.1384532-2-18255117159@163.com
+
+diff --git a/drivers/pci/controller/pci-host-common.h b/drivers/pci/controller/pci-host-common.h
+index b5075d4bd7eb..d709f7e3e11a 100644
+--- a/drivers/pci/controller/pci-host-common.h
++++ b/drivers/pci/controller/pci-host-common.h
+@@ -10,6 +10,9 @@
+ #ifndef _PCI_HOST_COMMON_H
+ #define _PCI_HOST_COMMON_H
+ 
++#include <linux/delay.h>
++#include "../pci.h"
++
+ struct pci_ecam_ops;
+ 
+ int pci_host_common_probe(struct platform_device *pdev);
+@@ -20,4 +23,18 @@ void pci_host_common_remove(struct platform_device *pdev);
+ 
+ struct pci_config_window *pci_host_common_ecam_create(struct device *dev,
+ 	struct pci_host_bridge *bridge, const struct pci_ecam_ops *ops);
++
++/**
++ * pci_host_common_link_train_delay - Wait 100 ms if link speed > 5 GT/s
++ * @max_link_speed: the maximum link speed (2 = 5.0 GT/s, 3 = 8.0 GT/s, ...)
++ *
++ * Must be called after Link training completes and before the first
++ * Configuration Request is sent.
++ */
++static inline void pci_host_common_link_train_delay(int max_link_speed)
++{
++	if (max_link_speed > 2)
++		msleep(PCIE_RESET_CONFIG_WAIT_MS);
++}
++
+ #endif
+-- 
+2.53.0
+

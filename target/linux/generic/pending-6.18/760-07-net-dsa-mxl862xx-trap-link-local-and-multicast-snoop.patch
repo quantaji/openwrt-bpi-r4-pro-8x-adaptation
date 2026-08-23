@@ -51,9 +51,9 @@ span 0x02ff covers exactly types 130-132 with any code value.
 Add the PCE rule firmware API structures, command definitions, and
 the rule block allocation interface.
 
-Refresh the patch context for the accepted MxL862xx v7.2 series and
-the retained Linux 6.18 flash implementation without changing the
-trap or multicast behavior.
+Refresh the patch context for the accepted MxL862xx v7.2 series after
+removing the downstream flash implementation, without changing the trap
+or multicast behavior.
 
 Signed-off-by: Daniel Golle <daniel@makrotopia.org>
 Signed-off-by: Codex <codex@openai.com>
@@ -1095,9 +1095,9 @@ index a53fc4c..6d51786 100644
   *                      and accumulates them into 64-bit per-port stats
   */
 @@ -339,6 +346,7 @@ struct mxl862xx_priv {
+ 	u16 evlan_ingress_size;
+ 	u16 evlan_egress_size;
  	u16 vf_block_size;
- 	bool block_host;
- 	bool skip_teardown;
 +	u16 cpu_trap_fid;
  	struct delayed_work stats_work;
  };

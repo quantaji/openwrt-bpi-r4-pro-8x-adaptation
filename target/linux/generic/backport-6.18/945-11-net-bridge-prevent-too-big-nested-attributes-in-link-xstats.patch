@@ -1,0 +1,81 @@
+From bdd39576bf50a50bdafe3da968fd271bc674a48f Mon Sep 17 00:00:00 2001
+From: Eric Dumazet <edumazet@google.com>
+Date: Wed, 20 May 2026 11:42:07 +0000
+Subject: [PATCH] net: bridge: prevent too big nested attributes in
+ br_fill_linkxstats()
+
+After commit ff205bf8c554 ("netlink: add one debug check in nla_nest_end()")
+syzbot found that br_fill_linkxstats() can send corrupted netlink packets.
+
+Make sure the nested attribute size is bounded.
+
+Fixes: a60c090361ea ("bridge: netlink: export per-vlan stats")
+Reported-by: syzbot+a35f9259d08f907c06e6@syzkaller.appspotmail.com
+Closes: https://lore.kernel.org/netdev/6a0b0da3.050a0220.175f0c.0000.GAE@google.com/
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Reviewed-by: Ido Schimmel <idosch@nvidia.com>
+Acked-by: Nikolay Aleksandrov <razor@blackwall.org>
+Link: https://patch.msgid.link/20260520114207.1394241-1-edumazet@google.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/net/bridge/br_netlink.c b/net/bridge/br_netlink.c
+index 6fd5386a1d64..c04a4d0889ae 100644
+--- a/net/bridge/br_netlink.c
++++ b/net/bridge/br_netlink.c
+@@ -1824,6 +1824,7 @@ static int br_fill_linkxstats(struct sk_buff *skb,
+ 			      const struct net_device *dev,
+ 			      int *prividx, int attr)
+ {
++	unsigned int limit = U16_MAX - nla_total_size(0);
+ 	struct nlattr *nla __maybe_unused;
+ 	struct net_bridge_port *p = NULL;
+ 	struct net_bridge_vlan_group *vg;
+@@ -1841,6 +1842,7 @@ static int br_fill_linkxstats(struct sk_buff *skb,
+ 		p = br_port_get_rtnl(dev);
+ 		if (!p)
+ 			return 0;
++		limit -= nla_total_size_64bit(sizeof(p->stp_xstats));
+ 		br = p->br;
+ 		vg = nbp_vlan_group(p);
+ 		break;
+@@ -1855,6 +1857,9 @@ static int br_fill_linkxstats(struct sk_buff *skb,
+ 	if (vg) {
+ 		u16 pvid;
+ 
++#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
++		limit -= nla_total_size_64bit(sizeof(struct br_mcast_stats));
++#endif
+ 		pvid = br_get_pvid(vg);
+ 		list_for_each_entry(v, &vg->vlan_list, vlist) {
+ 			struct bridge_vlan_xstats vxi;
+@@ -1862,6 +1867,11 @@ static int br_fill_linkxstats(struct sk_buff *skb,
+ 
+ 			if (++vl_idx < *prividx)
+ 				continue;
++
++			if (skb_tail_pointer(skb) - (unsigned char *)nest +
++			    nla_total_size(sizeof(vxi)) >= limit)
++				goto nla_put_failure;
++
+ 			memset(&vxi, 0, sizeof(vxi));
+ 			vxi.vid = v->vid;
+ 			vxi.flags = v->flags;
+diff --git a/net/core/rtnetlink.c b/net/core/rtnetlink.c
+index df042da422ef..511c25bf6f2a 100644
+--- a/net/core/rtnetlink.c
++++ b/net/core/rtnetlink.c
+@@ -6328,8 +6328,9 @@ static int rtnl_stats_get(struct sk_buff *skb, struct nlmsghdr *nlh,
+ 				  NETLINK_CB(skb).portid, nlh->nlmsg_seq, 0,
+ 				  0, &filters, &idxattr, &prividx, extack);
+ 	if (err < 0) {
+-		/* -EMSGSIZE implies BUG in if_nlmsg_stats_size */
+-		WARN_ON(err == -EMSGSIZE);
++		/* -EMSGSIZE implies BUG in if_nlmsg_stats_size
++		 * or a too big nested attribute.
++		 */
+ 		kfree_skb(nskb);
+ 	} else {
+ 		err = rtnl_unicast(nskb, net, NETLINK_CB(skb).portid);
+-- 
+2.53.0
+

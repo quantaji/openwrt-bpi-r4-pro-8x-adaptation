@@ -1,0 +1,45 @@
+From 2818e678214f69d7c1185a493a6ca03379b3927e Mon Sep 17 00:00:00 2001
+From: Weijie Gao <weijie.gao@mediatek.com>
+Date: Wed, 20 May 2026 16:27:33 +0800
+Subject: [PATCH] cmd: ubi: change the type of parameter dynamic to bool
+
+This patch changes the type of the 'dynamic' parameter of ubi_create_vol()
+to bool as it's used as a boolean.
+
+Reviewed-by: Simon Glass <sjg@chromium.org>
+Signed-off-by: Weijie Gao <weijie.gao@mediatek.com>
+---
+ cmd/ubi.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/cmd/ubi.c b/cmd/ubi.c
+index 8e3cfaaddb..8d04ff61fb 100644
+--- a/cmd/ubi.c
++++ b/cmd/ubi.c
+@@ -213,7 +213,7 @@ bad:
+ 	return err;
+ }
+ 
+-static int ubi_create_vol(const char *volume, int64_t size, int dynamic,
++static int ubi_create_vol(const char *volume, int64_t size, bool dynamic,
+ 			  int vol_id, bool skipcheck)
+ {
+ 	struct ubi_mkvol_req req;
+@@ -765,7 +765,7 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 	}
+ 
+ 	if (strncmp(argv[1], "create", 6) == 0) {
+-		int dynamic = 1;	/* default: dynamic volume */
++		bool dynamic = true;	/* default: dynamic volume */
+ 		int id = UBI_VOL_NUM_AUTO;
+ 
+ 		/* Use maximum available size */
+@@ -786,7 +786,7 @@ static int do_ubi(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+ 		/* E.g., create volume size type */
+ 		if (argc == 5) {
+ 			if (strncmp(argv[4], "s", 1) == 0)
+-				dynamic = 0;
++				dynamic = false;
+ 			else if (strncmp(argv[4], "d", 1) != 0) {
+ 				printf("Incorrect type\n");
+ 				return 1;

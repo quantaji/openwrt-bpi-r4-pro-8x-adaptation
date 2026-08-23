@@ -1,0 +1,35 @@
+From 422024172f3b989d575dc5b2951899439c59d3f2 Mon Sep 17 00:00:00 2001
+From: Francois Berder <fberder@outlook.fr>
+Date: Sat, 9 May 2026 19:30:53 +0200
+Subject: [PATCH] led: Fix toggling LED on initial SW blink
+
+If the LED is in the ON state, it is briefly set to OFF
+then to ON immediately due to falling-through in the default
+case.
+This commit ensures that no fall-through occurs and thus
+a LED initially in the ON state is turned off before blinking.
+
+Signed-off-by: Francois Berder <fberder@outlook.fr>
+Fixes: 9e3d83301e4f ("led: toggle LED on initial SW blink")
+Acked-by: Quentin Schulz <quentin.schulz@cherry.de>
+Reviewed-by: Simon Glass <sjg@chromium.org>
+---
+ drivers/led/led_sw_blink.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/led/led_sw_blink.c b/drivers/led/led_sw_blink.c
+index ee1546d02d..4190fde8f0 100644
+--- a/drivers/led/led_sw_blink.c
++++ b/drivers/led/led_sw_blink.c
+@@ -114,9 +114,11 @@ bool led_sw_on_state_change(struct udevice *dev, enum led_state_t state)
+ 		case LEDST_ON:
+ 			ops->set_state(dev, LEDST_OFF);
+ 			sw_blink->state = LED_SW_BLINK_ST_OFF;
++			break;
+ 		default:
+ 			ops->set_state(dev, LEDST_ON);
+ 			sw_blink->state = LED_SW_BLINK_ST_ON;
++			break;
+ 		}
+ 
+ 		return true;

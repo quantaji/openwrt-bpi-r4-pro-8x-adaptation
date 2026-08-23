@@ -1,0 +1,66 @@
+From 0ccd0a939d7d20c5a754a88c52450533932851a1 Mon Sep 17 00:00:00 2001
+From: Naveen Kumar Chaudhary <naveen.osdev@gmail.com>
+Date: Fri, 10 Jul 2026 20:52:59 +0530
+Subject: [PATCH] cmd: pstore: bound path formatting with snprintf to avoid
+ stack overflow
+
+pstore_save() writes four different filenames into a fixed 256-byte
+stack buffer 'path' using sprintf() with "%s" fed from argv[3] (the
+user-supplied mount directory). The U-Boot command line buffer
+(CONFIG_SYS_CBSIZE) is typically 1024 or 2048 bytes, so a directory
+path in argv[3] can easily exceed 240 characters and overflow 'path',
+corrupting the surrounding stack frame including the return address.
+
+Replace the four sprintf(path, ...) call sites with snprintf() using
+sizeof(path) as the bound. The neighbouring sprintf() calls into the
+'addr' and 'length' buffers are left as-is; they write fixed-width
+numeric conversions whose maximum length is bounded by the size of
+ulong/u32 in hex and cannot overflow those buffers.
+
+Signed-off-by: Naveen Kumar Chaudhary <naveen.osdev@gmail.com>
+---
+ cmd/pstore.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/cmd/pstore.c b/cmd/pstore.c
+index 9795eea2db..f2c0034abb 100644
+--- a/cmd/pstore.c
++++ b/cmd/pstore.c
+@@ -413,8 +413,8 @@ static int pstore_save(struct cmd_tbl *cmdtp, int flag,  int argc,
+ 
+ 		sprintf(addr, "0x%08lx", (ulong)map_to_sysmem(buffer + header_len));
+ 		sprintf(length, "0x%X", size - header_len);
+-		sprintf(path, "%s/dmesg-ramoops-%u%s", argv[3], index,
+-			compressed ? ".enc.z" : "");
++		snprintf(path, sizeof(path), "%s/dmesg-ramoops-%u%s", argv[3],
++			 index, compressed ? ".enc.z" : "");
+ 		do_save(cmdtp, flag, 6, save_argv, FS_TYPE_ANY);
+ 		index++;
+ 	}
+@@ -426,7 +426,7 @@ static int pstore_save(struct cmd_tbl *cmdtp, int flag,  int argc,
+ 				 buffer);
+ 	if (size != 0) {
+ 		sprintf(length, "0x%X", size);
+-		sprintf(path, "%s/console-ramoops-0", argv[3]);
++		snprintf(path, sizeof(path), "%s/console-ramoops-0", argv[3]);
+ 		do_save(cmdtp, flag, 6, save_argv, FS_TYPE_ANY);
+ 	}
+ 	ptr += pstore_console_size;
+@@ -438,7 +438,7 @@ static int pstore_save(struct cmd_tbl *cmdtp, int flag,  int argc,
+ 	size = pstore_get_buffer(0, ptr, pstore_ftrace_size, buffer);
+ 	if (size != 0) {
+ 		sprintf(length, "0x%X", size);
+-		sprintf(path, "%s/ftrace-ramoops-0", argv[3]);
++		snprintf(path, sizeof(path), "%s/ftrace-ramoops-0", argv[3]);
+ 		do_save(cmdtp, flag, 6, save_argv, FS_TYPE_ANY);
+ 	}
+ 	ptr += pstore_ftrace_size;
+@@ -448,7 +448,7 @@ static int pstore_save(struct cmd_tbl *cmdtp, int flag,  int argc,
+ 				 buffer);
+ 	if (size != 0) {
+ 		sprintf(length, "0x%X", size);
+-		sprintf(path, "%s/pmsg-ramoops-0", argv[3]);
++		snprintf(path, sizeof(path), "%s/pmsg-ramoops-0", argv[3]);
+ 		do_save(cmdtp, flag, 6, save_argv, FS_TYPE_ANY);
+ 	}
+ 

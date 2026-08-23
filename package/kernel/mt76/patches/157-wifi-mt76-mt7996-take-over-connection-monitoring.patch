@@ -1,0 +1,36 @@
+From 95cb6eefae12b97bb28331cc3d63ff459e49c4a1 Mon Sep 17 00:00:00 2001
+From: Felix Fietkau <nbd@nbd.name>
+Date: Tue, 18 Aug 2026 12:58:23 +0000
+Subject: [PATCH] wifi: mt76: mt7996: take over connection monitoring
+
+mt76 runs its own beacon monitor. mt76_beacon_mon_check() counts a miss
+for each affiliated link of an MLD, and it stops the count while the phy
+is off channel. mt7996 supplies it through mt76_rx_beacon(), but it does
+not set CONNECTION_MONITOR. Therefore mac80211 also starts its legacy
+monitor.
+
+The legacy monitor knows one interface, not a set of links. It also
+counts while the radio serves a different link. After seven beacon
+intervals it removes an association that still carries traffic on the
+other links.
+
+Set the CONNECTION_MONITOR flag to disable the legacy monitor.
+
+Link: https://patch.msgid.link/20260818125825.395538-3-nbd@nbd.name
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+
+diff --git a/mt7996/init.c b/mt7996/init.c
+index 5aada56..ca85b4f 100644
+--- a/mt7996/init.c
++++ b/mt7996/init.c
+@@ -542,6 +542,7 @@ mt7996_init_wiphy(struct ieee80211_hw *hw, struct mtk_wed_device *wed)
+ 	ieee80211_hw_set(hw, NO_VIRTUAL_MONITOR);
+ 	ieee80211_hw_set(hw, SUPPORTS_MULTI_BSSID);
+ 	ieee80211_hw_set(hw, CHANCTX_STA_CSA);
++	ieee80211_hw_set(hw, CONNECTION_MONITOR);
+ 
+ 	hw->max_tx_fragments = 4;
+ 	wiphy->txq_memory_limit = 32 << 20; /* 32 MiB */
+-- 
+2.53.0
+
