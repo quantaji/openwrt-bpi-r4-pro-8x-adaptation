@@ -8,11 +8,9 @@ WXR_USB_GENIMAGE := \
 
 define Build/wxr-usb-fit
 	$(PYTHON) $(WXR_USB_MKFIT) \
-		--role $(word 1,$(1)) \
 		--kernel $@ \
 		--dtb $(KDIR)/image-$(lastword $(DEVICE_DTS)).dtb \
-		$(if $(filter usb-production,$(word 1,$(1))), \
-			--rootfs $(IMAGE_ROOTFS)) \
+		--rootfs $(IMAGE_ROOTFS) \
 		--dtc $(LINUX_DIR)/scripts/dtc/dtc \
 		--mkimage $(STAGING_DIR_HOST)/bin/mkimage \
 		--output $@.new
@@ -32,7 +30,6 @@ define Build/wxr-usb-disk
 	rm -f $@.production.itb
 
 	$(PYTHON) $(WXR_USB_MKFIT) \
-		--role usb-production \
 		--kernel $(KDIR)/Image \
 		--dtb $(KDIR)/image-$(lastword $(DEVICE_DTS)).dtb \
 		--rootfs $(IMAGE_ROOTFS) \
@@ -173,15 +170,10 @@ define Device/buffalo_wxr-5950ax12
 		kernel-bin | \
 		libdeflate-gzip | \
 		fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb
-	KERNEL_INITRAMFS_PREFIX := $$(DEVICE_IMG_PREFIX)
-	KERNEL_INITRAMFS_SUFFIX := -usb-recovery.itb
-	KERNEL_INITRAMFS := \
-		kernel-bin | \
-		wxr-usb-fit recovery
 	IMAGES += usb-sysupgrade.bin
 	IMAGE/usb-sysupgrade.bin := \
 		copy-file $$(KDIR)/Image | \
-		wxr-usb-fit usb-production | \
+		wxr-usb-fit | \
 		wxr-usb-sysupgrade | \
 		append-metadata
 ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),)
@@ -191,7 +183,7 @@ ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),)
 		usb-disk.img
 	IMAGE/usb-production.itb := \
 		copy-file $$(KDIR)/Image | \
-		wxr-usb-fit usb-production
+		wxr-usb-fit
 	IMAGE/usb-rootfs.squashfs := \
 		append-rootfs
 	IMAGE/usb-disk.img := \

@@ -14,9 +14,8 @@ ARM64_HEADER_SIZE = 64
 ARM64_MAGIC_OFFSET = 56
 ARM64_MAGIC = b"ARM\x64"
 KERNEL_LOAD_ADDRESS = 0x41000000
-FIT_INPUT_ADDRESS = 0x44000000
-MAX_KERNEL_SIZE = 48 * 1024 * 1024
-MAX_FIT_SIZE = 64 * 1024 * 1024
+MAX_KERNEL_SIZE = 64 * 1024 * 1024
+MAX_FIT_SIZE = 128 * 1024 * 1024
 ROOTFS_PARTITION_SIZE = 256 * 1024 * 1024
 SQUASHFS_BYTES_USED_OFFSET = 40
 SQUASHFS_HEADER_SIZE = 48
@@ -44,13 +43,8 @@ def inspect_kernel(kernel_path):
 	if kernel_size == 0 or image_size == 0:
 		raise ValueError("ARM64 Image size must be nonzero")
 
-	effective_size = max(kernel_size, image_size)
-
 	if kernel_size > MAX_KERNEL_SIZE or image_size > MAX_KERNEL_SIZE:
-		raise ValueError("ARM64 Image exceeds the 48 MiB contract")
-
-	if KERNEL_LOAD_ADDRESS + effective_size > FIT_INPUT_ADDRESS:
-		raise ValueError("ARM64 Image overlaps the FIT input window")
+		raise ValueError("ARM64 Image exceeds the 64 MiB contract")
 
 
 def inspect_rootfs(rootfs_path):
@@ -104,7 +98,6 @@ def quote_dts_path(path):
 
 
 def write_build_sources(
-	role,
 	kernel_path,
 	dtb_path,
 	contract_dts_path,
@@ -112,12 +105,9 @@ def write_build_sources(
 	its_path,
 	rootfs_contract,
 ):
-	rootfs_properties = ""
-
-	if rootfs_contract is not None:
-		bytes_used, digest = rootfs_contract
-		digest_bytes = " ".join(f"{byte:02x}" for byte in digest)
-		rootfs_properties = f"""
+	bytes_used, digest = rootfs_contract
+	digest_bytes = " ".join(f"{byte:02x}" for byte in digest)
+	rootfs_properties = f"""
 \topenwrt,rootfs-bytes = /bits/ 64 <0x{bytes_used:016x}>;
 \topenwrt,rootfs-sha256 = [{digest_bytes}];
 """
@@ -127,7 +117,7 @@ def write_build_sources(
 / {{
 \tcompatible = "openwrt,wxr-5950ax12-boot-contract";
 \topenwrt,boot-contract-version = <1>;
-\topenwrt,image-role = "{role}";
+\topenwrt,image-role = "usb-production";
 {rootfs_properties}}};
 """
 
@@ -145,8 +135,8 @@ def write_build_sources(
 \t\t\tarch = "arm64";
 \t\t\tos = "linux";
 \t\t\tcompression = "none";
-\t\t\tload = <0x41000000>;
-\t\t\tentry = <0x41000000>;
+\t\t\tload = <0x{KERNEL_LOAD_ADDRESS:08x}>;
+\t\t\tentry = <0x{KERNEL_LOAD_ADDRESS:08x}>;
 
 \t\t\thash@1 {{
 \t\t\t\talgo = "sha256";
@@ -196,31 +186,16 @@ def write_build_sources(
 
 def main():
 	parser = argparse.ArgumentParser()
-	parser.add_argument(
-		"--role",
-		required=True,
-		choices=("recovery", "usb-production"),
-	)
 	parser.add_argument("--kernel", required=True, type=Path)
 	parser.add_argument("--dtb", required=True, type=Path)
-	parser.add_argument("--rootfs", type=Path)
+	parser.add_argument("--rootfs", required=True, type=Path)
 	parser.add_argument("--dtc", required=True, type=Path)
 	parser.add_argument("--mkimage", required=True, type=Path)
 	parser.add_argument("--output", required=True, type=Path)
 	args = parser.parse_args()
 
-	if args.role == "recovery" and args.rootfs is not None:
-		raise ValueError("recovery FIT must not carry a rootfs contract")
-
-	if args.role == "usb-production" and args.rootfs is None:
-		raise ValueError("usb-production FIT requires a rootfs")
-
 	inspect_kernel(args.kernel)
-
-	rootfs_contract = None
-
-	if args.rootfs is not None:
-		rootfs_contract = inspect_rootfs(args.rootfs)
+	rootfs_contract = inspect_rootfs(args.rootfs)
 
 	with tempfile.TemporaryDirectory(
 		prefix=f"{args.output.name}.",
@@ -233,7 +208,6 @@ def main():
 		fit_path = temporary_path / "image.itb"
 
 		write_build_sources(
-			args.role,
 			args.kernel,
 			args.dtb,
 			contract_dts_path,
@@ -272,7 +246,7 @@ def main():
 		fit_size = fit_path.stat().st_size
 
 		if fit_size == 0 or fit_size > MAX_FIT_SIZE:
-			raise ValueError("FIT size is outside the 64 MiB contract")
+			raise ValueError("FIT size is outside the 128 MiB contract")
 
 		os.replace(fit_path, args.output)
 
