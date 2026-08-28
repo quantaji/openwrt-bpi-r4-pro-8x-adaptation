@@ -1,7 +1,7 @@
 PART_NAME=firmware
 REQUIRE_IMAGE_METADATA=1
 
-RAMFS_COPY_BIN='fw_printenv fw_setenv head seq'
+RAMFS_COPY_BIN='dumpimage fdtget fw_printenv fw_setenv head readlink seq'
 RAMFS_COPY_DATA='/etc/fw_env.config /var/lock/fw_printenv.lock'
 
 xiaomi_initramfs_prepare() {
@@ -147,6 +147,36 @@ linksys_mx_pre_upgrade() {
 }
 
 platform_check_image() {
+	local image_kind
+	local medium
+
+	case "$(board_name)" in
+	buffalo,wxr-5950ax12)
+		medium=$(wxr_usb_running_medium) || return 74
+		image_kind=$(wxr_usb_image_kind "$1")
+
+		case "$medium:$image_kind" in
+		usb:usb)
+			wxr_usb_resolve_layout || return 74
+			wxr_usb_validate_image "$1" || return 74
+			return 0
+			;;
+		usb:*)
+			echo "WXR sysupgrade: USB production requires a USB image" >&2
+			return 74
+			;;
+		nand:usb)
+			echo "WXR sysupgrade: USB image cannot be written from NAND mode" >&2
+			return 74
+			;;
+		nand:*)
+			nand_do_platform_check buffalo,wxr-5950ax12 "$1"
+			return $?
+			;;
+		esac
+		;;
+	esac
+
 	return 0;
 }
 
@@ -198,13 +228,24 @@ platform_do_upgrade() {
 		nand_do_upgrade "$1"
 		;;
 	buffalo,wxr-5950ax12)
-		CI_KERN_UBIPART="rootfs"
-		CI_ROOT_UBIPART="user_property"
-		CI_DATA_UBIPART="user_property"
-		buffalo_upgrade_prepare
-		nand_do_flash_file "$1" || nand_do_upgrade_failed
-		nand_do_restore_config || nand_do_upgrade_failed
-		buffalo_upgrade_optvol
+		case "$(wxr_usb_running_medium)" in
+		usb)
+			wxr_usb_do_upgrade "$1" || exit 1
+			;;
+		nand)
+			CI_KERN_UBIPART="rootfs"
+			CI_ROOT_UBIPART="user_property"
+			CI_DATA_UBIPART="user_property"
+			buffalo_upgrade_prepare
+			nand_do_flash_file "$1" || nand_do_upgrade_failed
+			nand_do_restore_config || nand_do_upgrade_failed
+			buffalo_upgrade_optvol
+			;;
+		*)
+			echo "WXR sysupgrade: cannot determine running medium" >&2
+			exit 1
+			;;
+		esac
 		;;
 	edgecore,eap102)
 		active="$(fw_printenv -n active)"

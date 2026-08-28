@@ -1,6 +1,55 @@
 DTS_DIR := $(DTS_DIR)/qcom
 DEVICE_VARS += NETGEAR_BOARD_ID NETGEAR_HW_ID TPLINK_SUPPORT_STRING ZYXEL_MODEL_ID
 
+WXR_USB_MKFIT := \
+	$(TOPDIR)/target/linux/qualcommax/image/mkits-wxr-5950ax12-usb.py
+WXR_USB_GENIMAGE := \
+	$(TOPDIR)/target/linux/qualcommax/image/gen-wxr-5950ax12-usb-img.sh
+
+define Build/wxr-usb-fit
+	$(PYTHON) $(WXR_USB_MKFIT) \
+		--role $(word 1,$(1)) \
+		--kernel $@ \
+		--dtb $(KDIR)/image-$(lastword $(DEVICE_DTS)).dtb \
+		$(if $(filter usb-production,$(word 1,$(1))), \
+			--rootfs $(IMAGE_ROOTFS)) \
+		--dtc $(LINUX_DIR)/scripts/dtc/dtc \
+		--mkimage $(STAGING_DIR_HOST)/bin/mkimage \
+		--output $@.new
+	mv $@.new $@
+endef
+
+define Build/wxr-usb-sysupgrade
+	sh $(TOPDIR)/scripts/sysupgrade-tar.sh \
+		--board buffalo_wxr-5950ax12_usb \
+		--kernel $@ \
+		--rootfs $(IMAGE_ROOTFS) \
+		$@.new
+	mv $@.new $@
+endef
+
+define Build/wxr-usb-disk
+	rm -f $@.production.itb
+
+	$(PYTHON) $(WXR_USB_MKFIT) \
+		--role usb-production \
+		--kernel $(KDIR)/Image \
+		--dtb $(KDIR)/image-$(lastword $(DEVICE_DTS)).dtb \
+		--rootfs $(IMAGE_ROOTFS) \
+		--dtc $(LINUX_DIR)/scripts/dtc/dtc \
+		--mkimage $(STAGING_DIR_HOST)/bin/mkimage \
+		--output $@.production.itb
+
+	$(WXR_USB_GENIMAGE) \
+		$(STAGING_DIR_HOST)/bin/ptgen \
+		$@ \
+		$(BIN_DIR)/$(KERNEL_INITRAMFS_IMAGE) \
+		$@.production.itb \
+		$(IMAGE_ROOTFS)
+
+	rm -f $@.production.itb
+endef
+
 define Build/asus-fake-ramdisk
 	rm -rf $(KDIR)/tmp/fakerd
 	dd if=/dev/zero bs=32 count=1 > $(KDIR)/tmp/fakerd
@@ -117,7 +166,41 @@ define Device/buffalo_wxr-5950ax12
 	PAGESIZE := 2048
 	DEVICE_DTS_CONFIG := config@hk01
 	SOC := ipq8074
-	DEVICE_PACKAGES := ipq-wifi-buffalo_wxr-5950ax12
+	DEVICE_DTS := \
+		ipq8074-wxr-5950ax12 \
+		ipq8074-wxr-5950ax12-usb
+	KERNEL := \
+		kernel-bin | \
+		libdeflate-gzip | \
+		fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb
+	KERNEL_INITRAMFS_PREFIX := $$(DEVICE_IMG_PREFIX)
+	KERNEL_INITRAMFS_SUFFIX := -usb-recovery.itb
+	KERNEL_INITRAMFS := \
+		kernel-bin | \
+		wxr-usb-fit recovery
+	IMAGES += usb-sysupgrade.bin
+	IMAGE/usb-sysupgrade.bin := \
+		copy-file $$(KDIR)/Image | \
+		wxr-usb-fit usb-production | \
+		wxr-usb-sysupgrade | \
+		append-metadata
+ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),)
+	IMAGES += \
+		usb-production.itb \
+		usb-rootfs.squashfs \
+		usb-disk.img
+	IMAGE/usb-production.itb := \
+		copy-file $$(KDIR)/Image | \
+		wxr-usb-fit usb-production
+	IMAGE/usb-rootfs.squashfs := \
+		append-rootfs
+	IMAGE/usb-disk.img := \
+		wxr-usb-disk
+endif
+	DEVICE_PACKAGES := \
+		ipq-wifi-buffalo_wxr-5950ax12 \
+		dumpimage \
+		fdt-utils
 endef
 TARGET_DEVICES += buffalo_wxr-5950ax12
 

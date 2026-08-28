@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+
+#include "ipq8074-wxr-5950ax12.dts"
+
+/ {
+	chosen {
+		/delete-property/ bootargs-append;
+	};
+};

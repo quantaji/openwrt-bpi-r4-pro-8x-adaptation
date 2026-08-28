@@ -93,12 +93,14 @@
 			label = "mode-ap";
 			gpios = <&tlmm 29 GPIO_ACTIVE_LOW>;
 			linux,code = <BTN_0>;
+			linux,input-type = <EV_SW>;
 		};
 
 		bridge {
 			label = "mode-wb";
 			gpios = <&tlmm 30 GPIO_ACTIVE_LOW>;
 			linux,code = <BTN_1>;
+			linux,input-type = <EV_SW>;
 		};
 
 		/*
@@ -111,6 +113,7 @@
 			label = "op-manual";
 			gpios = <&tlmm 52 GPIO_ACTIVE_LOW>;
 			linux,code = <BTN_2>;
+			linux,input-type = <EV_SW>;
 		};
 
 		wps {
