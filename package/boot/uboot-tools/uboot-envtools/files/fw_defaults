@@ -1,6 +1,6 @@
 . /lib/functions/uci-defaults.sh
 
-fw_loadenv
+[ -f /etc/fw_env.config ] && fw_loadenv
 
 board_config_update
 
