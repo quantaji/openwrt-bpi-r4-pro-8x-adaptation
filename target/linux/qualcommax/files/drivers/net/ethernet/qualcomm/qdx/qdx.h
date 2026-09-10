@@ -21,6 +21,8 @@
 #define QDX_REQUESTS 64
 #define QDX_SLOTS 65536U
 
+struct dentry;
+struct seq_file;
 struct qdx;
 struct qdx_hw;
 struct qdx_mem;
@@ -117,6 +119,12 @@ struct qdx_limits {
 	unsigned long rx_memory_bytes;
 };
 
+struct qdx_diagnosis {
+	struct dentry *root;
+	struct mutex lock;
+	bool wired_use;
+};
+
 struct qdx {
 	struct device *dev;
 	struct platform_device *pdev;
@@ -127,12 +135,18 @@ struct qdx {
 	atomic_t failure;
 	struct work_struct lifecycle;
 	struct completion terminal_done;
+	struct qdx_diagnosis diagnosis;
 	struct qdx_limits limits;
 	atomic_long_t rx_dma_used;
 	atomic_long_t rx_memory_charged;
 	bool execution_possible;
 	bool access_ended;
 };
+
+void qdx_diagnosis_register(struct qdx *qdx);
+void qdx_diagnosis_remove(struct qdx *qdx);
+void qdx_io_diagnose(struct qdx_core *core, struct seq_file *seq);
+int qdx_io_pause_returns(struct qdx *qdx, unsigned int msecs);
 
 void qdx_fail(struct qdx *qdx, int error);
 void qdx_schedule(struct qdx *qdx);

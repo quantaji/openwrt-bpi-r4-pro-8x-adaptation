@@ -4,7 +4,7 @@ config QDX
 	depends on ARCH_QCOM && ARM64 && OF
 	depends on HAS_DMA && COMMON_CLK && RESET_CONTROLLER && REGULATOR
 	depends on MAILBOX && QCOM_APCS_IPC
-	depends on !MODULE_FORCE_UNLOAD
+	depends on !MODULE_FORCE_UNLOAD && DEBUG_FS
 	select FW_LOADER
 	select CRYPTO_LIB_SHA256
 	help

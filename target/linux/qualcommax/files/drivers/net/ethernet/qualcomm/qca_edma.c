@@ -16,6 +16,7 @@
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
+#include <linux/seq_file.h>
 #include <linux/version.h>
 #include "qca_edma.h"
 
@@ -401,6 +402,7 @@ next:
 	if (cleaned == 0)
 		return 0;
 
+	atomic64_add(packets, &priv->diag_tx_completed);
 	edma_tx_complete(priv, packets, bytes);
 
 	/* Ensure all TX completions are processed before updating cons idx */
@@ -496,6 +498,7 @@ static u32 edma_clean_rx(struct edma_priv *priv, int budget,
 		skb_reserve(skb, NET_SKB_PAD + EDMA_RX_PREHDR_SIZE);
 		skb_put(skb, pkt_len);
 
+		atomic64_inc(&priv->diag_rx_accepted);
 		edma_receive(priv, src_port, skb, &priv->rx_napi);
 
 next:
@@ -699,6 +702,7 @@ static netdev_tx_t edma_ring_xmit(struct edma_priv *priv, struct net_device *net
 	regmap_write(priv->regmap,
 		     EDMA_REG_TXDESC_PROD_IDX(soc->txdesc_ring),
 		     prod & EDMA_TXDESC_PROD_IDX_MASK);
+	atomic64_inc(&priv->diag_tx_accepted);
 
 	if (((cons - prod - 1) & (txdesc_ring->count - 1)) <
 	    EDMA_TX_RING_THRESH)
@@ -758,6 +762,7 @@ static void edma_txdesc_drain(struct edma_priv *priv, struct edma_ring *ring)
 		packets++;
 		dev_kfree_skb_any(skb);
 	}
+	atomic64_add(packets, &priv->diag_tx_drained);
 	if (packets && priv->netdev)
 		edma_tx_complete(priv, packets, bytes);
 }
@@ -1606,7 +1611,97 @@ static int edma_qdx_activate(void *context)
 	return ret;
 }
 
+/* Called while diagnosis owns the live attachment and terminal-stop fence. */
+static int edma_qdx_diagnose(void *context, struct seq_file *seq)
+{
+	struct edma_priv *priv = context;
+	const struct edma_soc_data *soc = priv->soc;
+	u32 txdesc[4], txcmpl[4], rxfill[4], rxdesc[4], route;
+	bool shared, ready, napi;
+	u32 entries, buffer_size;
+	u8 order;
+#ifdef CONFIG_BQL
+	struct netdev_queue *txq = netdev_get_tx_queue(priv->netdev, 0);
+	unsigned int queued, completed;
+#endif
+	int ret;
+
+	ret = regmap_read(priv->regmap, EDMA_QID2RID_TABLE_MEM(0), &route);
+	if (ret)
+		return ret;
+	ret = regmap_bulk_read(priv->regmap, EDMA_REG_TXDESC_BA(soc->txdesc_ring),
+			       txdesc, ARRAY_SIZE(txdesc));
+	if (ret)
+		return ret;
+	ret = regmap_bulk_read(priv->regmap,
+			       EDMA_REG_TXCMPL_BA(soc->txcmpl_base, soc->txcmpl_ring),
+			       txcmpl, ARRAY_SIZE(txcmpl));
+	if (ret)
+		return ret;
+	ret = regmap_bulk_read(priv->regmap, EDMA_REG_RXFILL_BA(soc->rxfill_ring),
+			       rxfill, ARRAY_SIZE(rxfill));
+	if (ret)
+		return ret;
+	ret = regmap_bulk_read(priv->regmap, EDMA_REG_RXDESC_BA(soc->rxdesc_ring),
+			       rxdesc, ARRAY_SIZE(rxdesc));
+	if (ret)
+		return ret;
+
+	spin_lock_bh(&priv->tx_lock);
+	shared = READ_ONCE(priv->shared);
+	ready = READ_ONCE(priv->native_ready);
+	napi = priv->napi_active;
+	entries = priv->rx_entries;
+	buffer_size = priv->rx_buffer_size;
+	order = priv->rx_page_order;
+	spin_unlock_bh(&priv->tx_lock);
+#ifdef CONFIG_BQL
+	/* Submission and completion are independently serialized by their owners. */
+	netif_tx_lock_bh(priv->netdev);
+	spin_lock_bh(&priv->completion_lock);
+	queued = txq->dql.num_queued;
+	completed = txq->dql.num_completed;
+	spin_unlock_bh(&priv->completion_lock);
+	netif_tx_unlock_bh(priv->netdev);
+#endif
+
+	seq_printf(seq, "native shared=%u ready=%u napi=%u queue0_rx_ring=%u firmware_rx_ring=%u\n",
+		   shared, ready, napi, (u32)(route & EDMA_QID2RID_QUEUE0_MASK),
+		   priv->firmware_rx_ring);
+	seq_printf(seq, "native_rx entries=%u page_order=%u buffer_size=%u ring_supply_estimate=%llu\n",
+		   entries, order, buffer_size, (u64)entries * (PAGE_SIZE << order));
+	seq_printf(seq, "native_packets tx_accepted=%lld tx_completed=%lld tx_drained=%lld rx_accepted=%lld\n",
+		   atomic64_read(&priv->diag_tx_accepted),
+		   atomic64_read(&priv->diag_tx_completed),
+		   atomic64_read(&priv->diag_tx_drained),
+		   atomic64_read(&priv->diag_rx_accepted));
+	seq_printf(seq, "native_txdesc ring=%u producer=%u consumer=%u size=%u\n",
+		   soc->txdesc_ring, txdesc[1] & EDMA_TXDESC_PROD_IDX_MASK,
+		   txdesc[2] & EDMA_TXDESC_CONS_IDX_MASK,
+		   txdesc[3] & EDMA_TXDESC_RING_SIZE_MASK);
+	seq_printf(seq, "native_txcmpl ring=%u producer=%u consumer=%u size=%u\n",
+		   soc->txcmpl_ring, txcmpl[1] & EDMA_TXCMPL_PROD_IDX_MASK,
+		   txcmpl[2] & EDMA_TXCMPL_CONS_IDX_MASK,
+		   txcmpl[3] & EDMA_TXDESC_RING_SIZE_MASK);
+	seq_printf(seq, "native_rxfill ring=%u producer=%u consumer=%u size=%u\n",
+		   soc->rxfill_ring, rxfill[1] & EDMA_RXFILL_PROD_IDX_MASK,
+		   rxfill[2] & EDMA_RXFILL_CONS_IDX_MASK,
+		   rxfill[3] & EDMA_RXFILL_RING_SIZE_MASK);
+	seq_printf(seq, "native_rxdesc ring=%u producer=%u consumer=%u size=%u\n",
+		   soc->rxdesc_ring, rxdesc[1] & EDMA_RXDESC_PROD_IDX_MASK,
+		   rxdesc[2] & EDMA_RXDESC_CONS_IDX_MASK,
+		   rxdesc[3] & EDMA_RXDESC_RING_SIZE_MASK);
+#ifdef CONFIG_BQL
+	seq_printf(seq, "conduit_bql queued=%u completed=%u in_flight=%u\n",
+		   queued, completed, queued - completed);
+#else
+	seq_puts(seq, "conduit_bql disabled\n");
+#endif
+	return 0;
+}
+
 static const struct qdx_edma_ops edma_qdx_ops = {
+	.diagnose = edma_qdx_diagnose,
 	.activate = edma_qdx_activate,
 	.quiesce = edma_qdx_quiesce,
 	.resume_shared = edma_qdx_resume_shared,
@@ -1699,6 +1794,10 @@ static int edma_probe(struct platform_device *pdev)
 	priv->rst = rst;
 	spin_lock_init(&priv->tx_lock);
 	spin_lock_init(&priv->completion_lock);
+	atomic64_set(&priv->diag_tx_accepted, 0);
+	atomic64_set(&priv->diag_tx_completed, 0);
+	atomic64_set(&priv->diag_tx_drained, 0);
+	atomic64_set(&priv->diag_rx_accepted, 0);
 	priv->rx_entries = EDMA_RX_RING_SIZE;
 	priv->pdev = pdev;
 	priv->soc = device_get_match_data(dev);

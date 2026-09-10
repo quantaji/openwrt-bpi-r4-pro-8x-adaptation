@@ -174,6 +174,8 @@ static void qdx_terminal_stop(struct qdx *qdx)
 		qdx_io_close(&qdx->cores[i]);
 	for (i = 0; i < QDX_CORES; i++)
 		qdx_commands_stop(&qdx->cores[i], atomic_read(&qdx->failure));
+	/* Command waiters are released before waiting for diagnostic readers. */
+	mutex_lock(&qdx->diagnosis.lock);
 	if (qdx->execution_possible)
 		hold_error = qdx_hw_stop(qdx);
 	for (i = 0; i < QDX_CORES; i++)
@@ -200,6 +202,7 @@ static void qdx_terminal_stop(struct qdx *qdx)
 		atomic_read(&qdx->failure), hold_error, restore_error, activate_error,
 		qdx->access_ended ? "released" : "quarantined");
 	WRITE_ONCE(qdx->state, QDX_TERMINAL);
+	mutex_unlock(&qdx->diagnosis.lock);
 	complete_all(&qdx->terminal_done);
 }
 
@@ -366,6 +369,7 @@ static int qdx_probe(struct platform_device *pdev)
 	qdx->pdev = pdev;
 	qdx->state = QDX_WAITING;
 	qdx->limits = limits;
+	mutex_init(&qdx->diagnosis.lock);
 	atomic_set(&qdx->failure, 0);
 	atomic_long_set(&qdx->rx_dma_used, 0);
 	atomic_long_set(&qdx->rx_memory_charged, 0);
@@ -393,6 +397,7 @@ static int qdx_probe(struct platform_device *pdev)
 	err = qdx_ethernet_register(qdx);
 	if (err)
 		goto release;
+	qdx_diagnosis_register(qdx);
 	qdx_schedule(qdx);
 	return 0;
 release:
@@ -414,6 +419,7 @@ static void qdx_remove(struct platform_device *pdev)
 {
 	struct qdx *qdx = platform_get_drvdata(pdev);
 
+	qdx_diagnosis_remove(qdx);
 	qdx_fail(qdx, -ENODEV);
 	flush_work(&qdx->lifecycle);
 	if (qdx->execution_possible && !qdx->access_ended)

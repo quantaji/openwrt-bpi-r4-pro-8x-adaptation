@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Shared descriptor transport and host-owned DMA carrier records. */
+#include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/if_vlan.h>
 #include <linux/limits.h>
 #include <linux/mm.h>
 #include <linux/overflow.h>
+#include <linux/rtnetlink.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
 #include <linux/vmalloc.h>
@@ -97,6 +100,12 @@ struct qdx_io {
 	atomic64_t returned;
 	atomic64_t faults;
 	atomic64_t dropped;
+	atomic64_t tx_accepted;
+	atomic64_t tx_completed;
+	atomic64_t rx_assembled;
+	atomic64_t ring_full;
+	atomic64_t no_carriers;
+	u32 paused_tx_outstanding;
 };
 
 /* Chunk pointers never change while the instance can receive a return. */
@@ -194,6 +203,7 @@ static void qdx_carrier_put(struct qdx_core *core, struct qdx_carrier *record,
 
 		/* The port reference keeps the native attachment alive until here. */
 		edma->info.ops->complete_tx(edma->info.context, 1, record->bytes);
+		atomic64_inc(&io->tx_completed);
 		record->charged = false;
 	}
 	if (record->port) {
@@ -254,6 +264,7 @@ static int qdx_publish(struct qdx_core *core, unsigned int ring_id,
 	struct qdx_h2n *ring = &io->h2n[ring_id];
 	unsigned long flags;
 	u32 producer, consumer;
+	bool packet = record->queue != NULL;
 	int err = 0;
 
 	spin_lock_irqsave(&ring->lock, flags);
@@ -292,6 +303,8 @@ static int qdx_publish(struct qdx_core *core, unsigned int ring_id,
 	WRITE_ONCE(core->map->h2n_host[ring_id],
 		   cpu_to_le32((producer + 1) & (QDX_RING_DEPTH - 1)));
 	atomic64_inc(&io->published);
+	if (packet)
+		atomic64_inc(&io->tx_accepted);
  unlock:
 	spin_unlock_irqrestore(&ring->lock, flags);
 	if (err == -EPROTO)
@@ -396,6 +409,11 @@ bool qdx_io_has_space(struct qdx *qdx)
 	if (!io->h2n[QDX_DATA_RING].closed && producer < QDX_RING_DEPTH &&
 	    consumer < QDX_RING_DEPTH && io->free_head[QDX_TRANSMIT] != QDX_NO_SLOT)
 		space = ((producer + 1) & (QDX_RING_DEPTH - 1)) != consumer;
+	if (producer < QDX_RING_DEPTH && consumer < QDX_RING_DEPTH &&
+	    ((producer + 1) & (QDX_RING_DEPTH - 1)) == consumer)
+		atomic64_inc(&io->ring_full);
+	if (io->free_head[QDX_TRANSMIT] == QDX_NO_SLOT)
+		atomic64_inc(&io->no_carriers);
 	spin_unlock(&io->carriers_lock);
 	spin_unlock_irqrestore(&io->h2n[QDX_DATA_RING].lock, flags);
 	if (!space && !READ_ONCE(io->closed))
@@ -861,6 +879,8 @@ static void qdx_packet_assemble(struct qdx_irq *ctx, struct sk_buff *skb,
 	}
 	skb->priority = ctx->priority;
 	skb->ip_summed = flags & 2 ? CHECKSUM_UNNECESSARY : CHECKSUM_NONE;
+	/* Count a real validated packet, before the receive owner applies its gate. */
+	atomic64_inc(&io->rx_assembled);
 	/* The Linux receive continuation owns the full packet from this point. */
 	atomic_long_sub(memory_charge, &qdx->rx_memory_charged);
 	qdx_ethernet_receive(qdx, target ? target - 1 : ctx->core->id,
@@ -1203,4 +1223,114 @@ void qdx_io_release(struct qdx_core *core, bool access_ended)
 		free_netdev(io->napi_dev);
 	kvfree(io);
 	core->io = NULL;
+}
+
+/* The diagnostic owner holds its lifetime mutex across this snapshot. */
+void qdx_io_diagnose(struct qdx_core *core, struct seq_file *seq)
+{
+	static const char * const kinds[] = { "control", "tx", "linear", "paged" };
+	struct qdx_io *io = core->io;
+	u32 capacity[QDX_KINDS], outstanding[QDX_KINDS];
+	unsigned long flags, partial = 0;
+	unsigned int i;
+	u32 host, firmware;
+
+	if (!io) {
+		seq_printf(seq, "core%u io=absent\n", core->id);
+		return;
+	}
+	spin_lock_irqsave(&io->carriers_lock, flags);
+	for (i = 0; i < QDX_KINDS; i++) {
+		capacity[i] = io->capacity[i];
+		outstanding[i] = io->outstanding[i];
+	}
+	spin_unlock_irqrestore(&io->carriers_lock, flags);
+	for (i = 0; i < io->irq_count; i++)
+		partial += READ_ONCE(io->irq[i].partial_charge);
+	seq_printf(seq, "core%u published=%lld returned=%lld faults=%lld dropped=%lld\n",
+		   core->id, atomic64_read(&io->published), atomic64_read(&io->returned),
+		   atomic64_read(&io->faults), atomic64_read(&io->dropped));
+	seq_printf(seq, "core%u nss_tx_accepted=%lld nss_tx_completed=%lld nss_rx_assembled=%lld\n",
+		   core->id, atomic64_read(&io->tx_accepted),
+		   atomic64_read(&io->tx_completed), atomic64_read(&io->rx_assembled));
+	seq_printf(seq, "core%u ring_full=%lld no_carriers=%lld paused_tx_outstanding=%u\n",
+		   core->id, atomic64_read(&io->ring_full), atomic64_read(&io->no_carriers),
+		   READ_ONCE(io->paused_tx_outstanding));
+	seq_printf(seq, "core%u rx_length=%u partial_charge=%lu running=%u closed=%u\n",
+		   core->id, READ_ONCE(io->rx_length), partial,
+		   READ_ONCE(io->running), READ_ONCE(io->closed));
+	for (i = 0; i < QDX_KINDS; i++)
+		seq_printf(seq, "core%u %s_outstanding=%u capacity=%u\n",
+			   core->id, kinds[i], outstanding[i], capacity[i]);
+	if (!smp_load_acquire(&core->map_ready)) {
+		seq_printf(seq, "core%u map=unavailable\n", core->id);
+		return;
+	}
+	for (i = 0; i < QDX_H2N_RINGS; i++) {
+		host = le32_to_cpu(READ_ONCE(core->map->h2n_host[i]));
+		firmware = le32_to_cpu(READ_ONCE(core->map->h2n_firmware[i]));
+		seq_printf(seq, "core%u h2n%u host=%u firmware=%u%s\n",
+			   core->id, i, host, firmware,
+			   host >= QDX_RING_DEPTH || firmware >= QDX_RING_DEPTH ?
+			   " invalid-index" : "");
+	}
+	for (i = 0; i < QDX_N2H_RINGS; i++) {
+		host = le32_to_cpu(READ_ONCE(core->map->n2h_host[i]));
+		firmware = le32_to_cpu(READ_ONCE(core->map->n2h_firmware[i]));
+		seq_printf(seq, "core%u n2h%u host=%u firmware=%u%s\n",
+			   core->id, i, host, firmware,
+			   host >= QDX_RING_DEPTH || firmware >= QDX_RING_DEPTH ?
+			   " invalid-index" : "");
+	}
+}
+
+/* RTNL and the diagnosis mutex exclude a second pause and terminal IO release.
+ * Every path after masking resumes in this call; no delayed teardown is needed.
+ */
+int qdx_io_pause_returns(struct qdx *qdx, unsigned int msecs)
+{
+	struct qdx_io *io;
+	struct qdx_irq *ctx;
+	unsigned long flags;
+	unsigned int i;
+
+	ASSERT_RTNL();
+	if (!msecs || msecs > 250)
+		return -EINVAL;
+	if (READ_ONCE(qdx->state) != QDX_READY || atomic_read(&qdx->failure) ||
+	    !qdx->ethernet->edma || qdx->ethernet->edma->detaching)
+		return -EBUSY;
+	for (i = 0; i < QDX_CORES; i++) {
+		io = qdx->cores[i].io;
+		if (!io || !READ_ONCE(io->running) || !READ_ONCE(io->irq[1].active))
+			return -EBUSY;
+	}
+	for (i = 0; i < QDX_CORES; i++) {
+		ctx = &qdx->cores[i].io->irq[1];
+		spin_lock_irqsave(&ctx->lock, flags);
+		ctx->active = false;
+		if (!ctx->masked) {
+			disable_irq_nosync(ctx->irq);
+			ctx->masked = true;
+		}
+		spin_unlock_irqrestore(&ctx->lock, flags);
+		synchronize_irq(ctx->irq);
+		napi_disable(&ctx->napi);
+	}
+	synchronize_net();
+	msleep(msecs);
+	for (i = 0; i < QDX_CORES; i++) {
+		io = qdx->cores[i].io;
+		spin_lock_irqsave(&io->carriers_lock, flags);
+		io->paused_tx_outstanding = io->outstanding[QDX_TRANSMIT];
+		spin_unlock_irqrestore(&io->carriers_lock, flags);
+		ctx = &io->irq[1];
+		napi_enable(&ctx->napi);
+		spin_lock_irqsave(&ctx->lock, flags);
+		ctx->active = true;
+		/* Drain pending returns without relying on another edge. */
+		napi_schedule(&ctx->napi);
+		spin_unlock_irqrestore(&ctx->lock, flags);
+	}
+	return 0;
 }

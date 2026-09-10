@@ -7,6 +7,7 @@
 #include <linux/kconfig.h>
 #include <linux/netdevice.h>
 
+struct seq_file;
 struct qdx_edma;
 struct qdx_ppe;
 
@@ -27,6 +28,7 @@ struct qdx_port_state {
 };
 
 struct qdx_edma_ops {
+	int (*diagnose)(void *context, struct seq_file *seq);
 	int (*activate)(void *context);
 	int (*quiesce)(void *context, u32 native_rx_entries);
 	int (*resume_shared)(void *context);

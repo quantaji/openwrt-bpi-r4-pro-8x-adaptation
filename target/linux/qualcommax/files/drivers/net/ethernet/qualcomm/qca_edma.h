@@ -6,6 +6,7 @@
 #ifndef __QCA_EDMA_H__
 #define __QCA_EDMA_H__
 
+#include <linux/atomic.h>
 #include <linux/dsa/oob.h>
 #include <linux/etherdevice.h>
 #include <linux/if_vlan.h>
@@ -271,6 +272,10 @@ struct edma_priv {
 
 	spinlock_t tx_lock;
 	spinlock_t completion_lock;
+	atomic64_t diag_tx_accepted;
+	atomic64_t diag_tx_completed;
+	atomic64_t diag_tx_drained;
+	atomic64_t diag_rx_accepted;
 
 	int txcmpl_irq;
 	int rxfill_irq;
