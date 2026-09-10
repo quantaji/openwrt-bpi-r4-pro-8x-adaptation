@@ -164,7 +164,15 @@ static int edma_tx_ring_alloc(struct edma_priv *priv, struct edma_ring *ring,
 		return ret;
 
 	ring->skb_store = kcalloc(count, sizeof(struct sk_buff *), GFP_KERNEL);
-	if (!ring->skb_store) {
+	ring->dma_store = kcalloc(count, sizeof(*ring->dma_store), GFP_KERNEL);
+	ring->length_store = kcalloc(count, sizeof(*ring->length_store), GFP_KERNEL);
+	if (!ring->skb_store || !ring->dma_store || !ring->length_store) {
+		kfree(ring->skb_store);
+		kfree(ring->dma_store);
+		kfree(ring->length_store);
+		ring->skb_store = NULL;
+		ring->dma_store = NULL;
+		ring->length_store = NULL;
 		dma_free_coherent(&priv->pdev->dev, count * desc_size,
 				  ring->desc, ring->dma);
 		ring->desc = NULL;
@@ -211,8 +219,17 @@ static void edma_tx_ring_free(struct edma_priv *priv, struct edma_ring *ring,
 	int i;
 
 	if (ring->skb_store) {
-		for (i = 0; i < ring->count; i++)
+		for (i = 0; i < ring->count; i++) {
+			if (!ring->skb_store[i])
+				continue;
+			dma_unmap_single(&priv->pdev->dev, ring->dma_store[i],
+					 ring->length_store[i], DMA_TO_DEVICE);
 			dev_kfree_skb_any(ring->skb_store[i]);
+		}
+		kfree(ring->dma_store);
+		kfree(ring->length_store);
+		ring->dma_store = NULL;
+		ring->length_store = NULL;
 		kfree(ring->skb_store);
 		ring->skb_store = NULL;
 	}
@@ -310,18 +327,29 @@ static bool edma_rx_page_take(struct edma_priv *priv, struct page *page,
 	return false;
 }
 
+/* Native and firmware returns share one completion side of conduit BQL. */
+static void edma_tx_complete(void *context, unsigned int packets,
+			     unsigned int bytes)
+{
+	struct edma_priv *priv = context;
+
+	spin_lock_bh(&priv->completion_lock);
+	netdev_tx_completed_queue(netdev_get_tx_queue(priv->netdev, 0),
+				  packets, bytes);
+	spin_unlock_bh(&priv->completion_lock);
+}
+
 static u32 edma_clean_tx(struct edma_priv *priv, struct edma_ring *txcmpl_ring,
 			 int budget)
 {
 	const struct edma_soc_data *soc = priv->soc;
 	struct platform_device *pdev = priv->pdev;
 	struct edma_txcmpl *txcmpl;
-	struct edma_txdesc *txdesc;
-	u32 cleaned = 0, bytes = 0;
+	u32 cleaned = 0, packets = 0, bytes = 0;
 	u16 prod, cons;
 	struct sk_buff *skb;
-	u32 val, len;
-	int idx;
+	u32 val, len, idx;
+	dma_addr_t dma;
 
 	regmap_read(priv->regmap,
 		    EDMA_REG_TXCMPL_PROD_IDX(soc->txcmpl_base,
@@ -338,9 +366,18 @@ static u32 edma_clean_tx(struct edma_priv *priv, struct edma_ring *txcmpl_ring,
 	while (cons != prod && cleaned < budget) {
 		txcmpl = EDMA_TXCMPL_DESC(txcmpl_ring, cons);
 
-		idx = txcmpl->buffer_addr;
+		idx = le32_to_cpu(txcmpl->buffer_addr);
+		if (unlikely(idx >= priv->txdesc_ring.count)) {
+			netdev_warn(priv->netdev, "invalid TX completion index %u\n", idx);
+			goto next;
+		}
+		spin_lock_bh(&priv->tx_lock);
 		skb = priv->txdesc_ring.skb_store[idx];
+		len = priv->txdesc_ring.length_store[idx];
+		dma = priv->txdesc_ring.dma_store[idx];
 		priv->txdesc_ring.skb_store[idx] = NULL;
+		priv->txdesc_ring.length_store[idx] = 0;
+		spin_unlock_bh(&priv->tx_lock);
 
 		if (unlikely(!skb)) {
 			dev_warn(&pdev->dev,
@@ -349,12 +386,8 @@ static u32 edma_clean_tx(struct edma_priv *priv, struct edma_ring *txcmpl_ring,
 			goto next;
 		}
 
-		txdesc = EDMA_TXDESC_DESC(&priv->txdesc_ring, idx);
-		len = skb_headlen(skb);
-
-		dma_unmap_single(&pdev->dev,
-				 le32_to_cpu(txdesc->buffer_addr),
-				 len, DMA_TO_DEVICE);
+		dma_unmap_single(&pdev->dev, dma, len, DMA_TO_DEVICE);
+		packets++;
 		bytes += len - EDMA_TX_PREHDR_SIZE;
 		napi_consume_skb(skb, budget);
 
@@ -368,8 +401,7 @@ next:
 	if (cleaned == 0)
 		return 0;
 
-	netdev_tx_completed_queue(netdev_get_tx_queue(priv->netdev, 0), cleaned,
-				  bytes);
+	edma_tx_complete(priv, packets, bytes);
 
 	/* Ensure all TX completions are processed before updating cons idx */
 	wmb();
@@ -381,12 +413,30 @@ next:
 	return cleaned;
 }
 
+static void edma_receive(void *context, unsigned int port, struct sk_buff *skb,
+			 struct napi_struct *napi)
+{
+	struct edma_priv *priv = context;
+	struct dsa_oob_tag_info *tag;
+	unsigned int len = skb->len;
+
+	tag = skb_ext_add(skb, SKB_EXT_DSA_OOB);
+	if (!tag) {
+		priv->netdev->stats.rx_dropped++;
+		dev_kfree_skb_any(skb);
+		return;
+	}
+	tag->port = port;
+	skb->protocol = eth_type_trans(skb, priv->netdev);
+	dev_sw_netstats_rx_add(priv->netdev, len);
+	napi_gro_receive(napi, skb);
+}
+
 static u32 edma_clean_rx(struct edma_priv *priv, int budget,
 			 struct edma_ring *rxdesc_ring)
 {
 	const struct edma_soc_data *soc = priv->soc;
 	struct platform_device *pdev = priv->pdev;
-	struct dsa_oob_tag_info *tag_info;
 	struct edma_rx_preheader *rxph;
 	struct edma_rxdesc *rxdesc;
 	struct sk_buff *skb;
@@ -446,17 +496,7 @@ static u32 edma_clean_rx(struct edma_priv *priv, int budget,
 		skb_reserve(skb, NET_SKB_PAD + EDMA_RX_PREHDR_SIZE);
 		skb_put(skb, pkt_len);
 
-		skb->protocol = eth_type_trans(skb, priv->netdev);
-
-		tag_info = skb_ext_add(skb, SKB_EXT_DSA_OOB);
-		if (unlikely(!tag_info)) {
-			dev_kfree_skb_any(skb);
-			goto next;
-		}
-		tag_info->port = src_port;
-
-		dev_sw_netstats_rx_add(priv->netdev, pkt_len);
-		napi_gro_receive(&priv->rx_napi, skb);
+		edma_receive(priv, src_port, skb, &priv->rx_napi);
 
 next:
 		if (++cons == rxdesc_ring->count)
@@ -474,6 +514,36 @@ next:
 	return done;
 }
 
+static void edma_qdx_wake(void *context)
+{
+	struct edma_priv *priv = context;
+	const struct edma_soc_data *soc = priv->soc;
+	u32 prod, cons;
+	int ret;
+
+	spin_lock_bh(&priv->tx_lock);
+	if (qdx_edma_transport(priv->qdx) != QDX_ETH_NATIVE ||
+	    !READ_ONCE(priv->native_ready) || !priv->napi_active ||
+	    !netif_running(priv->netdev) ||
+	    !netif_carrier_ok(priv->netdev))
+		goto out;
+	ret = regmap_read(priv->regmap,
+			  EDMA_REG_TXDESC_PROD_IDX(soc->txdesc_ring), &prod);
+	if (ret)
+		goto out;
+	ret = regmap_read(priv->regmap,
+			  EDMA_REG_TXDESC_CONS_IDX(soc->txdesc_ring), &cons);
+	if (ret)
+		goto out;
+	prod &= EDMA_TXDESC_PROD_IDX_MASK;
+	cons &= EDMA_TXDESC_CONS_IDX_MASK;
+	if (((cons - prod - 1) & (priv->txdesc_ring.count - 1)) >
+	    EDMA_TX_RING_THRESH)
+		netif_wake_queue(priv->netdev);
+out:
+	spin_unlock_bh(&priv->tx_lock);
+}
+
 static int edma_tx_napi(struct napi_struct *napi, int budget)
 {
 	struct edma_priv *priv = container_of(napi, struct edma_priv, tx_napi);
@@ -481,21 +551,7 @@ static int edma_tx_napi(struct napi_struct *napi, int budget)
 	const struct edma_soc_data *soc = priv->soc;
 	u32 val;
 
-	if (priv->netdev && netif_queue_stopped(priv->netdev) &&
-	    netif_carrier_ok(priv->netdev)) {
-		u16 prod, cons, free;
-
-		regmap_read(priv->regmap,
-			    EDMA_REG_TXDESC_PROD_IDX(soc->txdesc_ring), &val);
-		prod = val & EDMA_TXDESC_PROD_IDX_MASK;
-		regmap_read(priv->regmap,
-			    EDMA_REG_TXDESC_CONS_IDX(soc->txdesc_ring), &val);
-		cons = val & EDMA_TXDESC_CONS_IDX_MASK;
-		free = (cons - prod - 1) & (priv->txdesc_ring.count - 1);
-
-		if (free > EDMA_TX_RING_THRESH)
-			netif_wake_queue(priv->netdev);
-	}
+	edma_qdx_wake(priv);
 
 	if (work < budget) {
 		regmap_read(priv->regmap,
@@ -605,6 +661,7 @@ static netdev_tx_t edma_ring_xmit(struct edma_priv *priv, struct net_device *net
 
 	idx = prod & (txdesc_ring->count - 1);
 	if (unlikely(txdesc_ring->skb_store[idx] != NULL)) {
+		skb_pull(skb, EDMA_TX_PREHDR_SIZE);
 		spin_unlock_bh(&priv->tx_lock);
 		return NETDEV_TX_BUSY;
 	}
@@ -622,6 +679,8 @@ static netdev_tx_t edma_ring_xmit(struct edma_priv *priv, struct net_device *net
 		spin_unlock_bh(&priv->tx_lock);
 		return NETDEV_TX_OK;
 	}
+	txdesc_ring->dma_store[idx] = dma;
+	txdesc_ring->length_store[idx] = buf_len + EDMA_TX_PREHDR_SIZE;
 	txdesc->buffer_addr = cpu_to_le32(dma);
 
 	txdesc->word1 = (1 << EDMA_TXDESC_PREHEADER_SHIFT) |
@@ -631,6 +690,7 @@ static netdev_tx_t edma_ring_xmit(struct edma_priv *priv, struct net_device *net
 
 	prod = (prod + 1) & (txdesc_ring->count - 1);
 
+	skb_tx_timestamp(skb);
 	dev_sw_netstats_tx_add(netdev, 1, buf_len);
 	netdev_tx_sent_queue(netdev_get_tx_queue(netdev, 0), buf_len);
 
@@ -671,46 +731,35 @@ static void edma_rx_ring_free(struct edma_priv *priv, struct edma_ring *ring,
 	edma_ring_free(priv, ring, desc_size);
 }
 
-static void edma_txdesc_drain(struct edma_priv *priv, struct edma_ring *txdesc_ring)
+/* Reset/stop has ended native access. Indices omit prefetched TX packets. */
+static void edma_txdesc_drain(struct edma_priv *priv, struct edma_ring *ring)
 {
-	const struct edma_soc_data *soc = priv->soc;
-	struct platform_device *pdev = priv->pdev;
-	struct edma_txdesc *txdesc;
-	struct sk_buff *skb;
-	u16 prod, cons;
-	size_t buf_len;
-	u32 val;
+	u32 bytes = 0, packets = 0;
+	unsigned int i;
 
-	regmap_read(priv->regmap,
-		    EDMA_REG_TXDESC_PROD_IDX(soc->txdesc_ring),
-		    &val);
-	prod = val & EDMA_TXDESC_PROD_IDX_MASK;
+	if (!ring->skb_store)
+		return;
+	for (i = 0; i < ring->count; i++) {
+		struct sk_buff *skb;
+		dma_addr_t dma;
+		u32 length;
 
-	regmap_read(priv->regmap,
-		    EDMA_REG_TXDESC_CONS_IDX(soc->txdesc_ring),
-		    &val);
-	cons = val & EDMA_TXDESC_CONS_IDX_MASK;
-
-	while (cons != prod) {
-		txdesc = EDMA_TXDESC_DESC(txdesc_ring, cons);
-
-		skb = txdesc_ring->skb_store[cons];
-		txdesc_ring->skb_store[cons] = NULL;
-
+		spin_lock_bh(&priv->tx_lock);
+		skb = ring->skb_store[i];
+		dma = ring->dma_store[i];
+		length = ring->length_store[i];
+		ring->skb_store[i] = NULL;
+		ring->length_store[i] = 0;
+		spin_unlock_bh(&priv->tx_lock);
 		if (!skb)
-			goto next;
-
-		buf_len = txdesc->word1 & EDMA_TXDESC_DATA_LENGTH_MASK;
-
-		dma_unmap_single(&pdev->dev,
-				 le32_to_cpu(txdesc->buffer_addr),
-				 buf_len + EDMA_TX_PREHDR_SIZE, DMA_TO_DEVICE);
-
+			continue;
+		dma_unmap_single(&priv->pdev->dev, dma, length, DMA_TO_DEVICE);
+		bytes += length - EDMA_TX_PREHDR_SIZE;
+		packets++;
 		dev_kfree_skb_any(skb);
-next:
-		if (++cons == txdesc_ring->count)
-			cons = 0;
 	}
+	if (packets && priv->netdev)
+		edma_tx_complete(priv, packets, bytes);
 }
 
 static int edma_rings_alloc(struct edma_priv *priv)
@@ -727,12 +776,12 @@ static int edma_rings_alloc(struct edma_priv *priv)
 	if (ret)
 		goto err_txcmpl;
 
-	ret = edma_rx_ring_alloc(priv, &priv->rxfill_ring, EDMA_RX_RING_SIZE,
+	ret = edma_rx_ring_alloc(priv, &priv->rxfill_ring, priv->rx_entries,
 				 sizeof(struct edma_rxfill_desc));
 	if (ret)
 		goto err_rxfill;
 
-	ret = edma_ring_alloc(priv, &priv->rxdesc_ring, EDMA_RX_RING_SIZE,
+	ret = edma_ring_alloc(priv, &priv->rxdesc_ring, priv->rx_entries,
 			      sizeof(struct edma_rxdesc));
 	if (ret)
 		goto err_rxdesc;
@@ -752,7 +801,6 @@ err_txcmpl:
 static void edma_rings_drain(struct edma_priv *priv)
 {
 	edma_txdesc_drain(priv, &priv->txdesc_ring);
-	edma_clean_tx(priv, &priv->txcmpl_ring, INT_MAX);
 
 	edma_tx_ring_free(priv, &priv->txdesc_ring, sizeof(struct edma_txdesc));
 	edma_ring_free(priv, &priv->txcmpl_ring, sizeof(struct edma_txcmpl));
@@ -899,17 +947,25 @@ static void edma_rings_enable(struct edma_priv *priv)
 
 static void edma_hw_stop(struct edma_priv *priv)
 {
+	WRITE_ONCE(priv->native_ready, false);
 	edma_irq_disable_all(priv);
 	edma_rings_disable(priv);
 	regmap_write(priv->regmap, EDMA_REG_PORT_CTRL, 0);
 }
 
-static void edma_hw_reset(struct edma_priv *priv)
+static int edma_hw_reset(struct edma_priv *priv)
 {
-	reset_control_assert(priv->rst);
+	int ret;
+
+	ret = reset_control_assert(priv->rst);
+	if (ret)
+		return ret;
 	udelay(100);
-	reset_control_deassert(priv->rst);
+	ret = reset_control_deassert(priv->rst);
+	if (ret)
+		return ret;
 	udelay(100);
+	return 0;
 }
 
 static int edma_hw_init(struct edma_priv *priv)
@@ -918,7 +974,9 @@ static int edma_hw_init(struct edma_priv *priv)
 	int ret;
 	u32 val;
 
-	edma_hw_reset(priv);
+	ret = edma_hw_reset(priv);
+	if (ret)
+		return ret;
 	edma_hw_stop(priv);
 
 	regmap_write(priv->regmap, EDMA_QID2RID_TABLE_MEM(0),
@@ -963,6 +1021,7 @@ static int edma_hw_init(struct edma_priv *priv)
 		     EDMA_PORT_PAD_EN | EDMA_PORT_EDMA_EN);
 
 	edma_rings_enable(priv);
+	WRITE_ONCE(priv->native_ready, true);
 
 	return 0;
 }
@@ -980,41 +1039,91 @@ static void edma_get_ringparam(struct net_device *netdev,
 			       struct kernel_ethtool_ringparam *kernel_ring,
 			       struct netlink_ext_ack *extack)
 {
+	struct edma_priv *priv = netdev_priv(netdev);
+
 	ring->tx_max_pending = EDMA_TX_RING_SIZE;
-	ring->rx_max_pending = EDMA_RX_RING_SIZE;
-	ring->tx_pending = EDMA_TX_RING_SIZE;
-	ring->rx_pending = EDMA_RX_RING_SIZE;
+	ring->rx_max_pending = EDMA_RX_RING_MAX;
+	ring->tx_pending = priv->txdesc_ring.count;
+	ring->rx_pending = priv->rx_entries;
+}
+
+static void edma_get_strings(struct net_device *netdev, u32 set, u8 *data)
+{
+	if (set == ETH_SS_STATS)
+		ethtool_puts(&data, "nss_transport");
+}
+
+static int edma_get_sset_count(struct net_device *netdev, int set)
+{
+	return set == ETH_SS_STATS ? 1 : -EOPNOTSUPP;
+}
+
+static void edma_get_ethtool_stats(struct net_device *netdev,
+				   struct ethtool_stats *stats, u64 *data)
+{
+	struct edma_priv *priv = netdev_priv(netdev);
+
+	data[0] = qdx_edma_transport(priv->qdx);
+	if (data[0] == QDX_ETH_NATIVE && !READ_ONCE(priv->native_ready))
+		data[0] = QDX_ETH_UNAVAILABLE;
 }
 
 static const struct ethtool_ops edma_ethtool_ops = {
 	.get_drvinfo = edma_get_drvinfo,
 	.get_link = ethtool_op_get_link,
 	.get_ringparam = edma_get_ringparam,
+	.get_strings = edma_get_strings,
+	.get_sset_count = edma_get_sset_count,
+	.get_ethtool_stats = edma_get_ethtool_stats,
 };
 
 static int edma_ndo_open(struct net_device *netdev)
 {
 	struct edma_priv *priv = netdev_priv(netdev);
+	enum qdx_eth_transport transport = qdx_edma_transport(priv->qdx);
 
-	netdev_tx_reset_queue(netdev_get_tx_queue(netdev, 0));
-	napi_enable(&priv->tx_napi);
-	napi_enable(&priv->rx_napi);
-	netif_start_queue(netdev);
-	edma_tx_irq_unmask(priv);
-	edma_rx_irq_unmask(priv);
-
+	if (transport == QDX_ETH_NATIVE && !priv->native_ready)
+		return -EIO;
+	/* Both owners may complete earlier submissions in either live mode. */
+	if (priv->native_ready && !priv->napi_active) {
+		priv->napi_active = true;
+		napi_enable(&priv->tx_napi);
+		napi_enable(&priv->rx_napi);
+		edma_tx_irq_unmask(priv);
+		edma_rx_irq_unmask(priv);
+	}
+	/* Administrative cycles retain outstanding packets and their BQL charges. */
+	if (transport == QDX_ETH_FIRMWARE)
+		netif_start_queue(netdev);
+	else
+		edma_qdx_wake(priv);
 	return 0;
 }
 
 static int edma_ndo_stop(struct net_device *netdev)
 {
 	struct edma_priv *priv = netdev_priv(netdev);
+	bool active;
 
+	spin_lock_bh(&priv->tx_lock);
+	active = priv->napi_active;
+	WRITE_ONCE(priv->napi_active, false);
+	netif_stop_queue(netdev);
+	spin_unlock_bh(&priv->tx_lock);
+	netif_tx_disable(netdev);
+	if (!active)
+		return 0;
 	edma_tx_irq_mask(priv);
 	edma_rx_irq_mask(priv);
-	netif_stop_queue(netdev);
+	synchronize_irq(priv->txcmpl_irq);
+	synchronize_irq(priv->rxfill_irq);
+	synchronize_irq(priv->rxdesc_irq);
 	napi_disable(&priv->tx_napi);
 	napi_disable(&priv->rx_napi);
+	synchronize_net();
+	/* Both poll tails have exited before the final interrupt masks. */
+	edma_tx_irq_mask(priv);
+	edma_rx_irq_mask(priv);
 
 	return 0;
 }
@@ -1028,7 +1137,13 @@ static netdev_tx_t edma_ndo_xmit(struct sk_buff *skb, struct net_device *netdev)
 	netdev_tx_t ret;
 	u32 nhead, ntail;
 
-	if (skb->len < ETH_HLEN)
+	if (qdx_edma_transport(priv->qdx) != QDX_ETH_NATIVE) {
+		struct dsa_oob_tag_info *tag = skb_ext_find(skb, SKB_EXT_DSA_OOB);
+
+		return qdx_ethernet_xmit(priv->qdx, skb, tag ? tag->port : UINT_MAX);
+	}
+
+	if (!READ_ONCE(priv->native_ready) || skb->len < ETH_HLEN)
 		goto drop;
 
 	if (skb_is_nonlinear(skb) && skb_linearize(skb))
@@ -1134,11 +1249,11 @@ static u32 edma_rx_buffer_size(u8 order)
 }
 
 static struct page_pool *edma_page_pool_create(struct edma_priv *priv,
-					       u8 order)
+					       u8 order, u32 entries)
 {
 	struct page_pool_params pp = {
 		.order     = order,
-		.pool_size = EDMA_RX_RING_SIZE,
+		.pool_size = entries,
 		.nid       = NUMA_NO_NODE,
 		.dev       = &priv->pdev->dev,
 		.dma_dir   = DMA_FROM_DEVICE,
@@ -1158,13 +1273,19 @@ static int edma_ndo_change_mtu(struct net_device *netdev, int new_mtu)
 	bool running;
 	int ret;
 
+	if (READ_ONCE(priv->shared)) {
+		WRITE_ONCE(netdev->mtu, new_mtu);
+		return 0;
+	}
+	if (!priv->native_ready)
+		return -EIO;
 	new_order = edma_rx_page_order(new_mtu);
 	if (new_order == priv->rx_page_order) {
 		WRITE_ONCE(netdev->mtu, new_mtu);
 		return 0;
 	}
 
-	new_pool = edma_page_pool_create(priv, new_order);
+	new_pool = edma_page_pool_create(priv, new_order, priv->rx_entries);
 	if (IS_ERR(new_pool))
 		return PTR_ERR(new_pool);
 
@@ -1174,7 +1295,15 @@ static int edma_ndo_change_mtu(struct net_device *netdev, int new_mtu)
 		edma_ndo_stop(netdev);
 	}
 
-	edma_hw_stop(priv);
+	WRITE_ONCE(priv->native_ready, false);
+	ret = reset_control_assert(priv->rst);
+	if (ret) {
+		/* Old descriptors and mappings may still be accessible. */
+		page_pool_destroy(new_pool);
+		netdev_err(netdev, "failed to stop DMA for MTU change: %d\n", ret);
+		return ret;
+	}
+	udelay(100);
 	edma_rings_drain(priv);
 
 	old_pool = priv->page_pool;
@@ -1197,10 +1326,6 @@ static int edma_ndo_change_mtu(struct net_device *netdev, int new_mtu)
 			netdev_err(netdev,
 				   "failed to restore receive buffers after MTU change: %d\n",
 				   restore_ret);
-			if (running) {
-				napi_enable(&priv->tx_napi);
-				napi_enable(&priv->rx_napi);
-			}
 			netif_device_detach(netdev);
 			return restore_ret;
 		}
@@ -1214,6 +1339,283 @@ static int edma_ndo_change_mtu(struct net_device *netdev, int new_mtu)
 
 	return ret;
 }
+
+static int edma_qdx_quiesce(void *context, u32 native_rx_entries)
+{
+	struct edma_priv *priv = context;
+	const struct edma_soc_data *soc = priv->soc;
+	struct page_pool *pool = NULL;
+	u8 order = edma_rx_page_order(EDMA_MAX_MTU);
+	int ret;
+
+	if (native_rx_entries < 2 || native_rx_entries > EDMA_RX_RING_MAX ||
+	    !is_power_of_2(native_rx_entries)) {
+		dev_err(&priv->pdev->dev, "invalid native_rx_entries: %u\n",
+			native_rx_entries);
+		return -EINVAL;
+	}
+	if (priv->shared)
+		return -EBUSY;
+	if (priv->rx_page_order < order || priv->rx_entries != native_rx_entries) {
+		pool = edma_page_pool_create(priv, order, native_rx_entries);
+		if (IS_ERR(pool))
+			return PTR_ERR(pool);
+	}
+
+	netif_tx_disable(priv->netdev);
+	edma_ndo_stop(priv->netdev);
+	synchronize_irq(priv->txcmpl_irq);
+	synchronize_irq(priv->rxfill_irq);
+	synchronize_irq(priv->rxdesc_irq);
+	WRITE_ONCE(priv->native_ready, false);
+	if (pool) {
+		/* NSS is still held: a reset may safely end old native DMA here. */
+		ret = reset_control_assert(priv->rst);
+		if (ret) {
+			page_pool_destroy(pool);
+			return ret;
+		}
+		udelay(100);
+		edma_rings_drain(priv);
+		page_pool_destroy(priv->page_pool);
+		priv->page_pool = pool;
+		priv->rx_entries = native_rx_entries;
+		priv->rx_page_order = order;
+		priv->rx_buffer_size = edma_rx_buffer_size(order);
+		ret = edma_hw_init(priv);
+		if (ret)
+			return ret;
+		netdev_tx_reset_queue(netdev_get_tx_queue(priv->netdev, 0));
+		WRITE_ONCE(priv->native_ready, false);
+	}
+
+	ret = regmap_clear_bits(priv->regmap,
+			EDMA_REG_TXDESC_CTRL(soc->txdesc_ring), EDMA_TXDESC_TX_EN);
+	if (ret)
+		return ret;
+	ret = regmap_clear_bits(priv->regmap,
+			EDMA_REG_RXDESC_CTRL(soc->rxdesc_ring), EDMA_RXDESC_RX_EN);
+	if (ret)
+		return ret;
+	ret = regmap_clear_bits(priv->regmap,
+			EDMA_REG_RXFILL_RING_EN(soc->rxfill_ring), EDMA_RXFILL_RING_EN);
+	if (ret)
+		return ret;
+	ret = regmap_set_bits(priv->regmap, EDMA_REG_PORT_CTRL,
+			      EDMA_PORT_EDMA_EN | EDMA_PORT_PAD_EN);
+	if (!ret)
+		WRITE_ONCE(priv->shared, true);
+	return ret;
+}
+
+static int edma_qdx_resume_shared(void *context)
+{
+	struct edma_priv *priv = context;
+	const struct edma_soc_data *soc = priv->soc;
+	u32 values[4], route, shift, expected;
+	int ret;
+
+	if (!priv->shared || priv->native_ready ||
+	    !priv->txdesc_ring.desc || !priv->txcmpl_ring.desc ||
+	    !priv->rxfill_ring.desc || !priv->rxdesc_ring.desc)
+		return -EINVAL;
+
+	/* Each block is base, producer, consumer, size. Never reset an index. */
+	ret = regmap_bulk_read(priv->regmap, EDMA_REG_TXDESC_BA(soc->txdesc_ring),
+			       values, ARRAY_SIZE(values));
+	if (ret)
+		return ret;
+	if (values[0] != lower_32_bits(priv->txdesc_ring.dma) ||
+	    (values[1] & EDMA_TXDESC_PROD_IDX_MASK) >= priv->txdesc_ring.count ||
+	    (values[2] & EDMA_TXDESC_CONS_IDX_MASK) >= priv->txdesc_ring.count ||
+	    (values[3] & EDMA_TXDESC_RING_SIZE_MASK) != priv->txdesc_ring.count)
+		return -EIO;
+
+	ret = regmap_bulk_read(priv->regmap,
+			       EDMA_REG_TXCMPL_BA(soc->txcmpl_base, soc->txcmpl_ring),
+			       values, ARRAY_SIZE(values));
+	if (ret)
+		return ret;
+	if (values[0] != lower_32_bits(priv->txcmpl_ring.dma) ||
+	    (values[1] & EDMA_TXCMPL_PROD_IDX_MASK) >= priv->txcmpl_ring.count ||
+	    (values[2] & EDMA_TXCMPL_CONS_IDX_MASK) >= priv->txcmpl_ring.count ||
+	    (values[3] & EDMA_TXDESC_RING_SIZE_MASK) != priv->txcmpl_ring.count)
+		return -EIO;
+
+	ret = regmap_bulk_read(priv->regmap, EDMA_REG_RXFILL_BA(soc->rxfill_ring),
+			       values, ARRAY_SIZE(values));
+	if (ret)
+		return ret;
+	if (values[0] != lower_32_bits(priv->rxfill_ring.dma) ||
+	    (values[1] & EDMA_RXFILL_PROD_IDX_MASK) >= priv->rxfill_ring.count ||
+	    (values[2] & EDMA_RXFILL_CONS_IDX_MASK) >= priv->rxfill_ring.count ||
+	    (values[3] & EDMA_RXFILL_RING_SIZE_MASK) != priv->rxfill_ring.count)
+		return -EIO;
+
+	ret = regmap_bulk_read(priv->regmap, EDMA_REG_RXDESC_BA(soc->rxdesc_ring),
+			       values, ARRAY_SIZE(values));
+	if (ret)
+		return ret;
+	expected = priv->rxdesc_ring.count |
+		   (EDMA_RX_PREHDR_SIZE << EDMA_RXDESC_PL_OFFSET_SHIFT);
+	if (values[0] != lower_32_bits(priv->rxdesc_ring.dma) ||
+	    (values[1] & EDMA_RXDESC_PROD_IDX_MASK) >= priv->rxdesc_ring.count ||
+	    (values[2] & EDMA_RXDESC_CONS_IDX_MASK) >= priv->rxdesc_ring.count ||
+	    (values[3] & (EDMA_RXDESC_RING_SIZE_MASK |
+			  (EDMA_RXDESC_PL_OFFSET_MASK << EDMA_RXDESC_PL_OFFSET_SHIFT))) !=
+	    expected)
+		return -EIO;
+
+	ret = regmap_read(priv->regmap, EDMA_QID2RID_TABLE_MEM(0), &route);
+	if (ret)
+		return ret;
+	route &= EDMA_QID2RID_QUEUE0_MASK;
+	if (route == soc->rxdesc_ring)
+		return -EIO;
+	priv->firmware_rx_ring = route;
+
+	shift = (soc->txdesc_ring % EDMA_RING_MAP_ENTRIES) * EDMA_RING_MAP_BITS;
+	ret = regmap_update_bits(priv->regmap,
+			EDMA_REG_TXDESC2CMPL_MAP(soc->txdesc_ring / EDMA_RING_MAP_ENTRIES),
+			EDMA_RING_MAP_MASK << shift, soc->txcmpl_ring << shift);
+	if (ret)
+		return ret;
+	shift = (soc->rxdesc_ring % EDMA_RING_MAP_ENTRIES) * EDMA_RING_MAP_BITS;
+	ret = regmap_update_bits(priv->regmap,
+			EDMA_REG_RXDESC2FILL_MAP_0 +
+			4 * (soc->rxdesc_ring / EDMA_RING_MAP_ENTRIES),
+			EDMA_RING_MAP_MASK << shift, soc->rxfill_ring << shift);
+	if (ret)
+		return ret;
+	ret = regmap_set_bits(priv->regmap,
+			      EDMA_REG_TXDESC_CTRL(soc->txdesc_ring), EDMA_TXDESC_TX_EN);
+	if (ret)
+		return ret;
+	ret = regmap_set_bits(priv->regmap,
+			      EDMA_REG_RXFILL_RING_EN(soc->rxfill_ring), EDMA_RXFILL_RING_EN);
+	if (ret)
+		return ret;
+	ret = regmap_set_bits(priv->regmap,
+			      EDMA_REG_RXDESC_CTRL(soc->rxdesc_ring), EDMA_RXDESC_RX_EN);
+	if (ret)
+		return ret;
+	if (netif_running(priv->netdev)) {
+		napi_enable(&priv->tx_napi);
+		napi_enable(&priv->rx_napi);
+		priv->napi_active = true;
+		ret = regmap_write(priv->regmap,
+			EDMA_REG_TX_INT_MASK(soc->tx_int_base, soc->txcmpl_ring),
+			EDMA_TX_INT_MASK);
+		if (!ret)
+			ret = regmap_write(priv->regmap,
+				EDMA_REG_RXFILL_INT_MASK(soc->rxfill_ring),
+				EDMA_RXFILL_INT_MASK);
+		if (!ret)
+			ret = regmap_write(priv->regmap,
+				EDMA_REG_RXDESC_INT_MASK(soc->rxdesc_ring),
+				EDMA_RXDESC_INT_MASK_PKT_INT);
+		if (ret) {
+			edma_ndo_stop(priv->netdev);
+			return ret;
+		}
+	}
+	WRITE_ONCE(priv->native_ready, true);
+	return 0;
+}
+
+static int edma_qdx_select(void *context, enum qdx_eth_transport transport)
+{
+	struct edma_priv *priv = context;
+	u32 route, value;
+	int ret;
+
+	if (!priv->shared || !priv->native_ready)
+		return -EIO;
+	if (transport == QDX_ETH_NATIVE)
+		route = priv->soc->rxdesc_ring;
+	else if (transport == QDX_ETH_FIRMWARE)
+		route = priv->firmware_rx_ring;
+	else
+		return -EINVAL;
+
+	ret = regmap_update_bits(priv->regmap, EDMA_QID2RID_TABLE_MEM(0),
+				 EDMA_QID2RID_QUEUE0_MASK, route);
+	if (ret)
+		return ret;
+	ret = regmap_read(priv->regmap, EDMA_QID2RID_TABLE_MEM(0), &value);
+	if (ret)
+		return ret;
+	return (value & EDMA_QID2RID_QUEUE0_MASK) == route ? 0 : -EIO;
+}
+
+static int edma_qdx_restore(void *context)
+{
+	struct edma_priv *priv = context;
+	struct page_pool *pool;
+	u8 order = edma_rx_page_order(priv->netdev->mtu);
+	int ret;
+
+	WRITE_ONCE(priv->native_ready, false);
+	netif_tx_disable(priv->netdev);
+	edma_ndo_stop(priv->netdev);
+	ret = reset_control_assert(priv->rst);
+	if (ret)
+		return ret;
+	udelay(100);
+	edma_rings_drain(priv);
+	page_pool_destroy(priv->page_pool);
+	priv->page_pool = NULL;
+	pool = edma_page_pool_create(priv, order, priv->rx_entries);
+	if (IS_ERR(pool))
+		return PTR_ERR(pool);
+	priv->page_pool = pool;
+	priv->rx_page_order = order;
+	priv->rx_buffer_size = edma_rx_buffer_size(order);
+	ret = edma_hw_init(priv);
+	if (ret)
+		return ret;
+	WRITE_ONCE(priv->shared, false);
+	return 0;
+}
+
+static int edma_qdx_activate(void *context)
+{
+	struct edma_priv *priv = context;
+	const struct edma_soc_data *soc = priv->soc;
+	int ret;
+
+	netdev_tx_reset_queue(netdev_get_tx_queue(priv->netdev, 0));
+	if (!netif_running(priv->netdev))
+		return 0;
+	napi_enable(&priv->tx_napi);
+	napi_enable(&priv->rx_napi);
+	priv->napi_active = true;
+	ret = regmap_write(priv->regmap,
+		EDMA_REG_TX_INT_MASK(soc->tx_int_base, soc->txcmpl_ring), EDMA_TX_INT_MASK);
+	if (!ret)
+		ret = regmap_write(priv->regmap,
+			EDMA_REG_RXFILL_INT_MASK(soc->rxfill_ring),
+				EDMA_RXFILL_INT_MASK);
+	if (!ret)
+		ret = regmap_write(priv->regmap, EDMA_REG_RXDESC_INT_MASK(soc->rxdesc_ring),
+			EDMA_RXDESC_INT_MASK_PKT_INT);
+	if (ret) {
+		edma_ndo_stop(priv->netdev);
+		WRITE_ONCE(priv->native_ready, false);
+	}
+	return ret;
+}
+
+static const struct qdx_edma_ops edma_qdx_ops = {
+	.activate = edma_qdx_activate,
+	.quiesce = edma_qdx_quiesce,
+	.resume_shared = edma_qdx_resume_shared,
+	.select = edma_qdx_select,
+	.wake = edma_qdx_wake,
+	.complete_tx = edma_tx_complete,
+	.restore = edma_qdx_restore,
+	.receive = edma_receive,
+};
 
 static const struct regmap_config edma_regmap_cfg = {
 	.reg_bits = 32,
@@ -1296,6 +1698,8 @@ static int edma_probe(struct platform_device *pdev)
 	priv->regmap = regmap;
 	priv->rst = rst;
 	spin_lock_init(&priv->tx_lock);
+	spin_lock_init(&priv->completion_lock);
+	priv->rx_entries = EDMA_RX_RING_SIZE;
 	priv->pdev = pdev;
 	priv->soc = device_get_match_data(dev);
 
@@ -1307,7 +1711,8 @@ static int edma_probe(struct platform_device *pdev)
 
 	priv->rx_page_order = edma_rx_page_order(netdev->mtu);
 	priv->rx_buffer_size = edma_rx_buffer_size(priv->rx_page_order);
-	priv->page_pool = edma_page_pool_create(priv, priv->rx_page_order);
+	priv->page_pool = edma_page_pool_create(priv, priv->rx_page_order,
+					       priv->rx_entries);
 	if (IS_ERR(priv->page_pool))
 		return PTR_ERR(priv->page_pool);
 
@@ -1349,7 +1754,24 @@ static int edma_probe(struct platform_device *pdev)
 		dev_warn(dev, "failed to enable threaded NAPI: %d\n", ret);
 
 	platform_set_drvdata(pdev, priv);
+	if (of_device_is_compatible(dev->of_node, "qualcomm,ipq8074-edma")) {
+		struct qdx_edma_info info = {
+			.dev = dev,
+			.conduit = netdev,
+			.ops = &edma_qdx_ops,
+			.context = priv,
+			.max_frame = EDMA_MAX_FRAME_SIZE,
+			.tx_min_size = priv->soc->tx_min_size,
+		};
 
+		priv->qdx = qdx_edma_attach(&info);
+		if (IS_ERR(priv->qdx)) {
+			ret = PTR_ERR(priv->qdx);
+			priv->qdx = NULL;
+			unregister_netdev(netdev);
+			goto err_irq;
+		}
+	}
 	return 0;
 
 err_irq:
@@ -1366,6 +1788,8 @@ static void edma_remove(struct platform_device *pdev)
 {
 	struct edma_priv *priv = platform_get_drvdata(pdev);
 
+	qdx_edma_detach(priv->qdx);
+	priv->qdx = NULL;
 	unregister_netdev(priv->netdev);
 	netif_napi_del(&priv->tx_napi);
 	netif_napi_del(&priv->rx_napi);

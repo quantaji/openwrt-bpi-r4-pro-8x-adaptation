@@ -1,0 +1,102 @@
+Subject: [PATCH] net: phylink: balance late PCS notifier lifetime
+
+The late-PCS notifier remains registered after phylink destruction and
+is published before the instance is fully initialized. Register at the
+successful end of initialization, handle registration failure and remove
+the subscription before destroying the instance.
+
+This follows the existing OpenWrt patch 737-05, originally by Christian
+Marangi <ansuelsmth@gmail.com>, commit
+684e49a015f2c5ae95ba968bb21ffc8fc36a2c7f (2025-04-06),
+"net: phylink: support late PCS provider attach". That external patch and
+its provenance are unchanged. This local follow-up is not an upstream patch.
+
+Signed-off-by: Codex <codex@openai.com>
+
+--- a/drivers/net/pcs/pcs.c
++++ b/drivers/net/pcs/pcs.c
+@@ -30,6 +30,12 @@
+ }
+ EXPORT_SYMBOL_GPL(register_fwnode_pcs_notifier);
+ 
++int unregister_fwnode_pcs_notifier(struct notifier_block *nb)
++{
++	return blocking_notifier_chain_unregister(&fwnode_pcs_notify_list, nb);
++}
++EXPORT_SYMBOL_GPL(unregister_fwnode_pcs_notifier);
++
+ struct phylink_pcs *fwnode_pcs_simple_get(struct fwnode_reference_args *pcsspec,
+ 					  void *data)
+ {
+--- a/drivers/net/phy/phylink.c
++++ b/drivers/net/phy/phylink.c
+@@ -2103,11 +2103,6 @@
+ 				 pl->supported_interfaces,
+ 				 pcs->supported_interfaces);
+ 
+-	if (!phy_interface_empty(config->pcs_interfaces)) {
+-		pl->fwnode_pcs_nb.notifier_call = pcs_provider_notify;
+-		register_fwnode_pcs_notifier(&pl->fwnode_pcs_nb);
+-	}
+-
+ 	pl->config = config;
+ 	if (config->type == PHYLINK_NETDEV) {
+ 		pl->netdev = to_net_dev(config->dev);
+@@ -2164,6 +2159,17 @@
+ 	if (ret < 0)
+ 		goto release_link_gpio;
+ 
++	/* Publish only the fully initialized instance to provider callbacks. */
++	if (IS_ENABLED(CONFIG_FWNODE_PCS) &&
++	    !phy_interface_empty(config->pcs_interfaces)) {
++		pl->fwnode_pcs_nb.notifier_call = pcs_provider_notify;
++		ret = register_fwnode_pcs_notifier(&pl->fwnode_pcs_nb);
++		if (ret) {
++			sfp_bus_del_upstream(pl->sfp_bus);
++			goto release_link_gpio;
++		}
++	}
++
+ 	return pl;
+ 
+ release_link_gpio:
+@@ -2188,6 +2194,9 @@
+ {
+ 	struct phylink_pcs *pcs, *tmp;
+ 
++	if (pl->fwnode_pcs_nb.notifier_call)
++		unregister_fwnode_pcs_notifier(&pl->fwnode_pcs_nb);
++
+ 	sfp_bus_del_upstream(pl->sfp_bus);
+ 	if (pl->link_gpio)
+ 		gpiod_put(pl->link_gpio);
+--- a/include/linux/pcs/pcs.h
++++ b/include/linux/pcs/pcs.h
+@@ -23,6 +23,15 @@
+ int register_fwnode_pcs_notifier(struct notifier_block *nb);
+ 
+ /**
++ * unregister_fwnode_pcs_notifier - Remove a PCS event subscription
++ * @nb: notifier block previously registered for PCS events
++ *
++ * Waits for active callbacks. The caller must not hold RTNL.
++ * Returns: zero on success or a negative error.
++ */
++int unregister_fwnode_pcs_notifier(struct notifier_block *nb);
++
++/**
+  * fwnode_pcs_get - Retrieves a PCS from a firmware node
+  * @fwnode: firmware node
+  * @index: index fwnode PCS handle in firmware node
+@@ -79,6 +88,11 @@
+ {
+ 	return -EOPNOTSUPP;
+ }
++
++static inline int unregister_fwnode_pcs_notifier(struct notifier_block *nb)
++{
++	return -EOPNOTSUPP;
++}
+ 
+ static inline struct phylink_pcs *fwnode_pcs_get(struct fwnode_handle *fwnode,
+ 						 int index)

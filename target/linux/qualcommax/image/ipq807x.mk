@@ -191,6 +191,9 @@ ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),)
 endif
 	DEVICE_PACKAGES := \
 		ipq-wifi-buffalo_wxr-5950ax12 \
+		kmod-qdx-drv \
+		kmod-qca-edma \
+		kmod-qca-ppe \
 		dumpimage \
 		fdt-utils
 endef

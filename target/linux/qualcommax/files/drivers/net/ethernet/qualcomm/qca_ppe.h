@@ -5,6 +5,8 @@
 
 #include <linux/bitfield.h>
 #include <linux/bitmap.h>
+#include <linux/mutex.h>
+#include <linux/qdx.h>
 #include <linux/regmap.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
@@ -510,7 +512,27 @@ struct qca_ppe_vlan_entry {
 /* Defined beside the MIB table that dimensions it. */
 struct qca_ppe_mib_stats;
 
+/* Latest native configuration, retained across NSS terminal recovery. */
+struct qca_ppe_port_config {
+	struct mutex lock;
+	unsigned int mode;
+	phy_interface_t interface;
+	int speed;
+	int duplex;
+	int mtu;
+	u32 vsi;
+	bool tx_pause;
+	bool rx_pause;
+	bool admin;
+	bool link;
+	bool reset_pending;
+	bool prepared;
+	int config_error;
+};
+
 struct qca_ppe_priv {
+	struct qdx_ppe *qdx;
+	struct qca_ppe_port_config port_config[QCA_PPE_MAX_PORTS];
 	struct dsa_switch ds;
 	struct regmap *regmap;
 	const struct ppe_data *data;

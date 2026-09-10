@@ -11,6 +11,7 @@
 #include <linux/if_vlan.h>
 #include <linux/netdevice.h>
 #include <linux/platform_device.h>
+#include <linux/qdx.h>
 #include <net/page_pool/helpers.h>
 
 #define EDMA_HW_RESET_ID "edma_rst"
@@ -128,6 +129,10 @@
 
 /* QID to ring mapping */
 #define EDMA_QID2RID_TABLE_MEM(q) (0x5a000 + (0x4 * (q)))
+#define EDMA_QID2RID_QUEUE0_MASK GENMASK(3, 0)
+#define EDMA_RING_MAP_MASK 0x7
+#define EDMA_RING_MAP_BITS 3
+#define EDMA_RING_MAP_ENTRIES 10
 
 /* TXDESC to TXCMPL ring mapping */
 #define EDMA_REG_TXDESC2CMPL_MAP(n) (0x0c + 0x4 * (n))
@@ -150,6 +155,8 @@
 #define EDMA_TX_PREHDR_SIZE (sizeof(struct edma_tx_preheader))
 #define EDMA_TX_RING_SIZE 128
 #define EDMA_RX_RING_SIZE 2048
+/* Indices wrap with count - 1; the 16-bit size excludes 65536. */
+#define EDMA_RX_RING_MAX BIT(15)
 #define EDMA_TX_RING_THRESH 16
 
 /* Descriptor accessors */
@@ -234,10 +241,18 @@ struct edma_ring {
 	dma_addr_t dma;
 	u16 count;
 	struct sk_buff **skb_store;
+	dma_addr_t *dma_store;
+	u32 *length_store;
 	struct page **page_store;
 };
 
 struct edma_priv {
+	struct qdx_edma *qdx;
+	bool napi_active;
+	bool native_ready;
+	bool shared;
+	u8 firmware_rx_ring;
+	u32 rx_entries;
 	const struct edma_soc_data *soc;
 	struct napi_struct tx_napi;
 	struct napi_struct rx_napi;
@@ -255,6 +270,7 @@ struct edma_priv {
 	struct edma_ring rxdesc_ring;
 
 	spinlock_t tx_lock;
+	spinlock_t completion_lock;
 
 	int txcmpl_irq;
 	int rxfill_irq;

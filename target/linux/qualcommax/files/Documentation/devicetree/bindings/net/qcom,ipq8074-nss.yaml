@@ -1,0 +1,172 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/qcom,ipq8074-nss.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm IPQ8074 Network Subsystem
+
+maintainers:
+  - Codex
+
+description: |
+  IPQ8074 has two NSS processors sharing access to the Ethernet datapath.
+  Each processor has its own control registers, instruction memory,
+  interrupts and host mailbox channels. A single reserved memory region
+  contains the two firmware image and heap windows. Ethernet DMA and PPE
+  remain separate devices whose drivers coordinate their shared hardware.
+
+properties:
+  compatible:
+    const: qcom,ipq8074-nss
+
+  reg:
+    items:
+      - description: Core 0 control and interrupt registers
+      - description: Core 1 control and interrupt registers
+      - description: Core 0 instruction memory
+      - description: Core 1 instruction memory
+
+  reg-names:
+    items:
+      - const: csm0
+      - const: csm1
+      - const: imem0
+      - const: imem1
+
+  memory-region:
+    maxItems: 1
+    description: |
+      Reserved, no-map 16 MiB region at 0x40000000. Core 0 uses its lower
+      8 MiB and core 1 its upper 8 MiB for firmware and reserved heap.
+
+  npu-supply:
+    description: Regulator supplying both NSS processor cores
+
+  qcom,edma:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Ethernet DMA engine sharing physical packet transport
+
+  qcom,ppe:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: PPE switch sharing physical Ethernet ports
+
+  interrupts:
+    minItems: 20
+    maxItems: 20
+
+  interrupt-names:
+    items:
+      - const: empty-buffer0
+      - const: empty-return0
+      - const: tx-unblocked0
+      - const: data0-0
+      - const: data0-1
+      - const: data0-2
+      - const: data0-3
+      - const: coredump0
+      - const: paged-buffer0
+      - const: profile0
+      - const: empty-buffer1
+      - const: empty-return1
+      - const: tx-unblocked1
+      - const: data1-0
+      - const: data1-1
+      - const: data1-2
+      - const: data1-3
+      - const: coredump1
+      - const: paged-buffer1
+      - const: profile1
+
+  clocks:
+    minItems: 27
+    maxItems: 27
+
+  clock-names:
+    items:
+      - const: noc
+      - const: ptp-ref
+      - const: csr
+      - const: cfg
+      - const: imem
+      - const: qosgen
+      - const: mem-noc
+      - const: snoc
+      - const: timeout
+      - const: ce-axi
+      - const: ce-apb
+      - const: noc-ce-axi
+      - const: noc-ce-apb
+      - const: crypto
+      - const: noc-crypto
+      - const: core0
+      - const: noc-ahb0
+      - const: ahb0
+      - const: axi0
+      - const: mpt0
+      - const: nc-axi0
+      - const: core1
+      - const: noc-ahb1
+      - const: ahb1
+      - const: axi1
+      - const: mpt1
+      - const: nc-axi1
+
+  resets:
+    minItems: 16
+    maxItems: 16
+
+  reset-names:
+    items:
+      - const: clkrst0
+      - const: axi0
+      - const: ahb0
+      - const: nc-axi0
+      - const: core0
+      - const: clkrst1
+      - const: axi1
+      - const: ahb1
+      - const: nc-axi1
+      - const: core1
+      - const: ce-axi
+      - const: ce-apb
+      - const: noc-ce-axi
+      - const: noc-ce-apb
+      - const: crypto
+      - const: noc-crypto
+
+  mboxes:
+    minItems: 10
+    maxItems: 10
+
+  mbox-names:
+    items:
+      - const: empty0
+      - const: command0
+      - const: unblocked0
+      - const: coredump0
+      - const: paged0
+      - const: empty1
+      - const: command1
+      - const: unblocked1
+      - const: coredump1
+      - const: paged1
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - memory-region
+  - npu-supply
+  - qcom,edma
+  - qcom,ppe
+  - interrupts
+  - interrupt-names
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+  - mboxes
+  - mbox-names
+
+additionalProperties: false

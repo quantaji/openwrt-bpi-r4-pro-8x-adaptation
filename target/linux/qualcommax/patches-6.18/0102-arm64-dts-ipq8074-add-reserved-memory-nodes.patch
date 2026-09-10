@@ -13,9 +13,14 @@ This is their default layout meant for devices with 1GB of RAM, but
 devices with lower ammounts can override the Q6 node.
 
 Signed-off-by: Robert Marko <robimarko@gmail.com>
+
+QDX adaptation: label the existing NSS reservation so the hardware node
+can reference it without creating another overlapping region.
+
+Signed-off-by: Codex
 ---
- arch/arm64/boot/dts/qcom/ipq8074.dtsi | 35 +++++++++++++++++++++++++++
- 1 file changed, 35 insertions(+)
+ arch/arm64/boot/dts/qcom/ipq8074.dtsi | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
 
 --- a/arch/arm64/boot/dts/qcom/ipq8074.dtsi
 +++ b/arch/arm64/boot/dts/qcom/ipq8074.dtsi
@@ -23,7 +28,7 @@ Signed-off-by: Robert Marko <robimarko@gmail.com>
  		#size-cells = <2>;
  		ranges;
  
-+		nss@40000000 {
++		nss_region: nss@40000000 {
 +			no-map;
 +			reg = <0x0 0x40000000 0x0 0x01000000>;
 +		};

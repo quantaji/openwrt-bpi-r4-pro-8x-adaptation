@@ -19,23 +19,15 @@ Add a new tagging protocol based on SKB extensions to convey the
 information about the destination port to the MAC driver
 
 Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
----
- Documentation/networking/dsa/dsa.rst | 13 +++++++-
- MAINTAINERS                          |  1 +
- include/linux/dsa/oob.h              | 16 +++++++++
- include/linux/skbuff.h               |  3 ++
- include/net/dsa.h                    |  2 ++
- net/core/skbuff.c                    | 10 ++++++
- net/dsa/Kconfig                      |  9 +++++
- net/dsa/Makefile                     |  1 +
- net/dsa/tag_oob.c                    | 49 ++++++++++++++++++++++++++++
- 9 files changed, 103 insertions(+), 1 deletion(-)
- create mode 100644 include/linux/dsa/oob.h
- create mode 100644 net/dsa/tag_oob.c
 
+QDX modification: check OOB extension allocation before storing the selected
+port. Returning NULL preserves the existing DSA caller's skb drop contract.
+
+Signed-off-by: Codex
+---
 --- a/Documentation/networking/dsa/dsa.rst
 +++ b/Documentation/networking/dsa/dsa.rst
-@@ -70,7 +70,8 @@ Switch tagging protocols
+@@ -70,7 +70,8 @@
  ------------------------
  
  DSA supports many vendor-specific tagging protocols, one software-defined
@@ -45,7 +37,7 @@ Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
  
  The exact format of the tag protocol is vendor specific, but in general, they
  all contain something which:
-@@ -221,6 +222,16 @@ receive all frames regardless of the val
+@@ -221,6 +222,16 @@
  setting the ``promisc_on_conduit`` property of the ``struct dsa_device_ops``.
  Note that this assumes a DSA-unaware conduit driver, which is the norm.
  
@@ -62,7 +54,7 @@ Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
  Conduit network devices
  -----------------------
  
---- /dev/null
+--- a/include/linux/dsa/oob.h
 +++ b/include/linux/dsa/oob.h
 @@ -0,0 +1,16 @@
 +/* SPDX-License-Identifier: GPL-2.0-only
@@ -83,7 +75,7 @@ Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
 +#endif
 --- a/include/linux/skbuff.h
 +++ b/include/linux/skbuff.h
-@@ -4920,6 +4920,9 @@ enum skb_ext_id {
+@@ -4920,6 +4920,9 @@
  #if IS_ENABLED(CONFIG_INET_PSP)
  	SKB_EXT_PSP,
  #endif
@@ -95,7 +87,7 @@ Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
  
 --- a/include/net/dsa.h
 +++ b/include/net/dsa.h
-@@ -57,6 +57,7 @@ struct tc_action;
+@@ -57,6 +57,7 @@
  #define DSA_TAG_PROTO_BRCM_LEGACY_FCS_VALUE	29
  #define DSA_TAG_PROTO_MXL862_VALUE		30
  #define DSA_TAG_PROTO_MXL862_8021Q_VALUE	31
@@ -103,7 +95,7 @@ Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
  
  enum dsa_tag_protocol {
  	DSA_TAG_PROTO_NONE		= DSA_TAG_PROTO_NONE_VALUE,
-@@ -91,6 +92,7 @@ enum dsa_tag_protocol {
+@@ -91,6 +92,7 @@
  	DSA_TAG_PROTO_VSC73XX_8021Q	= DSA_TAG_PROTO_VSC73XX_8021Q_VALUE,
  	DSA_TAG_PROTO_MXL862		= DSA_TAG_PROTO_MXL862_VALUE,
  	DSA_TAG_PROTO_MXL862_8021Q	= DSA_TAG_PROTO_MXL862_8021Q_VALUE,
@@ -126,7 +118,7 @@ Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
  #include <net/dst.h>
  #include <net/sock.h>
  #include <net/checksum.h>
-@@ -5118,6 +5122,9 @@ static const u8 skb_ext_type_len[] = {
+@@ -5118,6 +5122,9 @@
  #if IS_ENABLED(CONFIG_INET_PSP)
  	[SKB_EXT_PSP] = SKB_EXT_CHUNKSIZEOF(struct psp_skb_ext),
  #endif
@@ -138,7 +130,7 @@ Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
  static __always_inline unsigned int skb_ext_total_length(void)
 --- a/net/dsa/Kconfig
 +++ b/net/dsa/Kconfig
-@@ -145,6 +145,15 @@ config NET_DSA_TAG_OCELOT_8021Q
+@@ -145,6 +145,15 @@
  	  this mode, less TCAM resources (VCAP IS1, IS2, ES0) are available for
  	  use with tc-flower.
  
@@ -156,7 +148,7 @@ Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
  	help
 --- a/net/dsa/Makefile
 +++ b/net/dsa/Makefile
-@@ -33,6 +33,7 @@ obj-$(CONFIG_NET_DSA_TAG_MXL_862XX_8021Q
+@@ -33,6 +33,7 @@
  obj-$(CONFIG_NET_DSA_TAG_NONE) += tag_none.o
  obj-$(CONFIG_NET_DSA_TAG_OCELOT) += tag_ocelot.o
  obj-$(CONFIG_NET_DSA_TAG_OCELOT_8021Q) += tag_ocelot_8021q.o
@@ -164,9 +156,9 @@ Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
  obj-$(CONFIG_NET_DSA_TAG_QCA) += tag_qca.o
  obj-$(CONFIG_NET_DSA_TAG_RTL4_A) += tag_rtl4_a.o
  obj-$(CONFIG_NET_DSA_TAG_RTL8_4) += tag_rtl8_4.o
---- /dev/null
+--- a/net/dsa/tag_oob.c
 +++ b/net/dsa/tag_oob.c
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,54 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +
 +/* Copyright (c) 2022, Maxime Chevallier <maxime.chevallier@bootlin.com> */
@@ -184,6 +176,9 @@ Signed-off-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
 +{
 +	struct dsa_oob_tag_info *tag_info = skb_ext_add(skb, SKB_EXT_DSA_OOB);
 +	struct dsa_port *dp = dsa_user_to_port(dev);
++
++	if (!tag_info)
++		return NULL;
 +
 +	tag_info->port = dp->index;
 +
